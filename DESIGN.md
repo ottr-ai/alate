@@ -192,7 +192,7 @@ Inline row of cells divided by 1px ink borders. Checked cell: ink fill, paper te
 White `--sheet` surface, max-width 76rem, top edge 2px ink while editing with hairline side edges. Inside: headline, mono meta line, serif lede, then ruled sections. This is the only "card" the world has, and it spans the column.
 
 ### Proof Margin (signature component)
-A 15rem column beside the editor. Each mark: 2px red left border, 600-weight red serif text naming the change, then a mono quote of the old text prefixed `was: `. Marks align to changed lines via absolute `top`; they animate 150ms ease-out. This margin is the memorable moment — the owner reads the push before making it.
+A 15rem column beside the editor. Each mark: 2px red left border, 600-weight red serif text naming the change, then a mono quote of the old text prefixed `was: `. Marks align to changed lines via absolute `top`; they animate 150ms ease-out. This margin is the memorable moment — the user reads the push before making it.
 
 ### Editor (backdrop + textarea stack)
 Transparent textarea stacked over a backdrop that draws line numbers (`tabular-nums`, gutter 3.6em) and per-line change bands. Identical metrics keep the layers aligned: mono 0.8125rem / 1.75, tab-size 4, pre-wrap. Caret is red — the pen, not the error.

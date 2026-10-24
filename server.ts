@@ -233,7 +233,7 @@ app.post('/provision', {
 // Dashboard (folded from the former standalone dashboard server): static UI, inventory state, import API.
 let dashState = loadState(db)
 
-// Dev-only allowance so impeccable live mode can load. Guarded by ALATE_LIVE;
+// Dev-only allowance so a live-reload dev server can load. Guarded by ALATE_LIVE;
 // production builds never set it, so the served CSP stays unchanged.
 const liveDev = process.env.ALATE_LIVE ? " http://localhost:8400" : ""
 const DASH_HEADERS = {
@@ -351,8 +351,8 @@ app.get('/api/updates', {
 
 // Dashboard login: exchange the provisioning key for a session cookie, because phone
 // browsers cannot set an Authorization header. The key never returns in a response
-// body and never rides the cookie in plaintext. No Secure flag: the NAS serves plain
-// HTTP on the LAN; SameSite=Strict plus the Origin check in cookieAuthed cover CSRF.
+// body and never rides the cookie in plaintext. No Secure flag: a non-loopback
+// bind serves plain HTTP; SameSite=Strict plus the Origin check in cookieAuthed cover CSRF.
 app.post<{ Body: { key?: unknown } | undefined }>('/api/login', { bodyLimit: 64 * 1024 }, async (req, reply) => {
   const key = (req.body ?? {}).key
   if (typeof key !== 'string' || !keyMatch(key, config.apiKey ?? '')) return reply.code(401).send({ error: 'unauthorized' })

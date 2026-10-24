@@ -281,5 +281,5 @@ try {
   process.exit(1);
 }
 // ponytail: stale copies are reported, never deleted (like sync-projects.mjs); add --prune if removals get common.
-// ponytail: third-party skills are vendored whole (impeccable is ~1.6 MB per update); if that bloats history,
+// ponytail: third-party skills are vendored whole (a large one is ~1.6 MB per update); if that bloats history,
 // copy only the skills missing from .skill-lock.json and reinstall the rest from their recorded sources.
