@@ -50,6 +50,7 @@ Capture is the prepared way to get a usable setup. Docker Compose is the prepare
 - Root `*.md` files: the rules, each with a `description:` frontmatter line.
 - `user/`: home-relative snapshot without the leading dot (`~/.omp/agent/config.yml` → `user/omp/agent/config.yml`).
 - `projects/projects.json` plus `projects/<name>/`: per-project agent-context snapshots.
+- `workers/<project>/` plus the fleet folder `workers/_all/`: the worker additions Ottr's turns install. `apt.txt` lists Debian packages, one per line, `#` comments. `tools.json` is a JSON array of downloads; each entry has `name`, `url` (`https://` only), `sha256` (64 lowercase hex characters), `unpack` (`zip`, `tar.gz` or `none`), and `bin` (the executable inside the archive; absent when `unpack` is `none`). `env.txt` lists env var names, one per line, `#` comments; names only, never values. `install-user.mjs` validates `tools.json` and `env.txt` before it writes anything.
 - `upstreams.json` (optional): records the origin of each public item. When the file exists, `sync.mjs` refuses items with no recorded origin. The root `own` list holds files you wrote yourself.
 
 ## Scripts

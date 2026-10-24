@@ -12,9 +12,11 @@
 // On a non-Windows machine, JSON config captured on Windows is adapted to it first (forTarget, lib/data.mjs).
 // Plugins install from the captured lockfile with `bun install --frozen-lockfile` in ~/.omp/plugins, the
 // same root omp's plugin manager installs into.
-// Also installs the per-project package lists Ottr's turns read: workers/<project>/apt.txt ->
-// ~/.ottr/workers/<project>/apt.txt. The data repo is their only source, so a changed list replaces
-// the machine copy without --force, and a list it no longer ships is deleted.
+// Also installs the per-project worker additions Ottr's turns read: workers/<project>/apt.txt
+// (Debian packages), tools.json (declarative downloads) and env.txt (env names, never values)
+// -> ~/.ottr/workers/<project>/<file>; workers/_all/ is provisioned like a project. The data
+// repo is their only source, so a changed list replaces the machine copy without --force, and a
+// list it no longer ships is deleted. tools.json and env.txt are validated before any write.
 import { existsSync, mkdirSync, rmdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
@@ -38,6 +40,65 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
 //   pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@v2.13.0"
 const SKILLSPECTOR_REF = 'v2.13.0';
 const SKILL_ROOT_NAMES = new Set(['skills', 'managed-skills']);
+
+// Worker additions Ottr's turns read, provisioned per project folder (workers/_all/ is the fleet
+// folder and is provisioned like a project). The data repo is their only source: a changed list
+// replaces the machine copy without --force, a list the repo no longer ships is deleted.
+// tools.json and env.txt are validated before the plan turns into any write: an invalid file
+// fails the whole provision with its path and the first rule it breaks, so a valid folder is
+// never half-written. Declarative only — no shell commands of any kind.
+const WORKER_FILES = ['apt.txt', 'tools.json', 'env.txt'];
+const TOOL_NAME = /^[a-z0-9][a-z0-9._-]*$/;
+const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+const SHA256 = /^[0-9a-f]{64}$/;
+const UNPACK = new Set(['zip', 'tar.gz', 'none']);
+// A bin path is an archive-relative path: safe segments only, so "..", absolute paths and
+// anything shell-like never reach the container.
+const BIN_SEGMENT = /^[A-Za-z0-9._-]+$/;
+
+const validateTools = (bytes, path) => {
+  let list;
+  try {
+    list = JSON.parse(bytes.toString('utf8'));
+  } catch (err) {
+    throw new Error(`${path}: tools.json is not valid JSON (${err.message})`);
+  }
+  if (!Array.isArray(list)) throw new Error(`${path}: tools.json must be a JSON array of downloads`);
+  const seen = new Set();
+  list.forEach((entry, i) => {
+    const at = `${path}: tools.json entry ${i + 1}`;
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new Error(`${at}: must be a JSON object`);
+    const keys = Object.keys(entry);
+    const unknown = keys.find(k => !['name', 'url', 'sha256', 'unpack', 'bin'].includes(k));
+    if (unknown !== undefined) throw new Error(`${at}: unknown key "${unknown}" (downloads are declarative: name, url, sha256, unpack, bin)`);
+    for (const key of ['name', 'url', 'sha256', 'unpack']) {
+      if (!keys.includes(key)) throw new Error(`${at}: missing key "${key}"`);
+    }
+    if (!UNPACK.has(entry.unpack)) throw new Error(`${at}: "unpack" must be one of: zip, tar.gz, none`);
+    if (entry.unpack === 'none') {
+      if ('bin' in entry) throw new Error(`${at}: "bin" must be absent when unpack is none`);
+    } else if (!keys.includes('bin')) {
+      throw new Error(`${at}: missing key "bin" (required unless unpack is none)`);
+    }
+    if (typeof entry.name !== 'string' || !TOOL_NAME.test(entry.name)) throw new Error(`${at}: "name" must match ${TOOL_NAME.source}`);
+    if (seen.has(entry.name)) throw new Error(`${at}: duplicate name "${entry.name}"`);
+    seen.add(entry.name);
+    if (typeof entry.url !== 'string' || !entry.url.startsWith('https://')) throw new Error(`${at}: "url" must start with https://`);
+    if (typeof entry.sha256 !== 'string' || !SHA256.test(entry.sha256)) throw new Error(`${at}: "sha256" must be 64 lowercase hex characters`);
+    if ('bin' in entry && (typeof entry.bin !== 'string' || entry.bin.split('/').some(s => s === '.' || s === '..' || !BIN_SEGMENT.test(s)))) {
+      throw new Error(`${at}: "bin" must be a relative archive path whose segments are letters, digits, dot, underscore or dash, without ".."`);
+    }
+  });
+};
+
+const validateEnv = (bytes, path) => {
+  // Names only, never values: a broken line is reported by number, its content is never printed.
+  bytes.toString('utf8').split(/\r?\n/).forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) return;
+    if (!ENV_NAME.test(line)) throw new Error(`${path}: env.txt line ${i + 1}: a name must match ${ENV_NAME.source} (names only, never values)`);
+  });
+};
 
 try {
   if (!existsSync(userRoot)) {
@@ -128,16 +189,22 @@ try {
     current[rel] = want;
   }
   const workersRoot = join(data.dir, 'workers');
+  const shipped = new Set();
   if (existsSync(workersRoot)) {
     assertSourceInside(data.dir, workersRoot);
     for (const project of readdirSync(workersRoot, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name)) {
-      const srcPath = join(workersRoot, project, 'apt.txt');
-      if (!existsSync(srcPath)) continue;
-      assertSourceInside(workersRoot, srcPath);
-      const dest = join(home, '.ottr', 'workers', project, 'apt.txt');
-      checkDestination(home, dest);
-      const src = readFileSync(srcPath);
-      plan.push(existsSync(dest) && sameContent('', readFileSync(dest), src) ? ['unchanged', dest, null] : ['installed', dest, src]);
+      for (const file of WORKER_FILES) {
+        const srcPath = join(workersRoot, project, file);
+        if (!existsSync(srcPath)) continue;
+        assertSourceInside(workersRoot, srcPath);
+        const src = readFileSync(srcPath);
+        if (file === 'tools.json') validateTools(src, srcPath);
+        else if (file === 'env.txt') validateEnv(src, srcPath);
+        shipped.add(`${project}/${file}`);
+        const dest = join(home, '.ottr', 'workers', project, file);
+        checkDestination(home, dest);
+        plan.push(existsSync(dest) && sameContent('', readFileSync(dest), src) ? ['unchanged', dest, null] : ['installed', dest, src]);
+      }
     }
   }
   // A path the snapshot dropped: delete the machine copy when it still holds what alate last
@@ -158,14 +225,13 @@ try {
   // Worker lists come only from the data repo, so a list it no longer ships is deleted too.
   const homeWorkers = join(home, '.ottr');
   if (existsSync(join(homeWorkers, 'workers'))) {
-    const shipped = existsSync(workersRoot)
-      ? new Set(readdirSync(workersRoot, { withFileTypes: true }).filter(e => e.isDirectory() && existsSync(join(workersRoot, e.name, 'apt.txt'))).map(e => e.name))
-      : new Set();
     for (const project of readdirSync(join(homeWorkers, 'workers'), { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name)) {
-      if (shipped.has(project)) continue;
-      const dest = join(homeWorkers, 'workers', project, 'apt.txt');
-      checkDestination(home, dest);
-      if (existsSync(dest)) deletions.push([dest, homeWorkers]);
+      for (const file of WORKER_FILES) {
+        if (shipped.has(`${project}/${file}`)) continue;
+        const dest = join(homeWorkers, 'workers', project, file);
+        checkDestination(home, dest);
+        if (existsSync(dest)) deletions.push([dest, homeWorkers]);
+      }
     }
   }
   if (conflicts.length && !force) {

