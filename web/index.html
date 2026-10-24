@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>alate</title>
+<link rel="preload" href="/fonts/source-serif-4.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/jetbrains-mono.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="/logo.png" type="image/png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f7f7f4">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#191715">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<script src="/theme.js"></script>
+</head>
+<body>
+<a class="skip" href="#galley">Skip to the galley</a>
+<header class="masthead">
+  <a class="brand" href="#/"><img src="/logo.png" alt="" width="26" height="26"><span>alate</span></a>
+  <p class="source" id="source"></p>
+  <nav class="views" id="views" aria-label="Views" hidden>
+    <button type="button" class="files-toggle" id="files-toggle" aria-expanded="false" aria-controls="index">Files</button>
+    <a href="#/" data-view="overview">Overview</a>
+    <a href="#/updates" data-view="updates">Updates</a>
+    <a href="#/settings" data-view="settings">Settings</a>
+  </nav>
+  <button type="button" class="theme-toggle" id="theme-toggle">Theme: system</button>
+</header>
+<p class="banner" id="banner" role="status" hidden></p>
+<div class="desk" id="desk">
+  <aside class="index" id="index" aria-label="Files" hidden>
+    <div class="index-tools">
+      <input type="search" id="filter" placeholder="Filter files" aria-label="Filter files" autocomplete="off" spellcheck="false">
+      <a class="new-file" href="#/new">New file</a>
+    </div>
+    <div class="tree" id="tree"></div>
+  </aside>
+  <main class="galley" id="galley" tabindex="-1"></main>
+</div>
+<section class="login-view" id="login-view" hidden aria-labelledby="login-heading">
+  <h1 id="login-heading">Sign in</h1>
+  <p class="lede">This dashboard is served on the network. Enter the app key to continue.</p>
+  <form id="login-form" novalidate>
+    <div class="field">
+      <label for="login-key">App key</label>
+      <input type="password" id="login-key" autocomplete="current-password" spellcheck="false">
+    </div>
+    <p class="alert" id="login-error" role="alert" hidden></p>
+    <div class="form-actions">
+      <button type="submit" class="primary" id="login-btn">Sign in</button>
+    </div>
+  </form>
+</section>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

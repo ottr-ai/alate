@@ -1,0 +1,5 @@
+{
+  "_doc": "Records where every public item came from. sync.mjs fails when a public item has no recorded origin. See README.md, section 'Data repo layout'.",
+  "own": ["*.md"],
+  "items": []
+}

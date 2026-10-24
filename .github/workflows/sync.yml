@@ -1,0 +1,31 @@
+name: sync
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: lts/*
+      # install-user.mjs runs `bun install` for a captured plugins layer; the server
+      # self-check below exercises that path, so bun must be on PATH first.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: npm ci
+      # Architecture gates run in order; sync.mjs needs a data repo, so it is smoked
+      # against the committed fixture into a throwaway target dir (the .test.mjs
+      # scripts are hermetic, and a bare run would write this job's own home).
+      - run: node zero-deps.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs
+      - run: npx tsc --noEmit && node server.test.mjs
+      # The audit step is required; the manifest needs it, and the gates run in order.
+      - run: bun install
+      - run: bun audit --audit-level=high
+      - run: bun pm licenses

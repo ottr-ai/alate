@@ -1,0 +1,7 @@
+# Starter omp config. No secrets.
+# `node sync-user.mjs --data <this repo>` replaces this file with the real
+# omp config of the machine that runs the capture. Secrets in that config
+# must stay `$ENV_VAR` references; the capture refuses real values.
+theme:
+  dark: amethyst
+  light: light

@@ -1,0 +1,39 @@
+name: install
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  OMP_VERSION: v18.11.1
+  OMP_SHA256: bf1e86a935b1ea26166a5280001eccea1205e6c21efe1b5853f0fd368c754974
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: lts/*
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install pinned omp
+        run: |
+          curl -fsSLo /tmp/omp "https://github.com/can1357/oh-my-pi/releases/download/${OMP_VERSION}/omp-linux-x64"
+          echo "${OMP_SHA256}  /tmp/omp" | sha256sum -c -
+          sudo install -m 0755 /tmp/omp /usr/local/bin/omp
+      - name: Install rules and user layer
+        run: |
+          node sync.mjs --data examples/data
+          node install-user.mjs --data examples/data --skip-plugins
+      - name: Check rules and settings
+        run: |
+          test "$(omp --version)" = "omp/${OMP_VERSION#v}"
+          test -f ~/.omp/agent/rules/coding-basics.md
+          test -f ~/.omp/agent/config.yml
+          omp config path > /dev/null

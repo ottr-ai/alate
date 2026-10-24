@@ -1,0 +1,22 @@
+{
+  "name": "alate",
+  "private": true,
+  "type": "module",
+  "description": "Generic provisioning tool for omp agent setups",
+  "license": "MIT",
+  "scripts": {
+    "start": "node server.ts",
+    "typecheck": "tsc --noEmit",
+    "test:mutation": "stryker run"
+  },
+  "dependencies": {
+    "@fontsource-variable/jetbrains-mono": "5.3.0",
+    "@fontsource-variable/source-serif-4": "5.3.0",
+    "fastify": "^5.6.1"
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "^10.0.0",
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

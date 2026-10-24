@@ -1,0 +1,9 @@
+node_modules
+.tasks
+.worktrees
+server-config.json
+web/state.json
+.git
+alate.db*
+.impeccable
+docs
