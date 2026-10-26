@@ -92,7 +92,18 @@ const sha1 = ghSha();
 const serverEnv = { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, TMPDIR: serverTmp, TEMP: serverTmp, TMP: serverTmp, ALATE_KEEP_TEMP: '', ALATE_TEST_PROVISION_GATE: provisionGate, ALATE_TEST_GH_BASE: pathToFileURL(join(tmp, 'gh')).href, GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_GLOBAL: 'nul', GIT_CONFIG_SYSTEM: 'nul' };
 // sync.mjs prefers PI_CODING_AGENT_DIR over HOME: an inherited value would install fixture rules into a real agent dir.
 delete serverEnv.PI_CODING_AGENT_DIR;
-let child = spawn(process.execPath, [join(repoRoot, 'server.ts'), '--port', '0', '--config', join(tmp, 'server-config.json'), '--interval', '1', '--db', stateFile], { cwd: repoRoot, env: serverEnv, stdio: ['ignore', 'pipe', 'inherit'] });
+// Every server this suite starts dies with it. A failed assertion (a killed mutant) exits the
+// suite early; an untracked server would outlive it forever and hold the mutation runner's pipes.
+const servers = new Set();
+const spawnServer = (args, env = serverEnv) => {
+  const p = spawn(process.execPath, [join(repoRoot, 'server.ts'), ...args], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'inherit'] });
+  servers.add(p);
+  p.once('exit', () => servers.delete(p));
+  return p;
+};
+const killServers = () => { for (const p of servers) p.kill(); };
+process.on('exit', killServers); // also covers exits that bypass the finally (errors thrown in callbacks)
+let child = spawnServer(['--port', '0', '--config', join(tmp, 'server-config.json'), '--interval', '1', '--db', stateFile]);
 
 const waitFor = async (fn, ms) => {
   const end = Date.now() + ms;
@@ -681,7 +692,7 @@ try {
   await new Promise(resolve => { child.once('close', resolve); child.kill(); });
   renameSync(data, join(tmp, 'data-offline'));
   writeFileSync(config, JSON.stringify({ ...JSON.parse(readFileSync(config, 'utf8')), repo: origin, path: null }));
-  child = spawn(process.execPath, [join(repoRoot, 'server.ts'), '--port', '0', '--config', config, '--db', stateFile], { cwd: repoRoot, env: serverEnv, stdio: ['ignore', 'pipe', 'inherit'] });
+  child = spawnServer(['--port', '0', '--config', config, '--db', stateFile]);
   base = await new Promise((resolve, reject) => {
     let buf = '';
     child.stdout.on('data', chunk => {
@@ -844,13 +855,10 @@ try {
     }
     const upConfig = join(tmp, 'server-config-updates.json');
     const upDb = join(tmp, 'state-updates.db');
-    child = spawn(process.execPath, [join(repoRoot, 'server.ts'), '--port', '0', '--config', upConfig, '--db', upDb, '--update-interval', '1'], {
-      cwd: repoRoot, stdio: ['ignore', 'pipe', 'inherit'],
-      env: {
-        ...serverEnv, PATH: `${tmpBin}${delimiter}${serverEnv.PATH ?? ''}`,
-        ALATE_TEST_GITHUB_API_BASE: `${upBase}/gh`, ALATE_TEST_NPM_BASE: `${upBase}/npm`,
-        ALATE_TEST_NODE_DIST_BASE: `${upBase}/dist`, ALATE_TEST_CFT_BASE: `${upBase}/cft`,
-      },
+    child = spawnServer(['--port', '0', '--config', upConfig, '--db', upDb, '--update-interval', '1'], {
+      ...serverEnv, PATH: `${tmpBin}${delimiter}${serverEnv.PATH ?? ''}`,
+      ALATE_TEST_GITHUB_API_BASE: `${upBase}/gh`, ALATE_TEST_NPM_BASE: `${upBase}/npm`,
+      ALATE_TEST_NODE_DIST_BASE: `${upBase}/dist`, ALATE_TEST_CFT_BASE: `${upBase}/cft`,
     });
     let apiKeyUp = '';
     base = await new Promise((resolve, reject) => {
@@ -1093,7 +1101,7 @@ try {
   const inRemote = path => git(['--git-dir', editBare, 'cat-file', '-e', `main:${path}`]).status === 0;
   const commitSubject = () => git(['--git-dir', editBare, 'log', '-1', '--format=%s'], { encoding: 'utf8' }).stdout.trim();
 
-  child = spawn(process.execPath, [join(repoRoot, 'server.ts'), '--port', '0', '--config', join(tmp, 'server-config-edit.json'), '--db', join(tmp, 'state-edit.db')], { cwd: repoRoot, env: serverEnv, stdio: ['ignore', 'pipe', 'inherit'] });
+  child = spawnServer(['--port', '0', '--config', join(tmp, 'server-config-edit.json'), '--db', join(tmp, 'state-edit.db')]);
   base = await new Promise((resolve, reject) => {
     let buf = '';
     child.stdout.on('data', chunk => {
@@ -1464,7 +1472,7 @@ try {
   {
     const lanConfig = join(tmp, 'server-config-lan.json');
     const lanDb = join(tmp, 'state-lan.db');
-    child = spawn(process.execPath, [join(repoRoot, 'server.ts'), '--port', '0', '--host', '0.0.0.0', '--config', lanConfig, '--db', lanDb], { cwd: repoRoot, env: serverEnv, stdio: ['ignore', 'pipe', 'inherit'] });
+    child = spawnServer(['--port', '0', '--host', '0.0.0.0', '--config', lanConfig, '--db', lanDb]);
     try {
       let lanKey = '';
       const lanBase = await new Promise((resolve, reject) => {
@@ -2707,7 +2715,7 @@ try {
   {
     const mut10Kill = p => new Promise(resolve => { p.once('close', resolve); p.kill(); });
     const mut10Spawn = (args, over = {}) => {
-      const p = spawn(process.execPath, [join(repoRoot, 'server.ts'), ...args], { cwd: repoRoot, env: { ...serverEnv, ...over }, stdio: ['ignore', 'pipe', 'inherit'] });
+      const p = spawnServer(args, { ...serverEnv, ...over });
       const up = new Promise((resolve, reject) => {
         let buf = '';
         p.stdout.on('data', chunk => {
@@ -3060,6 +3068,6 @@ try {
   }
 
 } finally {
-  child.kill();
+  killServers();
   if (!keepTemp()) rmSync(tmp, { recursive: true, force: true });
 }

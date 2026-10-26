@@ -56,5 +56,5 @@ export default {
   //   only rewords the 404; server.ts:380:74 differs only past the 200-char display cut;
   //   the concurrent-write window (server.ts:391/393) is unreachable from a sequential
   //   fetch suite, which serves one origin over one connection.
-  thresholds: { high: 80, low: 60, break: 73 },
+  thresholds: { high: 80, low: 60, break: 91 },
 };
