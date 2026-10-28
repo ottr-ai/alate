@@ -79,7 +79,7 @@ try {
   // --- cloneCommand: token never reaches argv; auth rides in per-process env config.
   const dir = join(tmp, 'dst');
   let cmd = cloneCommand('https://github.com/owner/repo', 'feature@draft', TOKEN, dir);
-  assert.deepEqual(cmd.args, ['clone', '--quiet', '--depth', '1', '--branch', 'feature@draft', 'https://github.com/owner/repo', dir]);
+  assert.deepEqual(cmd.args, ['clone', '--quiet', '--depth', '1', '--config', 'core.autocrlf=false', '--config', 'core.eol=lf', '--branch', 'feature@draft', 'https://github.com/owner/repo', dir]);
   assert.equal(cmd.env.GIT_CONFIG_KEY_0, 'http.https://github.com/.extraheader');
   assert.equal(cmd.env.GIT_CONFIG_VALUE_0, `AUTHORIZATION: basic ${basic}`);
   assert.equal(cmd.env.GIT_TERMINAL_PROMPT, '0');
@@ -96,6 +96,15 @@ try {
   assert.equal(real.status, 0, real.stderr);
   assert.equal(marker(refDst), 'draft\n', 'branch feature@draft checked out');
   assert.deepEqual(scanForToken(refDst), [], 'token leaked into clone');
+
+  // --- A host-wide core.autocrlf=true (Windows default) must not turn the clone's LF into CRLF.
+  const crlfConfig = join(tmp, 'crlf.gitconfig');
+  writeFileSync(crlfConfig, '[core]\n\tautocrlf = true\n\teol = crlf\n');
+  const lfDst = join(tmp, 'dst-lf');
+  cmd = cloneCommand(repo, '', undefined, lfDst);
+  const lf = spawnSync('git', cmd.args, { encoding: 'utf8', env: { ...cmd.env, GIT_CONFIG_GLOBAL: crlfConfig } });
+  assert.equal(lf.status, 0, lf.stderr);
+  assert.equal(readFileSync(join(lfDst, 'marker.txt'), 'latin1'), 'main\n', 'clone keeps LF under autocrlf=true');
 
   let data = resolveDataDir({ values: { '--repo': odd }, flags: new Set() }, { allowClone: true });
   assert.equal(marker(data.dir), 'odd\n');
