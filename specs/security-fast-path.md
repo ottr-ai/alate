@@ -38,7 +38,9 @@ The fast path applies only to `github-release` check rows (`runReleaseCheck` in 
 8. `qualifiesAt = publishedAt + gate`, where the gate is 7 days, 2 days (tier A), or 0 (tier B).
 9. `checkUpdates(db, { securityFastPath: false })` turns the fast path off: no body scan, no OSV
    call, no advisory call, no `security` key. The default is on. The server reads `securityFastPath` from
-   `server-config.json` (default `true`) and passes it on. No route changes.
+   `server-config.json` (default `true`) and passes it on. No route changes. A row carried forward
+   after a failed check also follows this switch: it loses `security`, and its target becomes
+   `null` unless the release is 7 days old.
 10. `osvBase()` reads `ALATE_TEST_OSV_BASE`, else `https://api.osv.dev/v1` (test seam like `ghBase()`).
 
 ## Dashboard

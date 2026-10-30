@@ -1831,6 +1831,26 @@ try {
       const off = rows(await run(files(['s1']), { securityFastPath: false }));
       assert.deepEqual([off.s1.target, 'security' in off.s1, off.s1.qualifiesAt, osvHits().length, hits.filter(h => h.p.includes('advisories')).length], [null, false, plusDays(pub('s1'), 7), 0, 0], 'securityFastPath: false is the plain 7-day gate');
 
+      // A failed check carries the old row forward; with the fast path off it loses the security
+      // tier and the target only that tier allowed, so the 7-day gate holds for cached rows too.
+      const cached = await run(files(['s3', 's14']));
+      assert.deepEqual([rows(cached).s3.target, rows(cached).s3.security?.tier], ['1.1.0', 'A'], 'precondition: tier A target');
+      handler = () => [500, { message: 'down' }];
+      await checkUpdates(cached, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      const keep = rows(cached);
+      assert.deepEqual([keep.s14.target, keep.s14.security?.tier, keep.s14.qualifiesAt], ['1.1.0', 'A', plusDays(pub('s14'), 2)], 'fast path on: the cached tier A target stays');
+      assert.match(keep.s14.error, /HTTP 500/, 'the row is carried forward from a failed check');
+      // s3 has aged past 7 days since it was cached: its target stays, only `security` goes.
+      const aged8 = daysAgo(8);
+      for (const r of cached.prepare('SELECT id, value FROM updates').all()) {
+        const v = JSON.parse(r.value);
+        if (v.name === 's3') cached.prepare('UPDATE updates SET value = ? WHERE id = ?').run(JSON.stringify({ ...v, publishedAt: aged8 }), r.id);
+      }
+      await checkUpdates(cached, { dataRepo: 'demo/data', token: 'tok-xyz', securityFastPath: false });
+      const gone = rows(cached);
+      assert.deepEqual([gone.s14.target, 'security' in gone.s14, gone.s14.qualifiesAt, gone.s14.latest, gone.s14.error], [null, false, plusDays(pub('s14'), 7), '1.1.0', keep.s14.error], 'fast path off: a cached young target follows the 7-day gate');
+      assert.deepEqual([gone.s3.target, 'security' in gone.s3, gone.s3.qualifiesAt], ['1.1.0', false, plusDays(aged8, 7)], 'fast path off: a cached target 7 days old stays');
+
       // Property: release-author signals (body text, repo advisories) never lift the gate and
       // never break the row, whatever their shape. No OSV record exists, so a 1-day-old release
       // stays no target and its tier is never B.
