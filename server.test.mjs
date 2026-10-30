@@ -2060,6 +2060,27 @@ try {
         assert.deepEqual([p.target, p.error ?? null, p.security?.tier === 'B', p.security?.cves.length > 20, p.security?.ghsas.length > 20],
           [null, null, false, false, false], `property failed: input=${JSON.stringify(c)} row=${JSON.stringify(p)}`);
       });
+      handler = prevHandler;
+
+      // OSV records persist in osv_cache: a fresh record or 404 skips the GET, a stale one
+      // (record 6 h, 404 1 h) is fetched again, a 500 is never cached.
+      hits.length = 0;
+      const cdb = mkDb(files(['s1', 's2', 's7']));
+      const check = () => checkUpdates(cdb, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      const osvCounts = () => ['CVE-2026-1234', 'CVE-2026-2002', 'CVE-2026-2007'].map(id => osvHits(id).length);
+      const age = (id, ms) => cdb.prepare('UPDATE osv_cache SET fetchedAt = ? WHERE id = ?').run(new Date(Date.now() - ms).toISOString(), id);
+      await check();
+      await check();
+      assert.deepEqual(osvCounts(), [1, 1, 2], 'a cached record and a cached 404 skip the GET, a 500 is not cached');
+      assert.equal(rows(cdb).s1.security.tier, 'B', 'a cached record still gives tier B');
+      assert.deepEqual(cdb.prepare('SELECT id FROM osv_cache ORDER BY id').all().map(r => r.id), ['CVE-2026-1234', 'CVE-2026-2002']);
+      age('CVE-2026-1234', 2 * 3600_000);
+      age('CVE-2026-2002', 2 * 3600_000);
+      await check();
+      assert.deepEqual(osvCounts(), [1, 2, 3], 'a 2-hour-old 404 is fetched again, a 2-hour-old record is not');
+      age('CVE-2026-1234', 6 * 3600_000 + 1000);
+      await check();
+      assert.deepEqual(osvCounts(), [2, 2, 4], 'a record past its 6-hour TTL is fetched again');
     }
 
     // github-path: prefix-tolerant same-sha, query string shape, error rows, missing fields.

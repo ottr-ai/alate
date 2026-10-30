@@ -54,6 +54,11 @@ The fast path applies only to `github-release` check rows (`runReleaseCheck` in 
    later interval, a look-alike host, or a withdrawn advisory.
 6. The OSV lookup is memoized per `checkUpdates` run (one GET per CVE id). An OSV 404, an HTTP
    error, or a network error counts as "not corroborated" (fail closed: the gate stays).
+   The table `osv_cache (id TEXT PRIMARY KEY, fetchedAt TEXT NOT NULL, record TEXT)` keeps the
+   raw record (`NULL` for a 404) by CVE id across runs, never a verdict: the tier B repo binding
+   is recomputed each run. A cached record is reused for 6 h, a cached 404 for 1 h, so a new
+   record shows up soon. A non-404 HTTP error, a bad body, or a network error is never cached.
+   A withdrawn record is cached and fetched again after its TTL like any other record.
 7. The row of the picked release (`target ?? latest`) gets
    `security: { cves: [...], ghsas: [...], sources: ['osv:<id>', ...], tier: 'A' | 'B' }` when
    that release has security data. `cves` holds only CVE ids, `ghsas` only GHSA ids (both can be
@@ -97,6 +102,8 @@ The lede of the updates view names the shorter gates.
 - `securityFastPath: false` gives the plain 7-day behavior and makes no OSV request.
 - A tier B row from an earlier run, then a failed check with `securityFastPath: false`: no
   `security` key, no target, `qualifiesAt` is +7 days.
+- Two runs on one db make one OSV request per cited CVE id. A 500 is fetched again each run.
+  A 2-hour-old 404 is fetched again, a 2-hour-old record is not. A record older than 6 h is.
 
 ## Non-goals (own cards)
 
@@ -106,4 +113,3 @@ The lede of the updates view names the shorter gates.
   - More tier A signals: a release marked as a security release, GHSA ids, repo-scoped GHSAs.
   - CISA alert and CERT-EU feeds as tier B sources.
   - The node-dist announcement as an input to the advisory pass.
-  - A DB cache of OSV verdicts.
