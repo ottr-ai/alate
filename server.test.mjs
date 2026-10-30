@@ -1632,9 +1632,9 @@ try {
   });
   await new Promise(resolve => fakeUp.listen(0, '127.0.0.1', resolve));
   const upBase = `http://127.0.0.1:${fakeUp.address().port}`;
-  const envKeys = ['ALATE_TEST_GITHUB_API_BASE', 'ALATE_TEST_NPM_BASE', 'ALATE_TEST_NODE_DIST_BASE', 'ALATE_TEST_CFT_BASE', 'ALATE_TEST_OSV_BASE', 'ALATE_TEST_CISA_BASE', 'ALATE_TEST_CERTEU_BASE'];
+  const envKeys = ['ALATE_TEST_GITHUB_API_BASE', 'ALATE_TEST_NPM_BASE', 'ALATE_TEST_NODE_DIST_BASE', 'ALATE_TEST_CFT_BASE', 'ALATE_TEST_OSV_BASE', 'ALATE_TEST_CISA_BASE', 'ALATE_TEST_CERTEU_BASE', 'ALATE_TEST_NODE_BLOG_BASE'];
   const savedEnv = envKeys.map(k => process.env[k]);
-  envKeys.forEach((k, i) => { process.env[k] = `${upBase}/${['gh', 'npm', 'dist', 'cft', 'osv', 'cisa', 'certeu'][i]}`; });
+  envKeys.forEach((k, i) => { process.env[k] = `${upBase}/${['gh', 'npm', 'dist', 'cft', 'osv', 'cisa', 'certeu', 'blog'][i]}`; });
 
   const mkDb = files => {
     const db = new DatabaseSync(':memory:');
@@ -2239,6 +2239,42 @@ try {
       assert.deepEqual([r.node3.latest, r.node3.target, r.node3.publishedAt, r.node3.error ?? null], [null, null, null, null]);
       assert.deepEqual([r.node4.latest, r.node4.target], ['22.20.0', null], 'a current above every build never targets');
       assert.ok(hits.filter(h => h.p.startsWith('/dist/')).every(h => h.auth === null));
+    }
+
+    // node-dist security fast path: index.json `security: true` + blog announcement CVEs + OSV record on nodejs/node.
+    {
+      handler = url => {
+        if (url.pathname === '/dist/index.json') return [200, [
+          { version: 'v22.31.0', date: daysAgo(1), security: true }, { version: 'v22.30.0', date: old30 },
+          { version: 'v20.9.0', date: daysAgo(1), security: true },
+          { version: 'v18.9.0', date: daysAgo(3), security: true },
+          { version: 'v16.9.0', date: daysAgo(1), security: false },
+        ]];
+        const blog = { '/blog/v22.31.0': 'Fixes CVE-2026-9001 (high).', '/blog/v20.9.0': 'Fixes cve-2026-9002.', '/blog/v16.9.0': 'Fixes CVE-2026-9001.' };
+        if (blog[url.pathname]) return [200, blog[url.pathname]];
+        if (url.pathname === '/osv/vulns/CVE-2026-9001') return [200, { id: 'CVE-2026-9001', references: [{ url: 'https://github.com/nodejs/node/commit/abc' }] }];
+        if (url.pathname === '/blog/v18.9.0') return [404, 'Not found. See CVE-2026-9003.']; // an error page never counts
+        return null;
+      };
+      const files = UP([
+        item('ns1', { version: '22.30.0', check: { type: 'node-dist', major: 22 } }),
+        item('ns2', { version: '20.8.0', check: { type: 'node-dist', major: 20 } }),
+        item('ns3', { version: '18.8.0', check: { type: 'node-dist', major: 18 } }),
+        item('ns4', { version: '16.8.0', check: { type: 'node-dist', major: 16 } }),
+      ]);
+      hits.length = 0;
+      const r = rows(await run({ 'upstreams.json': files }));
+      assert.deepEqual([r.ns1.target, r.ns1.security, r.ns1.qualifiesAt, r.ns1.notesUrl],
+        ['22.31.0', { cves: ['CVE-2026-9001'], sources: ['osv:CVE-2026-9001'], tier: 'B' }, r.ns1.publishedAt, `${upBase}/blog/v22.31.0`], 'an OSV-corroborated node security release is a target at once');
+      assert.deepEqual([r.ns2.target, r.ns2.latest, r.ns2.security, r.ns2.notesUrl],
+        [null, '20.9.0', { cves: ['CVE-2026-9002'], sources: [], tier: 'A' }, `${upBase}/blog/v20.9.0`], 'no OSV record: tier A, a 1-day-old release waits');
+      assert.deepEqual([r.ns3.target, r.ns3.security, r.ns3.qualifiesAt], ['18.9.0', { cves: [], sources: [], tier: 'A' }, plusDays(r.ns3.publishedAt, 2)], 'the flag without an announcement is tier A: 3 days old passes');
+      assert.deepEqual([r.ns4.target, 'security' in r.ns4, r.ns4.notesUrl], [null, false, `${upBase}/dist/`], 'no security flag: plain 7-day gate');
+      assert.ok(!hits.some(h => h.p === '/blog/v16.9.0'), 'no announcement fetch without the flag');
+      hits.length = 0;
+      const off = rows(await run({ 'upstreams.json': files }, { securityFastPath: false }));
+      assert.deepEqual([off.ns1.target, 'security' in off.ns1, off.ns1.qualifiesAt, off.ns1.notesUrl], [null, false, plusDays(off.ns1.publishedAt, 7), `${upBase}/dist/`], 'securityFastPath: false keeps the 7-day gate');
+      assert.ok(!hits.some(h => h.p.startsWith('/blog/') || h.p.startsWith('/osv/')), 'switch off: no announcement or OSV request');
     }
 
     // chrome-for-testing: first-seen gate, backdated seen rows, same/older current, missing channel/doc.

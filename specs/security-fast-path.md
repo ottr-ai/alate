@@ -4,7 +4,8 @@ Source: research report of card ALAT-20 (tiers A and B). Tier C (KEV auto-apply)
 
 ## Behavior
 
-The fast path applies only to `github-release` check rows (`runReleaseCheck` in `lib/updates.mjs`).
+The fast path applies to `github-release` check rows (`runReleaseCheck` in `lib/updates.mjs`) and
+to `node-dist` check rows (`runNodeCheck`, see "node-dist" below).
 
 1. `runReleaseCheck` keeps the release `body` of each candidate.
 2. For each candidate that is newer than `current` and younger than 7 days, the checker collects
@@ -101,6 +102,21 @@ The fast path applies only to `github-release` check rows (`runReleaseCheck` in 
    `cisaBase()` reads `ALATE_TEST_CISA_BASE`, else `https://www.cisa.gov`. `certEuBase()` reads
    `ALATE_TEST_CERTEU_BASE`, else `https://cert.europa.eu`.
 
+## node-dist
+
+11. For each `index.json` entry that is newer than `current`, younger than 7 days, and has
+    `security: true`, the checker fetches the release announcement
+    `<nodeBlogBase>/v<version>`. `nodeBlogBase()` reads `ALATE_TEST_NODE_BLOG_BASE`, else
+    `https://nodejs.org/en/blog/release`.
+12. The announcement text goes through the same advisory pass as a release body (rules 2, 5, 6)
+    with the repo `nodejs/node`.
+13. `security: true` without CVE ids gives tier A (`cves: []`, `sources: []`). A non-ok status
+    or a network error on the announcement counts as "no CVE ids", so the flag still gives tier A.
+14. An entry without `security: true` gets no announcement fetch and keeps the 7-day gate.
+15. When the picked entry has security data, `notesUrl` is its announcement URL. Else `notesUrl`
+    stays the dist root.
+16. `securityFastPath: false` makes no announcement and no OSV call (rule 9).
+
 ## Dashboard
 
 The updates table status text marks a row that has `security`:
@@ -143,6 +159,9 @@ The lede of the updates view names the shorter gates.
 - A feed error (HTTP 500) gives tier A.
 - Each feed URL gets one GET per run. A row without `advisoryProduct` and `securityFastPath: false`
   make no feed request.
+- A 1-day-old node-dist entry with `security: true`, whose announcement cites a CVE with an OSV
+  record that references `github.com/nodejs/node`, is the target with tier B. Without the OSV
+  record it is tier A and not the target. With `securityFastPath: false`, the 7-day gate applies.
 
 ## Non-goals (own cards)
 
@@ -150,4 +169,4 @@ The lede of the updates view names the shorter gates.
 - A `php-dist` check kind.
 - These items from the report are separate cards:
   - More tier A signals: a release marked as a security release, GHSA ids, repo-scoped GHSAs.
-  - The node-dist announcement as an input to the advisory pass.
+
