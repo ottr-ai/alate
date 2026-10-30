@@ -110,9 +110,12 @@ to `node-dist` check rows (`runNodeCheck`, see "node-dist" below).
     `https://nodejs.org/en/blog/release`.
 12. The announcement text goes through the same advisory pass as a release body (rules 2, 5, 6)
     with the repo `nodejs/node`.
-13. `security: true` without CVE ids gives tier A (`cves: []`, `sources: []`). A non-ok status
-    or a network error on the announcement counts as "no CVE ids", so the flag still gives tier A.
-14. An entry without `security: true` gets no announcement fetch and keeps the 7-day gate.
+13. `security: true` without CVE ids gives tier A (`cves: []`, `sources: []`). A non-ok status,
+    a network error, or a failed body read on the announcement counts as "no CVE ids", so the
+    flag still gives tier A.
+14. An entry without `security: true` gets no announcement fetch and keeps the 7-day gate. The
+    checker computes the tier itself. It ignores every other `index.json` field, for example an
+    upstream `advisory` or `tier` field.
 15. When the picked entry has security data, `notesUrl` is its announcement URL. Else `notesUrl`
     stays the dist root.
 16. `securityFastPath: false` makes no announcement and no OSV call (rule 9).
