@@ -1632,9 +1632,9 @@ try {
   });
   await new Promise(resolve => fakeUp.listen(0, '127.0.0.1', resolve));
   const upBase = `http://127.0.0.1:${fakeUp.address().port}`;
-  const envKeys = ['ALATE_TEST_GITHUB_API_BASE', 'ALATE_TEST_NPM_BASE', 'ALATE_TEST_NODE_DIST_BASE', 'ALATE_TEST_CFT_BASE'];
+  const envKeys = ['ALATE_TEST_GITHUB_API_BASE', 'ALATE_TEST_NPM_BASE', 'ALATE_TEST_NODE_DIST_BASE', 'ALATE_TEST_CFT_BASE', 'ALATE_TEST_OSV_BASE'];
   const savedEnv = envKeys.map(k => process.env[k]);
-  envKeys.forEach((k, i) => { process.env[k] = `${upBase}/${['gh', 'npm', 'dist', 'cft'][i]}`; });
+  envKeys.forEach((k, i) => { process.env[k] = `${upBase}/${['gh', 'npm', 'dist', 'cft', 'osv'][i]}`; });
 
   const mkDb = files => {
     const db = new DatabaseSync(':memory:');
@@ -1744,6 +1744,72 @@ try {
       assert.ok(!JSON.stringify(r).includes('tok-xyz'), 'the token never reaches a row');
       const ghHits = hits.filter(h => h.p.startsWith('/gh/'));
       assert.ok(ghHits.length >= 2 && ghHits.every(h => h.auth === 'Bearer tok-xyz'), 'the token rides GitHub calls only');
+    }
+
+    // github-release security fast path: tier A (body cites a CVE) and tier B (OSV record ties the CVE to the repo).
+    {
+      const rel = (v, age, body) => ({ tag_name: `v${v}`, draft: false, prerelease: false, published_at: daysAgo(age), html_url: `n${v}`, body });
+      const ref = url => [200, { id: 'x', references: [{ url }] }];
+      const many = Array.from({ length: 25 }, (_, i) => `CVE-2027-${1000 + i}`);
+      const releases = {
+        s1: [rel('1.1.0', 1, 'Fixes cve-2026-1234 and CVE-2026-1234.')],
+        s2: [rel('1.1.0', 2, 'Fixes CVE-2026-2002.')],
+        s3: [rel('1.1.0', 3, 'Fixes CVE-2026-2003.')],
+        s4: [rel('1.1.0', 1, 'Fixes CVE-2026-2004.')],
+        s5: [rel('1.1.0', 1, 'Fixes CVE-2026-2005.')],
+        s6: [rel('1.1.0', 1, 'Fixes CVE-2026-2006.')],
+        s7: [rel('1.1.0', 1, 'Fixes CVE-2026-2007.')],
+        s8: [rel('1.1.0', 2, 'Plain bug fixes.')],
+        s9: [rel('1.2.0', 1, 'Fixes CVE-2026-2009.'), rel('1.1.0', 30)],
+        s10: [rel('1.1.0', 2, many.join(' '))],
+        s11: [rel('1.1.0', 1, 'Fixes CVE-2026-2011.')],
+        s12: [rel('1.1.0', 1, 'Fixes CVE-2026-2012.')],
+        s13: [rel('1.1.0', 1, 'Also fixes CVE-2026-1234.')],
+      };
+      const osv = {
+        'CVE-2026-1234': [200, { id: 'CVE-2026-1234', references: [{ url: 'https://github.com/fake/s1/security/advisories/GHSA-x' }] }],
+        'CVE-2026-2005': ref('https://github.com/fake/s5-other/security/advisories/GHSA-y'),
+        'CVE-2026-2006': ref('https://github.com/FAKE/S6/commit/abc'),
+        'CVE-2026-2007': [500, { message: 'boom' }],
+        'CVE-2026-2011': ref('https://github.com/fake/s.11/pull/1'),
+        'CVE-2026-2012': ref('https://github.com/fake/sx12/pull/1'),
+      };
+      handler = url => {
+        const gh = url.pathname.match(/^\/gh\/repos\/fake\/(s[\d.]+)\/releases$/);
+        const key = gh?.[1].replace('.', '');
+        if (gh) return releases[key] ? [200, releases[key]] : null;
+        const id = url.pathname.match(/^\/osv\/vulns\/(.+)$/)?.[1];
+        return id ? osv[id] ?? null : null;
+      };
+      // s11/s12 live in dotted repos: the repo name is matched literally, never as a regex.
+      const repoOf = { s11: 'fake/s.11', s12: 'fake/s.12' };
+      const files = names => ({ 'upstreams.json': UP(names.map(n => item(n, { version: '1.0.0', check: { type: 'github-release', tagPrefix: 'v', ...(repoOf[n] ? { repo: repoOf[n] } : {}) } }))) });
+      const osvHits = id => hits.filter(h => h.p.startsWith('/osv/') && (!id || h.p === `/osv/vulns/${id}`));
+      const pub = n => releases[n][0].published_at;
+      hits.length = 0;
+      const r = rows(await run(files(Object.keys(releases))));
+
+      assert.deepEqual([r.s1.target, r.s1.qualifiesAt, r.s1.publishedAt], ['1.1.0', pub('s1'), pub('s1')], JSON.stringify(r.s1));
+      assert.deepEqual(r.s1.security, { cves: ['CVE-2026-1234'], sources: ['osv:CVE-2026-1234'], tier: 'B' });
+      assert.deepEqual(osvHits('CVE-2026-1234').map(h => h.auth), [null], 'one OSV GET per CVE id per run (s1 and s13 share it), without the token');
+      assert.deepEqual([r.s13.security?.tier, r.s13.target], ['A', null], 'an OSV record tied to another repo does not lift the gate');
+      assert.deepEqual([r.s11.security?.tier, r.s11.target, r.s12.security?.tier, r.s12.target], ['B', '1.1.0', 'A', null], 'dotted repo names match literally');
+      assert.deepEqual([r.s2.target, r.s2.latest, r.s2.security, r.s2.qualifiesAt],
+        ['1.1.0', '1.1.0', { cves: ['CVE-2026-2002'], sources: [], tier: 'A' }, plusDays(pub('s2'), 2)], 'OSV 404 leaves tier A: a 2-day-old release passes');
+      assert.deepEqual([r.s3.target, r.s4.target], ['1.1.0', null], 'tier A gate is 2 days');
+      for (const [n, tier] of [['s5', 'A'], ['s6', 'B'], ['s7', 'A']])
+        assert.deepEqual([r[n].security?.tier, r[n].target, r[n].error ?? null], [tier, tier === 'B' ? '1.1.0' : null, null], `${n}: ${JSON.stringify(r[n])}`);
+      assert.deepEqual([r.s8.target, 'security' in r.s8, r.s8.qualifiesAt], [null, false, plusDays(pub('s8'), 7)], 'no CVE keeps the 7-day gate');
+      assert.deepEqual([r.s9.target, r.s9.latest, 'security' in r.s9], ['1.1.0', '1.2.0', false], 'security data follows the picked release only');
+      assert.deepEqual([r.s10.security?.cves.length, r.s10.security?.cves[19]], [20, many[19]], 'at most 20 CVE ids per release');
+
+      hits.length = 0;
+      await run(files(['s8']));
+      assert.equal(osvHits().length, 0, 'no CVE, no OSV call');
+
+      hits.length = 0;
+      const off = rows(await run(files(['s1']), { securityFastPath: false }));
+      assert.deepEqual([off.s1.target, 'security' in off.s1, off.s1.qualifiesAt, osvHits().length], [null, false, plusDays(pub('s1'), 7), 0], 'securityFastPath: false is the plain 7-day gate');
     }
 
     // github-path: prefix-tolerant same-sha, query string shape, error rows, missing fields.

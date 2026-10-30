@@ -340,8 +340,9 @@ function updateStatus(u) {
   if (u.error) return { text: 'Check failed' };
   if (u.managedBy) return { text: 'Managed by ' + u.managedBy };
   if (u.current && u.latest && u.current === u.latest) return { text: 'Up to date' };
-  if (u.target && u.target !== u.current) return { text: 'Ready: ' + short(u.target), ready: true };
-  if (u.latest && u.latest !== u.current) return { text: u.qualifiesAt ? 'Newer ' + short(u.latest) + ', waits until ' + dateOnly(u.qualifiesAt) : 'Newer: ' + short(u.latest) };
+  const sec = u.security ? (u.security.tier === 'B' ? ', security fix, OSV confirmed' : ', security fix, upstream claim') : '';
+  if (u.target && u.target !== u.current) return { text: 'Ready: ' + short(u.target) + sec, ready: true };
+  if (u.latest && u.latest !== u.current) return { text: u.qualifiesAt ? 'Newer ' + short(u.latest) + ', waits until ' + dateOnly(u.qualifiesAt) + sec : 'Newer: ' + short(u.latest) };
   return { text: 'No data' };
 }
 
@@ -355,7 +356,7 @@ function updatesView() {
   const sheet = h('article', { class: 'sheet' },
     h('header', { class: 'sheet-head' },
       h('h1', { text: 'Updates' }),
-      h('p', { class: 'lede', text: 'Newer versions of the skills, plugins, and pinned tools in agent-data. A version is ready after it is 7 days old. Last check: ' + (checked ? new Date(checked).toLocaleString() : 'never') + '.' })));
+      h('p', { class: 'lede', text: 'Newer versions of the skills, plugins, and pinned tools in agent-data. A version is ready after it is 7 days old, after 2 days when its release notes cite a CVE, and at once when an OSV record for that CVE names its repository. Last check: ' + (checked ? new Date(checked).toLocaleString() : 'never') + '.' })));
   if (!ups.length) {
     sheet.append(h('p', { class: 'note', text: 'No update sources in this snapshot: add upstreams.json, user/agents/.skill-lock.json, or user/omp/plugins/bun.lock.' }));
     return sheet;

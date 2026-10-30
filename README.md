@@ -43,7 +43,7 @@ Capture is the prepared way to get a usable setup. Docker Compose is the prepare
 - **Provision** runs `sync.mjs` (rules into `~/.omp/agent/rules`) and `install-user.mjs` (the user layer) from the snapshot into the container home volume. The image carries the pinned SkillSpector build that `install-user.mjs` requires; a host that runs the script outside the image installs it by hand (see the script header).
 - Workers mount the same volume.
 - The **dashboard** lists the snapshot inventory and edits files. Each edit commits and pushes.
-- The dashboard shows upstream updates with a 7-day age gate.
+- The dashboard shows upstream updates with a 7-day age gate. A GitHub release that cites a CVE waits 2 days, and 0 days when an OSV record for the CVE names its repository. Set `securityFastPath` to `false` in `server-config.json` to keep the 7-day gate for all releases.
 
 ## Data repo layout
 

@@ -25,6 +25,7 @@ interface Config {
   path: string | null
   token: string | null
   autoUpdate: boolean
+  securityFastPath: boolean
   update: UpdateState
 }
 interface ProvisionResult { script: string; code: number | null; output: string; truncated: boolean }
@@ -33,10 +34,11 @@ function loadConfig(): Config {
   try {
     const cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) as Config
     cfg.autoUpdate ??= false
+    cfg.securityFastPath ??= true
     cfg.update ??= { lastChecked: null, remoteSha: '', provisionedSha: '' }
     return cfg
   } catch {
-    const cfg: Config = { apiKey: null, repo: null, path: null, token: null, autoUpdate: false, update: { lastChecked: null, remoteSha: '', provisionedSha: '' } }
+    const cfg: Config = { apiKey: null, repo: null, path: null, token: null, autoUpdate: false, securityFastPath: true, update: { lastChecked: null, remoteSha: '', provisionedSha: '' } }
     saveConfig(cfg)
     return cfg
   }
@@ -335,7 +337,7 @@ async function updateCheck(): Promise<void> {
   if (updateRunning) return
   updateRunning = true
   try {
-    await checkUpdates(db, { token: dashToken(), dataRepo: dashState.source ? (dashState.source.kind === 'repo' ? dashState.source.name : dashState.source.spec) : null })
+    await checkUpdates(db, { token: dashToken(), securityFastPath: config.securityFastPath, dataRepo: dashState.source ? (dashState.source.kind === 'repo' ? dashState.source.name : dashState.source.spec) : null })
   } catch (err) {
     console.error(`update check failed: ${redactSecrets((err as Error).message, dashToken())}`)
   } finally { updateRunning = false }
