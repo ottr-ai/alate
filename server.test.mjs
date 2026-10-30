@@ -1765,6 +1765,19 @@ try {
         s11: [rel('1.1.0', 1, 'Fixes CVE-2026-2011.')],
         s12: [rel('1.1.0', 1, 'Fixes CVE-2026-2012.')],
         s13: [rel('1.1.0', 1, 'Also fixes CVE-2026-1234.')],
+        s14: [rel('1.1.0', 3, 'Changes:\r\n## Security release\r\n- bump deps')],
+        s15: [rel('1.1.0', 1, '* Security fix for the parser')],
+        s16: [rel('1.1.0', 2, 'Fixes ghsa-MRHX-c7xc-m3w5 and GHSA-mrhx-c7xc-m3w5. Not GHSA-abcd-c7xc-m3w5.')],
+        s17: [rel('1.1.0', 2, 'Plain bug fixes.')],
+        s18: [rel('1.1.0', 2, 'This release contains no security fix.\nSecurity fixture cleanup.\nSecurity: releases are signed.')],
+        s19: [rel('1.1.0', 2, 'Plain bug fixes.')],
+        s20: [rel('1.1.0', 1, '> Security update')],
+        s21: [rel('1.1.0', 1, '\tsecurity fixes')],
+      };
+      // Published repo advisories: s17 names 1.1.0 as patched, s19 only other versions or junk.
+      const advisories = {
+        s17: [{ ghsa_id: 'GHSA-2345-6789-cfgh', vulnerabilities: [{ patched_versions: '2.0.0' }, { patched_versions: '>= 1.0.9, v1.1.0' }] }, { ghsa_id: 'GHSA-jmpq-rvwx-2345', vulnerabilities: [{ patched_versions: '1.1.1' }] }],
+        s19: [{ ghsa_id: 'GHSA-2345-6789-cfgh', vulnerabilities: [{ patched_versions: '11.1.0, 1.1.03' }, { patched_versions: null }, null] }, { ghsa_id: 'GHSA-jmpq-rvwx-2345', vulnerabilities: 'bogus' }, null],
       };
       const osv = {
         'CVE-2026-1234': [200, { id: 'CVE-2026-1234', references: [{ url: 'https://github.com/fake/s1/security/advisories/GHSA-x' }] }],
@@ -1775,8 +1788,9 @@ try {
         'CVE-2026-2012': ref('https://github.com/fake/sx12/pull/1'),
       };
       handler = url => {
-        const gh = url.pathname.match(/^\/gh\/repos\/fake\/(s[\d.]+)\/releases$/);
+        const gh = url.pathname.match(/^\/gh\/repos\/fake\/(s[\d.]+)\/(releases|security-advisories)$/);
         const key = gh?.[1].replace('.', '');
+        if (gh?.[2] === 'security-advisories') return advisories[key] && url.searchParams.get('state') === 'published' ? [200, advisories[key]] : null;
         if (gh) return releases[key] ? [200, releases[key]] : null;
         const id = url.pathname.match(/^\/osv\/vulns\/(.+)$/)?.[1];
         return id ? osv[id] ?? null : null;
@@ -1790,26 +1804,59 @@ try {
       const r = rows(await run(files(Object.keys(releases))));
 
       assert.deepEqual([r.s1.target, r.s1.qualifiesAt, r.s1.publishedAt], ['1.1.0', pub('s1'), pub('s1')], JSON.stringify(r.s1));
-      assert.deepEqual(r.s1.security, { cves: ['CVE-2026-1234'], sources: ['osv:CVE-2026-1234'], tier: 'B' });
+      assert.deepEqual(r.s1.security, { cves: ['CVE-2026-1234'], ghsas: [], sources: ['osv:CVE-2026-1234'], tier: 'B' });
       assert.deepEqual(osvHits('CVE-2026-1234').map(h => h.auth), [null], 'one OSV GET per CVE id per run (s1 and s13 share it), without the token');
       assert.deepEqual([r.s13.security?.tier, r.s13.target], ['A', null], 'an OSV record tied to another repo does not lift the gate');
       assert.deepEqual([r.s11.security?.tier, r.s11.target, r.s12.security?.tier, r.s12.target], ['B', '1.1.0', 'A', null], 'dotted repo names match literally');
       assert.deepEqual([r.s2.target, r.s2.latest, r.s2.security, r.s2.qualifiesAt],
-        ['1.1.0', '1.1.0', { cves: ['CVE-2026-2002'], sources: [], tier: 'A' }, plusDays(pub('s2'), 2)], 'OSV 404 leaves tier A: a 2-day-old release passes');
+        ['1.1.0', '1.1.0', { cves: ['CVE-2026-2002'], ghsas: [], sources: [], tier: 'A' }, plusDays(pub('s2'), 2)], 'OSV 404 leaves tier A: a 2-day-old release passes');
       assert.deepEqual([r.s3.target, r.s4.target], ['1.1.0', null], 'tier A gate is 2 days');
       for (const [n, tier] of [['s5', 'A'], ['s6', 'B'], ['s7', 'A']])
         assert.deepEqual([r[n].security?.tier, r[n].target, r[n].error ?? null], [tier, tier === 'B' ? '1.1.0' : null, null], `${n}: ${JSON.stringify(r[n])}`);
       assert.deepEqual([r.s8.target, 'security' in r.s8, r.s8.qualifiesAt], [null, false, plusDays(pub('s8'), 7)], 'no CVE keeps the 7-day gate');
       assert.deepEqual([r.s9.target, r.s9.latest, 'security' in r.s9], ['1.1.0', '1.2.0', false], 'security data follows the picked release only');
       assert.deepEqual([r.s10.security?.cves.length, r.s10.security?.cves[19]], [20, many[19]], 'at most 20 CVE ids per release');
+      assert.deepEqual([r.s14.security?.tier, r.s14.target, r.s14.qualifiesAt], ['A', '1.1.0', plusDays(pub('s14'), 2)], 'a 3-day-old security release passes the 2-day gate');
+      assert.deepEqual(['s15', 's20', 's21'].map(n => [r[n].security?.tier, r[n].target]), [['A', null], ['A', null], ['A', null]], 'security fix/update/fixes lines are tier A; a 1-day-old one still waits');
+      assert.deepEqual([r.s16.target, r.s16.security], ['1.1.0', { cves: [], ghsas: ['GHSA-mrhx-c7xc-m3w5'], sources: [], tier: 'A' }], 'a GHSA-only body is tier A, never B');
+      assert.deepEqual([r.s17.target, r.s17.security], ['1.1.0', { cves: [], ghsas: ['GHSA-2345-6789-cfgh'], sources: [], tier: 'A' }], 'a repo advisory patched in the candidate is tier A');
+      assert.deepEqual(['security' in r.s18, r.s18.target, 'security' in r.s19, r.s19.target, r.s19.latest, r.s19.error ?? null], [false, null, false, null, '1.1.0', null], 'mid-sentence, longer words, other versions, junk advisories: no signal, no error');
+      assert.ok(hits.filter(h => h.p.endsWith('/security-advisories')).every(h => h.auth === 'Bearer tok-xyz'), 'advisory GETs carry the GitHub token');
 
       hits.length = 0;
       await run(files(['s8']));
-      assert.equal(osvHits().length, 0, 'no CVE, no OSV call');
+      assert.deepEqual([osvHits().length, hits.filter(h => h.p.endsWith('/security-advisories')).length], [0, 1], 'no CVE, no OSV call, one advisory GET');
 
       hits.length = 0;
       const off = rows(await run(files(['s1']), { securityFastPath: false }));
-      assert.deepEqual([off.s1.target, 'security' in off.s1, off.s1.qualifiesAt, osvHits().length], [null, false, plusDays(pub('s1'), 7), 0], 'securityFastPath: false is the plain 7-day gate');
+      assert.deepEqual([off.s1.target, 'security' in off.s1, off.s1.qualifiesAt, osvHits().length, hits.filter(h => h.p.includes('advisories')).length], [null, false, plusDays(pub('s1'), 7), 0, 0], 'securityFastPath: false is the plain 7-day gate');
+
+      // Property: release-author signals (body text, repo advisories) never lift the gate and
+      // never break the row, whatever their shape. No OSV record exists, so a 1-day-old release
+      // stays no target and its tier is never B.
+      const toks = ['security', 'Security', ' ', 'fix', 'fixes', 'release', 'update', '\n', '\r\n', '\t', '#', '>', '*', '-', '_',
+        'GHSA', 'GHSA-2345-6789-cfgh', 'ghsa-MRHX-c7xc-m3w5', 'CVE-2026-9999', 'cve-1-1', '1.1.0', 'x', ':'];
+      const junk = ['1.1.0', '>= 1.0.0, 1.1.0', null, 7, {}, [], 'bogus'];
+      const pick = (rand, a) => a[Math.floor(rand() * a.length)];
+      const cases = [];
+      forAll((rand, size) => {
+        const body = rand() < 0.1 ? null : Array.from({ length: Math.floor(rand() * 12 * size) }, () => pick(rand, toks)).join('');
+        const adv = rand() < 0.3 ? pick(rand, [null, {}, 'x']) : Array.from({ length: Math.floor(rand() * 3) }, () =>
+          rand() < 0.2 ? pick(rand, junk) : { ghsa_id: pick(rand, [...toks, null]), vulnerabilities: rand() < 0.2 ? pick(rand, junk) : [{ patched_versions: pick(rand, junk) }] });
+        return { body, adv };
+      }, input => { cases.push(input); });
+      handler = url => {
+        const m = url.pathname.match(/^\/gh\/repos\/fake\/p(\d+)\/(releases|security-advisories)$/);
+        if (!m) return null;
+        const c = cases[m[1]];
+        return [200, m[2] === 'releases' ? [rel('1.1.0', 1, c.body)] : c.adv];
+      };
+      const prop = rows(await run({ 'upstreams.json': UP(cases.map((_, i) => item(`p${i}`, { version: '1.0.0', check: { type: 'github-release', tagPrefix: 'v' } }))) }));
+      cases.forEach((c, i) => {
+        const p = prop[`p${i}`];
+        assert.deepEqual([p.target, p.error ?? null, p.security?.tier === 'B', p.security?.cves.length > 20, p.security?.ghsas.length > 20],
+          [null, null, false, false, false], `property failed: input=${JSON.stringify(c)} row=${JSON.stringify(p)}`);
+      });
     }
 
     // github-path: prefix-tolerant same-sha, query string shape, error rows, missing fields.

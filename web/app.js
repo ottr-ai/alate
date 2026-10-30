@@ -356,7 +356,7 @@ function updatesView() {
   const sheet = h('article', { class: 'sheet' },
     h('header', { class: 'sheet-head' },
       h('h1', { text: 'Updates' }),
-      h('p', { class: 'lede', text: 'Newer versions of the skills, plugins, and pinned tools in agent-data. A version is ready after it is 7 days old, after 2 days when its release notes cite a CVE, and at once when an OSV record for that CVE names its repository. Last check: ' + (checked ? new Date(checked).toLocaleString() : 'never') + '.' })));
+      h('p', { class: 'lede', text: 'Newer versions of the skills, plugins, and pinned tools in agent-data. A version is ready after it is 7 days old, after 2 days when its release marks a security fix (a CVE or GHSA id, a security-release line, or a repository advisory), and at once when an OSV record for a cited CVE names its repository. Last check: ' + (checked ? new Date(checked).toLocaleString() : 'never') + '.' })));
   if (!ups.length) {
     sheet.append(h('p', { class: 'note', text: 'No update sources in this snapshot: add upstreams.json, user/agents/.skill-lock.json, or user/omp/plugins/bun.lock.' }));
     return sheet;

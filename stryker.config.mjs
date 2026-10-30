@@ -37,6 +37,8 @@ export default {
   // - initial CLI selectors and the boot dashCheck duplicate the POST /api/import
   //   and tick paths; offline SQLite restart is covered by a second server instance;
   // - cloneRepo network paths: unreachable in a hermetic suite, no network in tests;
+  // - runReleaseCheck advisories fallback `[]` (non-array answer, fetch error): any filler
+  //   entry has no `vulnerabilities` array, so it can never name the candidate (equivalent);
   // - display-only inventory internals: recursion/sort/dedup details whose observable
   //   rows are asserted; initial config.update reset values masked by the boot update check.
   // Editor (dashboard file editor) survivors, each killed or justified:
