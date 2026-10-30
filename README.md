@@ -1,5 +1,7 @@
 # Alate
 
+<a href="https://github.com/ottr-ai/ottr"><img src="https://raw.githubusercontent.com/ottr-ai/ottr/main/.github/assets/built-with-ottr.png" alt="Built with Ottr" height="40"></a>
+
 > *"Alate (Latin ālātus, from āla ('wing')) is an adjective and noun used in entomology and botany to mean 'winged'"* — the winged reproductive form of an ant. ([Wikipedia: Alate](https://en.wikipedia.org/wiki/Alate))
 
 <p align="center">
