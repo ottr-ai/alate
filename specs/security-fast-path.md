@@ -109,7 +109,8 @@ to `node-dist` check rows (`runNodeCheck`, see "node-dist" below).
     `<nodeBlogBase>/v<version>`. `nodeBlogBase()` reads `ALATE_TEST_NODE_BLOG_BASE`, else
     `https://nodejs.org/en/blog/release`.
 12. The announcement text goes through the same advisory pass as a release body (rules 2, 5, 6)
-    with the repo `nodejs/node`.
+    with the repo `nodejs/node`, the entry version as the candidate, and `current`. So tier B
+    also needs an OSV `fixed` version `f` with `current < f <= candidate`.
 13. `security: true` without CVE ids gives tier A (`cves: []`, `sources: []`). A non-ok status,
     a network error, or a failed body read on the announcement counts as "no CVE ids", so the
     flag still gives tier A.
@@ -163,8 +164,9 @@ The lede of the updates view names the shorter gates.
 - Each feed URL gets one GET per run. A row without `advisoryProduct` and `securityFastPath: false`
   make no feed request.
 - A 1-day-old node-dist entry with `security: true`, whose announcement cites a CVE with an OSV
-  record that references `github.com/nodejs/node`, is the target with tier B. Without the OSV
-  record it is tier A and not the target. With `securityFastPath: false`, the 7-day gate applies.
+  record that references `github.com/nodejs/node` and has a fix at the entry version, is the
+  target with tier B. Without the OSV record, or with an OSV fix after the entry version, it is
+  tier A and not the target. With `securityFastPath: false`, the 7-day gate applies.
 
 ## Non-goals (own cards)
 

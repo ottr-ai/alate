@@ -2254,10 +2254,14 @@ try {
           // Upstream fields that look like a computed verdict must never lift the gate.
           { version: 'v14.9.0', date: daysAgo(1), security: false, advisory: { cves: [], sources: ['osv:x'], tier: 'B' } },
           { version: 'v12.9.0', date: daysAgo(3), security: true },
+          { version: 'v24.2.0', date: daysAgo(1), security: true },
         ]];
-        const blog = { '/blog/v22.31.0': 'Fixes CVE-2026-9001 (high).', '/blog/v20.9.0': 'Fixes cve-2026-9002.', '/blog/v16.9.0': 'Fixes CVE-2026-9001.' };
+        const blog = { '/blog/v22.31.0': 'Fixes CVE-2026-9001 (high).', '/blog/v20.9.0': 'Fixes cve-2026-9002.', '/blog/v16.9.0': 'Fixes CVE-2026-9001.', '/blog/v24.2.0': 'Fixes CVE-2026-9004.' };
         if (blog[url.pathname]) return [200, blog[url.pathname]];
-        if (url.pathname === '/osv/vulns/CVE-2026-9001') return [200, { id: 'CVE-2026-9001', references: [{ url: 'https://github.com/nodejs/node/commit/abc' }] }];
+        const nodeRec = (id, fixed) => [200, { id, references: [{ url: 'https://github.com/nodejs/node/commit/abc' }], affected: [{ ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }, { fixed }] }] }] }];
+        if (url.pathname === '/osv/vulns/CVE-2026-9001') return nodeRec('CVE-2026-9001', '22.31.0');
+        // The fix lands after the candidate: the candidate is still affected.
+        if (url.pathname === '/osv/vulns/CVE-2026-9004') return nodeRec('CVE-2026-9004', '24.3.0');
         if (url.pathname === '/blog/v18.9.0') return [404, 'Not found. See CVE-2026-9003.']; // an error page never counts
         if (url.pathname === '/blog/v12.9.0') return [200, 'Fixes CVE-2026-9001', 'abort']; // body read fails after HTTP 200
         return null;
@@ -2269,6 +2273,7 @@ try {
         item('ns4', { version: '16.8.0', check: { type: 'node-dist', major: 16 } }),
         item('ns5', { version: '14.8.0', check: { type: 'node-dist', major: 14 } }),
         item('ns6', { version: '12.8.0', check: { type: 'node-dist', major: 12 } }),
+        item('ns7', { version: '24.1.0', check: { type: 'node-dist', major: 24 } }),
       ]);
       hits.length = 0;
       const r = rows(await run({ 'upstreams.json': files }));
@@ -2281,6 +2286,7 @@ try {
       assert.ok(!hits.some(h => h.p === '/blog/v16.9.0'), 'no announcement fetch without the flag');
       assert.deepEqual([r.ns5.target, 'security' in r.ns5, r.ns5.notesUrl], [null, false, `${upBase}/dist/`], 'an upstream advisory field is ignored');
       assert.deepEqual([r.ns6.target, r.ns6.security, r.ns6.error ?? null], ['12.9.0', { cves: [], sources: [], tier: 'A' }, null], 'a failed body read still gives tier A');
+      assert.deepEqual([r.ns7.target, r.ns7.latest, r.ns7.security], [null, '24.2.0', { cves: ['CVE-2026-9004'], sources: [], tier: 'A' }], 'an OSV fix after the candidate does not lift the gate');
       hits.length = 0;
       const off = rows(await run({ 'upstreams.json': files }, { securityFastPath: false }));
       assert.deepEqual([off.ns1.target, 'security' in off.ns1, off.ns1.qualifiesAt, off.ns1.notesUrl], [null, false, plusDays(off.ns1.publishedAt, 7), `${upBase}/dist/`], 'securityFastPath: false keeps the 7-day gate');
