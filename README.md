@@ -45,7 +45,7 @@ Capture is the prepared way to get a usable setup. Docker Compose is the prepare
 - **Provision** runs `sync.mjs` (rules into `~/.omp/agent/rules`) and `install-user.mjs` (the user layer) from the snapshot into the container home volume. The image carries the pinned SkillSpector build that `install-user.mjs` requires; a host that runs the script outside the image installs it by hand (see the script header).
 - Workers mount the same volume.
 - The **dashboard** lists the snapshot inventory and edits files. Each edit commits and pushes.
-- The dashboard shows upstream updates with a 7-day age gate. A GitHub release waits only 2 days when it marks a security fix: its notes cite a CVE or GHSA id or have a security-release line (for example `## Security release`), or a published advisory of its repository names it as patched. It waits 0 days when an OSV record for a cited CVE names its repository. Set `securityFastPath` to `false` in `server-config.json` to keep the 7-day gate for all releases.
+- The dashboard shows upstream updates with a 7-day age gate. A GitHub release waits only 2 days when it marks a security fix: its notes cite a CVE or GHSA id or have a security-release line (for example `## Security release`), or a published advisory of its repository names it as patched. It waits 0 days when a live OSV record for a cited CVE binds an affected package to its GitHub repository, and that package's ranges cover the installed version but not the release. Only SemVer versions (`SEMVER` ranges, and the `npm` and `crates.io` ecosystems) can remove the gate. Other ecosystems, such as PyPI or Debian, keep the 2-day gate. Set `securityFastPath` to `false` in `server-config.json` to keep the 7-day gate for all releases.
 
 ## Data repo layout
 

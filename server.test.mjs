@@ -1614,7 +1614,7 @@ try {
   }
 // Mutation survivors covered by this section: lib/updates.mjs ====
 {
-  const { initUpdates, cmpVer, checkUpdates, loadUpdates } = await import('./lib/updates.mjs');
+  const { initUpdates, cmpVer, cmpSemver, checkUpdates, loadUpdates } = await import('./lib/updates.mjs');
   const daysAgo = n => new Date(Date.now() - n * 86_400_000).toISOString();
   const plusDays = (iso, n) => new Date(Date.parse(iso) + n * 86_400_000).toISOString();
   const old30 = daysAgo(30), fresh2 = daysAgo(2);
@@ -1658,6 +1658,15 @@ try {
     // cmpVer pinned edges beyond the property tier: extra segments, junk, prefixes, case.
     for (const [a, b, s] of [['1.2.3.4', '1.2.3', 1], ['1.2.3', '1.2.3.0', 0], ['V2.0', '1.9', 1], ['1a', '1', 0], ['a', '1', -1], ['1.0.x', '1.0.0', 0], ['1.02', '1.2', 0], ['', '0', 0], ['v', '0', 0], ['10.0', '9.0', 1], ['a1', '1', -1], ['1v2', '1.2', -1], ['1.2', '1v2', 1]])
       assert.equal(Math.sign(cmpVer(a, b)), s, `cmpVer(${a}, ${b})`);
+    // cmpSemver: the SemVer 2.0 spec precedence chain (section 11), every pair in both directions, plus build metadata.
+    // The leading entries pin identifier rules: equal numbers fall through, numeric < alphanumeric, ASCII order.
+    {
+      const chain = ['1.0.0-1.a', '1.0.0-1.b', '1.0.0-2', '1.0.0-1a', '1.0.0-a1', '1.0.0-alpha', '1.0.0-alpha.1', '1.0.0-alpha.beta', '1.0.0-beta', '1.0.0-beta.2', '1.0.0-beta.11', '1.0.0-rc.1', '1.0.0', '1.0.1-0', '1.0.1', '2.0.0-rc.1', '2.0.0'];
+      for (let i = 0; i < chain.length; i++)
+        for (let j = 0; j < chain.length; j++)
+          assert.equal(Math.sign(cmpSemver(chain[i], chain[j])), Math.sign(i - j), `cmpSemver(${chain[i]}, ${chain[j]})`);
+      assert.equal(cmpSemver('1.0.0+build.7', '1.0.0'), 0, 'build metadata is ignored');
+    }
 
     // initUpdates is idempotent and both tables work.
     {
@@ -1749,7 +1758,9 @@ try {
     // github-release security fast path: tier A (body cites a CVE) and tier B (OSV record ties the CVE to the repo).
     {
       const rel = (v, age, body) => ({ tag_name: `v${v}`, draft: false, prerelease: false, published_at: daysAgo(age), html_url: `n${v}`, body });
-      const ref = url => [200, { id: 'x', references: [{ url }] }];
+      const fixedAt = (fixed, extra = {}) => ({ type: 'ECOSYSTEM', events: [{ introduced: '0' }, { fixed }], ...extra });
+      const semverAt = fixed => ({ type: 'SEMVER', events: [{ introduced: '0' }, { fixed }] });
+      const ref = (url, extra = {}) => [200, { id: 'x', references: [{ url }], affected: [{ ranges: [fixedAt('1.1.0')] }], ...extra }];
       const many = Array.from({ length: 25 }, (_, i) => `CVE-2027-${1000 + i}`);
       const releases = {
         s1: [rel('1.1.0', 1, 'Fixes cve-2026-1234 and CVE-2026-1234.')],
@@ -1765,39 +1776,146 @@ try {
         s11: [rel('1.1.0', 1, 'Fixes CVE-2026-2011.')],
         s12: [rel('1.1.0', 1, 'Fixes CVE-2026-2012.')],
         s13: [rel('1.1.0', 1, 'Also fixes CVE-2026-1234.')],
-        s14: [rel('1.1.0', 3, 'Changes:\r\n## Security release\r\n- bump deps')],
-        s15: [rel('1.1.0', 1, '* Security fix for the parser')],
-        s16: [rel('1.1.0', 2, 'Fixes ghsa-MRHX-c7xc-m3w5 and GHSA-mrhx-c7xc-m3w5. Not GHSA-abcd-c7xc-m3w5.')],
-        s17: [rel('1.1.0', 2, 'Plain bug fixes.')],
-        s18: [rel('1.1.0', 2, 'This release contains no security fix.\nSecurity fixture cleanup.\nSecurity: releases are signed.')],
-        s19: [rel('1.1.0', 2, 'Plain bug fixes.')],
-        s20: [rel('1.1.0', 1, '> Security update')],
-        s21: [rel('1.1.0', 1, '\tsecurity fixes')],
+        // g14-g21: release-author tier A signals (security lines, GHSA ids, repo advisories).
+        g14: [rel('1.1.0', 3, 'Changes:\r\n## Security release\r\n- bump deps')],
+        g15: [rel('1.1.0', 1, '* Security fix for the parser')],
+        g16: [rel('1.1.0', 2, 'Fixes ghsa-MRHX-c7xc-m3w5 and GHSA-mrhx-c7xc-m3w5. Not GHSA-abcd-c7xc-m3w5.')],
+        g17: [rel('1.1.0', 2, 'Plain bug fixes.')],
+        g18: [rel('1.1.0', 2, 'This release contains no security fix.\nSecurity fixture cleanup.\nSecurity: releases are signed.')],
+        g19: [rel('1.1.0', 2, 'Plain bug fixes.')],
+        g20: [rel('1.1.0', 1, '> Security update')],
+        g21: [rel('1.1.0', 1, '\tsecurity fixes')],
+        ...Object.fromEntries([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40].map(i => [`s${i}`, [rel('1.1.0', 1, `Fixes CVE-2026-20${i}.`)]])),
+        s25: [rel('2.0.0', 1, 'Fixes CVE-2026-2025.')],
+        s26: [rel('2.0.1', 1, 'Fixes CVE-2026-2026.')],
+        s41: [rel('1.1.0', 1, 'Fixes CVE-2026-2041.')],
+        s42: [rel('2.0.0', 1, 'Fixes CVE-2026-2042.')],
+        s43: [rel('1.1.0', 1, 'Fixes CVE-2026-2043.')],
+        s44: [rel('1.1.0', 1, 'Fixes CVE-2026-2044.')],
+        s45: [rel('1.1.0', 1, 'Fixes CVE-2026-2045.')],
+        s46: [rel('1.10.0', 1, 'Fixes CVE-2026-2046.')],
+        s49: [rel('10.10.10', 1, 'Fixes CVE-2026-2049.')],
+        s57: [rel('10.0.0', 1, 'Fixes CVE-2026-2057.')],
+        s58: [rel('1.1', 1, 'Fixes CVE-2026-2058.')],
+        s59: [rel('1.1', 1, 'Fixes CVE-2026-2059.')],
+        ...Object.fromEntries([47, 48, 50, 51, 52, 53, 54, 55, 56, 60, 61, 62, 63, 64, 65].map(i => [`s${i}`, [rel('1.1.0', 1, `Fixes CVE-2026-20${i}.`)]])),
       };
-      // Published repo advisories: s17 names 1.1.0 as patched, s19 only other versions or junk.
+      // Published repo advisories: g17 names 1.1.0 as patched, g19 only other versions or junk.
       const advisories = {
-        s17: [{ ghsa_id: 'GHSA-2345-6789-cfgh', vulnerabilities: [{ patched_versions: '2.0.0' }, { patched_versions: '>= 1.0.9, v1.1.0' }] }, { ghsa_id: 'GHSA-jmpq-rvwx-2345', vulnerabilities: [{ patched_versions: '1.1.1' }] }],
-        s19: [{ ghsa_id: 'GHSA-2345-6789-cfgh', vulnerabilities: [{ patched_versions: '11.1.0, 1.1.03' }, { patched_versions: null }, null] }, { ghsa_id: 'GHSA-jmpq-rvwx-2345', vulnerabilities: 'bogus' }, null],
+        g17: [{ ghsa_id: 'GHSA-2345-6789-cfgh', vulnerabilities: [{ patched_versions: '2.0.0' }, { patched_versions: '>= 1.0.9, v1.1.0' }] }, { ghsa_id: 'GHSA-jmpq-rvwx-2345', vulnerabilities: [{ patched_versions: '1.1.1' }] }],
+        g19: [{ ghsa_id: 'GHSA-2345-6789-cfgh', vulnerabilities: [{ patched_versions: '11.1.0, 1.1.03' }, { patched_versions: null }, null] }, { ghsa_id: 'GHSA-jmpq-rvwx-2345', vulnerabilities: 'bogus' }, null],
       };
       const osv = {
-        'CVE-2026-1234': [200, { id: 'CVE-2026-1234', references: [{ url: 'https://github.com/fake/s1/security/advisories/GHSA-x' }] }],
+        'CVE-2026-1234': ref('https://github.com/fake/s1/security/advisories/GHSA-x'),
         'CVE-2026-2005': ref('https://github.com/fake/s5-other/security/advisories/GHSA-y'),
         'CVE-2026-2006': ref('https://github.com/FAKE/S6/commit/abc'),
         'CVE-2026-2007': [500, { message: 'boom' }],
         'CVE-2026-2011': ref('https://github.com/fake/s.11/pull/1'),
         'CVE-2026-2012': ref('https://github.com/fake/sx12/pull/1'),
+        'CVE-2026-2014': ref('https://notgithub.com/fake/s14/commit/old'),
+        'CVE-2026-2015': ref('https://github.com/fake/s15/commit/a', { withdrawn: '2026-10-01T00:00:00Z' }),
+        'CVE-2026-2016': ref('https://github.com/fake/s16/commit/a', { affected: [{ ranges: [fixedAt('2.0.0')] }] }),
+        'CVE-2026-2017': ref('https://github.com/fake/s17/commit/a', { affected: [{ ranges: [fixedAt('0.9.0')] }] }),
+        'CVE-2026-2018': [200, { id: 'x', affected: [{ ranges: [{ type: 'GIT', repo: 'https://github.com/fake/s18', events: [{ introduced: '0' }, { fixed: '1.1.0' }] }] }] }],
+        'CVE-2026-2019': [200, { id: 'x', affected: [{ ranges: [fixedAt('1.1.0', { repo: 'https://github.com/fake/s19.git' })] }] }],
+        'CVE-2026-2020': ref('https://github.com/fake/s20.gitkit/pull/1'),
+        'CVE-2026-2021': ref('https://github.com/other/s21/pull/1'),
+        'CVE-2026-2022': ref('https://github.com/fake/s22', { affected: [{ ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }, { fixed: '1.1.0' }] }] }] }),
+        'CVE-2026-2023': ref('https://github.com/fake/s23', { affected: [{ ranges: [fixedAt('1.0.0')] }] }),
+        // Malformed entries are skipped, and one matching range in the entry is enough.
+        'CVE-2026-2024': [200, { id: 'x', references: [null, { url: 'not a url' }, { url: 'https://github.com/fake' }, { url: 'https://github.com/fake/s24' }], affected: [
+          null,
+          'junk',
+          { ranges: [null, fixedAt('0.5.0'), { type: 'GIT', events: [{ fixed: '1.1.0' }] }, { type: 'ECOSYSTEM', events: [null, { introduced: '0' }, { fixed: '1.1.0' }] }] },
+        ] }],
+        // Reintroduced at 2.0.0 and fixed again at 2.0.1: s25's candidate 2.0.0 is affected, s26's 2.0.1 is not.
+        'CVE-2026-2025': ref('https://github.com/fake/s25', { affected: [{ ranges: [{ type: 'ECOSYSTEM', events: [{ introduced: '0' }, { fixed: '1.0.1' }, { introduced: '2.0.0' }, { fixed: '2.0.1' }] }] }] }),
+        'CVE-2026-2026': ref('https://github.com/fake/s26', { affected: [{ ranges: [{ type: 'ECOSYSTEM', events: [{ introduced: '0' }, { fixed: '1.0.1' }, { introduced: '2.0.0' }, { fixed: '2.0.1' }] }] }] }),
+        'CVE-2026-2027': ref('https://github.com/fake/s27', { affected: [{ package: { ecosystem: 'npm', name: 'other' }, ranges: [fixedAt('1.1.0')] }, { package: { ecosystem: 'npm', name: 'proj' }, ranges: [fixedAt('2.0.0')] }] }),
+        'CVE-2026-2028': ref('https://github.com/fake/s28', { affected: [
+          { package: { ecosystem: 'npm', name: 'other' }, ranges: [fixedAt('1.1.0', { repo: 'https://github.com/other/x' })] },
+          { package: { ecosystem: 'npm', name: 'proj' }, ranges: [fixedAt('2.0.0', { repo: 'https://github.com/fake/s28' })] },
+        ] }),
+        'CVE-2026-2029': ref('https://github.com/fake/s29', { affected: [
+          { package: { ecosystem: 'npm', name: 'other' }, ranges: [fixedAt('2.0.0', { repo: 'https://github.com/other/x' })] },
+          { package: { ecosystem: 'npm', name: 'proj' }, ranges: [fixedAt('0.5.0'), fixedAt('1.1.0', { repo: 'https://github.com/fake/s29' })] },
+        ] }),
+        'CVE-2026-2030': ref('https://github.com/fake/s30', { affected: [{ ranges: [{ type: 'ECOSYSTEM', events: [{ introduced: '0' }, { last_affected: '1.0.5' }] }] }] }),
+        'CVE-2026-2031': ref('https://github.com/fake/s31', { affected: [{ versions: ['1.0.0', '1.1.0'], ranges: [fixedAt('1.1.0')] }] }),
+        'CVE-2026-2032': ref('https://github.com/fake/s32', { affected: [{ ranges: [{ type: 'ECOSYSTEM', events: [{ introduced: '1.0.1' }, { fixed: '1.1.0' }] }] }] }),
+        'CVE-2026-2033': ref('https://github.com/fake/s33', { affected: [{ package: { name: 'a' }, ranges: [fixedAt('1.1.0')] }, { package: { name: 'b' }, ranges: [fixedAt('1.1.0')] }] }),
+        'CVE-2026-2034': ref('https://github.com/fake/s34', { affected: [{ ranges: [{ type: 'ECOSYSTEM', events: [{ fixed: '1.1.0' }, { introduced: '0' }, { limit: '9.9.9' }] }] }] }),
+        'CVE-2026-2035': ref('https://github.com/fake/s35', { affected: [{ ranges: [{ type: 'ECOSYSTEM', events: [{ introduced: '0' }, { last_affected: '1.0.0' }] }] }] }),
+        'CVE-2026-2036': ref('https://github.com/fake/s36', { affected: [{ versions: ['1.0.0'], ranges: [fixedAt('1.1.0')] }] }),
+        'CVE-2026-2037': ref('https://github.com/fake/s37'),
+        'CVE-2026-2038': ref('https://github.com/fake/s38', { affected: [{ versions: ['1.0.0'], ranges: [{ type: 'GIT', repo: 'https://github.com/fake/s38', events: [{ introduced: '0' }] }] }] }),
+        'CVE-2026-2039': [200, { id: 'x', affected: [
+          { ranges: [{ type: 'GIT', repo: 'https://github.com/fake/s39', events: [{ introduced: '0' }] }] },
+          { ranges: [fixedAt('1.1.0', { repo: 'https://github.com/fake/s39' })] },
+        ] }],
+        'CVE-2026-2040': [200, { id: 'x', affected: [
+          { ranges: [fixedAt('1.1.0', { repo: 'https://github.com/fake/s40' })] },
+          { ranges: [fixedAt('2.0.0', { repo: 'https://github.com/fake/s40' })] },
+        ] }],
+        // The only affected entry names another repo in its GIT range: a reference to the tracked repo must not bind it.
+        'CVE-2026-2041': ref('https://github.com/fake/s41', { affected: [{ ranges: [
+          { type: 'GIT', repo: 'https://github.com/other/x', events: [{ introduced: '0' }, { fixed: 'abc123' }] }, fixedAt('1.1.0'),
+        ] }] }),
+        // SemVer order: 2.0.0-rc.1 < 2.0.0 < 2.0.1, so the candidate 2.0.0 sits inside the second interval.
+        'CVE-2026-2042': ref('https://github.com/fake/s42', { affected: [{ ranges: [
+          { type: 'SEMVER', events: [{ introduced: '0' }, { fixed: '1.0.1' }, { introduced: '2.0.0-rc.1' }, { fixed: '2.0.1' }] },
+        ] }] }),
+        // PEP 440: 1.1.0 < 1.1.0.post1, so the candidate 1.1.0 is still affected. Unsupported forms fail closed.
+        'CVE-2026-2043': ref('https://github.com/fake/s43', { affected: [{ package: { ecosystem: 'PyPI', name: 's43' }, ranges: [fixedAt('1.1.0.post1')] }] }),
+        // versions[] membership is exact: '1.0.0-rc' does not name the installed 1.0.0.
+        'CVE-2026-2044': ref('https://github.com/fake/s44', { affected: [{ versions: ['1.0.0-rc'], ranges: [fixedAt('0.5.0')] }] }),
+        // Installed 0.0.0 sits below [0.1.0, 1.1.0) and no versions[] names it: never affected.
+        'CVE-2026-2045': ref('https://github.com/fake/s45', { affected: [{ ranges: [{ type: 'ECOSYSTEM', events: [{ introduced: '0.1.0' }, { fixed: '1.1.0' }] }] }] }),
+        // Version forms: plain dotted numbers for ECOSYSTEM, SemVer 2.0 for SEMVER; anything else fails closed.
+        'CVE-2026-2046': ref('https://github.com/fake/s46', { affected: [{ ranges: [fixedAt('1.10.0')] }] }),
+        'CVE-2026-2047': ref('https://github.com/fake/s47', { affected: [{ ranges: [semverAt('v1.1.0')] }] }),
+        'CVE-2026-2048': ref('https://github.com/fake/s48', { affected: [{ ranges: [semverAt('1.1.0_x')] }] }),
+        'CVE-2026-2049': ref('https://github.com/fake/s49', { affected: [{ ranges: [semverAt('10.10.10')] }] }),
+        'CVE-2026-2050': ref('https://github.com/fake/s50', { affected: [{ ranges: [semverAt('1.1.0-rc.1')] }] }),
+        'CVE-2026-2051': ref('https://github.com/fake/s51', { affected: [{ ranges: [semverAt('1.1.0+build.1')] }] }),
+        'CVE-2026-2052': ref('https://github.com/fake/s52', { affected: [{ ranges: [fixedAt('1.1')] }] }),
+        'CVE-2026-2053': ref('https://github.com/fake/s53'),
+        'CVE-2026-2054': ref('https://github.com/fake/s54', { affected: [{ versions: ['1.0.0-rc.1'], ranges: [semverAt('0.5.0')] }] }),
+        'CVE-2026-2055': ref('https://github.com/fake/s55', { affected: [{ versions: ['1.0'], ranges: [fixedAt('0.5.0')] }] }),
+        'CVE-2026-2057': ref('https://github.com/fake/s57', { affected: [{ ranges: [fixedAt('10.0.0')] }] }),
+        // Debian (dpkg) order: 1.1 < 1.1.0, so the candidate 1.1 is still inside [0, 1.1.0). No Debian comparator: tier A.
+        'CVE-2026-2058': ref('https://github.com/fake/s58', { affected: [{ package: { ecosystem: 'Debian:12', name: 's58' }, ranges: [fixedAt('1.1.0')] }] }),
+        // Debian equality: versions ['1.0.0'] does not name the installed 1.0. No Debian comparator: tier A.
+        'CVE-2026-2059': ref('https://github.com/fake/s59', { affected: [{ package: { ecosystem: 'Debian:12', name: 's59' }, versions: ['1.0.0'], ranges: [fixedAt('0.5')] }] }),
+        // Plain SemVer-shaped numbers in an ecosystem without a comparator still fail closed; crates.io is SemVer.
+        'CVE-2026-2060': ref('https://github.com/fake/s60', { affected: [{ package: { ecosystem: 'PyPI', name: 's60' }, ranges: [fixedAt('1.1.0')] }] }),
+        'CVE-2026-2061': ref('https://github.com/fake/s61', { affected: [{ package: { ecosystem: 'crates.io', name: 's61' }, ranges: [fixedAt('1.1.0')] }] }),
+        // A SEMVER range is SemVer in any ecosystem, also with a null package; a non-SemVer introduced fails closed.
+        'CVE-2026-2062': ref('https://github.com/fake/s62', { affected: [{ package: { ecosystem: 'PyPI', name: 's62' }, ranges: [semverAt('1.1.0')] }] }),
+        'CVE-2026-2063': ref('https://github.com/fake/s63', { affected: [{ package: null, ranges: [semverAt('1.1.0')] }] }),
+        'CVE-2026-2064': ref('https://github.com/fake/s64', { affected: [{ ranges: [{ type: 'ECOSYSTEM', events: [{ introduced: '1.0' }, { fixed: '1.1.0' }] }] }] }),
+        'CVE-2026-2065': ref('https://github.com/fake/s65', { affected: [{ package: null, ranges: [fixedAt('1.1.0')] }] }),
+        'CVE-2026-2056': [200, { id: 'x', affected: [
+          { ranges: [fixedAt('1.1.0', { repo: 'https://github.com/fake/s56' })] },
+          { ranges: [fixedAt('1.1.0.post1', { repo: 'https://github.com/fake/s56' })] },
+        ] }],
       };
       handler = url => {
-        const gh = url.pathname.match(/^\/gh\/repos\/fake\/(s[\d.]+)\/(releases|security-advisories)$/);
-        const key = gh?.[1].replace('.', '');
+        const gh = url.pathname.match(/^\/gh\/repos\/(.+)\/(releases|security-advisories)$/);
+        const key = gh && (Object.keys(repoOf).find(n => repoOf[n] === gh[1]) ?? gh[1].replace(/^fake\//, ''));
         if (gh?.[2] === 'security-advisories') return advisories[key] && url.searchParams.get('state') === 'published' ? [200, advisories[key]] : null;
         if (gh) return releases[key] ? [200, releases[key]] : null;
         const id = url.pathname.match(/^\/osv\/vulns\/(.+)$/)?.[1];
-        return id ? osv[id] ?? null : null;
+        const res = id ? osv[id] ?? null : null;
+        // Fixture entries without a package default to npm (SemVer order); explicit packages stay as written.
+        const npm = a => a && typeof a === 'object' && !('package' in a) ? { ...a, package: { ecosystem: 'npm' } } : a;
+        return res && Array.isArray(res[1]?.affected) ? [res[0], { ...res[1], affected: res[1].affected.map(npm) }] : res;
       };
       // s11/s12 live in dotted repos: the repo name is matched literally, never as a regex.
-      const repoOf = { s11: 'fake/s.11', s12: 'fake/s.12' };
-      const files = names => ({ 'upstreams.json': UP(names.map(n => item(n, { version: '1.0.0', check: { type: 'github-release', tagPrefix: 'v', ...(repoOf[n] ? { repo: repoOf[n] } : {}) } }))) });
+      const repoOf = { s11: 'fake/s.11', s12: 'fake/s.12', s20: 'fake/s20.gitkit' };
+      // s37 has no installed version: an unknown current never lifts the gate.
+      const currentOf = { s45: '0.0.0', s53: '1.0.0~1', s54: '1.0.0-rc.1', s58: '1.0', s59: '1.0' };
+      const files = names => ({ 'upstreams.json': UP(names.map(n => item(n, { ...(n === 's37' ? {} : { version: currentOf[n] ?? '1.0.0' }), check: { type: 'github-release', tagPrefix: 'v', ...(repoOf[n] ? { repo: repoOf[n] } : {}) } }))) });
       const osvHits = id => hits.filter(h => h.p.startsWith('/osv/') && (!id || h.p === `/osv/vulns/${id}`));
       const pub = n => releases[n][0].published_at;
       hits.length = 0;
@@ -1816,12 +1934,52 @@ try {
       assert.deepEqual([r.s8.target, 'security' in r.s8, r.s8.qualifiesAt], [null, false, plusDays(pub('s8'), 7)], 'no CVE keeps the 7-day gate');
       assert.deepEqual([r.s9.target, r.s9.latest, 'security' in r.s9], ['1.1.0', '1.2.0', false], 'security data follows the picked release only');
       assert.deepEqual([r.s10.security?.cves.length, r.s10.security?.cves[19]], [20, many[19]], 'at most 20 CVE ids per release');
-      assert.deepEqual([r.s14.security?.tier, r.s14.target, r.s14.qualifiesAt], ['A', '1.1.0', plusDays(pub('s14'), 2)], 'a 3-day-old security release passes the 2-day gate');
-      assert.deepEqual(['s15', 's20', 's21'].map(n => [r[n].security?.tier, r[n].target]), [['A', null], ['A', null], ['A', null]], 'security fix/update/fixes lines are tier A; a 1-day-old one still waits');
-      assert.deepEqual([r.s16.target, r.s16.security], ['1.1.0', { cves: [], ghsas: ['GHSA-mrhx-c7xc-m3w5'], sources: [], tier: 'A' }], 'a GHSA-only body is tier A, never B');
-      assert.deepEqual([r.s17.target, r.s17.security], ['1.1.0', { cves: [], ghsas: ['GHSA-2345-6789-cfgh'], sources: [], tier: 'A' }], 'a repo advisory patched in the candidate is tier A');
-      assert.deepEqual(['security' in r.s18, r.s18.target, 'security' in r.s19, r.s19.target, r.s19.latest, r.s19.error ?? null], [false, null, false, null, '1.1.0', null], 'mid-sentence, longer words, other versions, junk advisories: no signal, no error');
+      assert.deepEqual([r.g14.security?.tier, r.g14.target, r.g14.qualifiesAt], ['A', '1.1.0', plusDays(pub('g14'), 2)], 'a 3-day-old security release passes the 2-day gate');
+      assert.deepEqual(['g15', 'g20', 'g21'].map(n => [r[n].security?.tier, r[n].target]), [['A', null], ['A', null], ['A', null]], 'security fix/update/fixes lines are tier A; a 1-day-old one still waits');
+      assert.deepEqual([r.g16.target, r.g16.security], ['1.1.0', { cves: [], ghsas: ['GHSA-mrhx-c7xc-m3w5'], sources: [], tier: 'A' }], 'a GHSA-only body is tier A, never B');
+      assert.deepEqual([r.g17.target, r.g17.security], ['1.1.0', { cves: [], ghsas: ['GHSA-2345-6789-cfgh'], sources: [], tier: 'A' }], 'a repo advisory patched in the candidate is tier A');
+      assert.deepEqual(['security' in r.g18, r.g18.target, 'security' in r.g19, r.g19.target, r.g19.latest, r.g19.error ?? null], [false, null, false, null, '1.1.0', null], 'mid-sentence, longer words, other versions, junk advisories: no signal, no error');
       assert.ok(hits.filter(h => h.p.endsWith('/security-advisories')).every(h => h.auth === 'Bearer tok-xyz'), 'advisory GETs carry the GitHub token');
+      // s14 look-alike host, s15 withdrawn, s16 fix newer than candidate, s17 fixed before current, s18 GIT range only,
+      // s21 same name under another owner, s23 fixed exactly at current: tier A.
+      for (const n of ['s14', 's15', 's16', 's17', 's18', 's21', 's23'])
+        assert.deepEqual([r[n].security?.tier, r[n].target], ['A', null], `${n}: ${JSON.stringify(r[n])}`);
+      // s19 ECOSYSTEM range repo with .git, s20 repo name containing ".git", s22 SEMVER range, s24 malformed entries skipped: tier B.
+      for (const n of ['s19', 's20', 's22', 's24'])
+        assert.deepEqual([r[n].security?.tier, r[n].target, r[n].error ?? null], ['B', '1.1.0', null], `${n}: ${JSON.stringify(r[n])}`);
+      // s25 candidate in a reintroduced range, s27 two entries bound only by references (ambiguous), s28 the bound entry's fix
+      // is newer, s31 versions list names the candidate, s32 installed version never affected: tier A.
+      // s26 fix of the reintroduced range, s29 the bound entry's fix is the candidate, s30 candidate past last_affected: tier B.
+      for (const [n, tier, target] of [['s25', 'A', null], ['s26', 'B', '2.0.1'], ['s27', 'A', null], ['s28', 'A', null],
+        ['s29', 'B', '1.1.0'], ['s30', 'B', '1.1.0'], ['s31', 'A', null], ['s32', 'A', null]])
+        assert.deepEqual([r[n].security?.tier, r[n].target, r[n].error ?? null], [tier, target, null], `${n}: ${JSON.stringify(r[n])}`);
+      assert.equal(r.s25.latest, '2.0.0', JSON.stringify(r.s25));
+      // s33 two packages with the same fix, bound only by references (ambiguous), s37 unknown current, s38 versions list
+      // without a SEMVER/ECOSYSTEM range, s40 a second bound entry still covers the candidate: tier A.
+      // s34 unsorted events with a key-less limit event, s35 current equals last_affected, s36 versions list names only
+      // current, s39 one GIT-only bound entry beside a SEMVER-like one: tier B.
+      for (const [n, tier, target] of [['s33', 'A', null], ['s37', 'A', null], ['s38', 'A', null], ['s40', 'A', null],
+        ['s34', 'B', '1.1.0'], ['s35', 'B', '1.1.0'], ['s36', 'B', '1.1.0'], ['s39', 'B', '1.1.0']])
+        assert.deepEqual([r[n].security?.tier, r[n].target, r[n].error ?? null], [tier, target, null], `${n}: ${JSON.stringify(r[n])}`);
+      assert.deepEqual([r.s41.security?.tier, r.s41.target], ['A', null], `explicit GIT repo of another package wins over a reference: ${JSON.stringify(r.s41)}`);
+      assert.deepEqual([r.s42.security?.tier, r.s42.target], ['A', null], `a candidate inside a prerelease-started interval is no fix: ${JSON.stringify(r.s42)}`);
+      assert.deepEqual([r.s43.security?.tier, r.s43.target], ['A', null], `a PEP 440 post release fix is not a plain version: ${JSON.stringify(r.s43)}`);
+      assert.deepEqual([r.s44.security?.tier, r.s44.target], ['A', null], `versions[] membership is exact: ${JSON.stringify(r.s44)}`);
+      assert.deepEqual([r.s45.security?.tier, r.s45.target], ['A', null], `an installed version below every interval is not affected: ${JSON.stringify(r.s45)}`);
+      // A: s47 'v' prefix and s48 trailing junk are no SemVer, s52 two-part fix and s55 two-part versions[] entry are no
+      // SemVer in npm, s53 Debian-style installed version, s56 one bound entry with an unsupported form.
+      // B: s46 and s49 multi-digit segments, s50 SemVer prerelease fix, s51 build metadata, s54 exact versions[] match
+      // on a prerelease, s61 crates.io is SemVer too.
+      for (const [n, tier, target] of [['s47', 'A', null], ['s48', 'A', null], ['s52', 'A', null], ['s53', 'A', null],
+        ['s55', 'A', null], ['s56', 'A', null],
+        ['s46', 'B', '1.10.0'], ['s49', 'B', '10.10.10'], ['s50', 'B', '1.1.0'], ['s51', 'B', '1.1.0'],
+        ['s54', 'B', '1.1.0'], ['s57', 'B', '10.0.0'], ['s61', 'B', '1.1.0']])
+        assert.deepEqual([r[n].security?.tier, r[n].target, r[n].error ?? null], [tier, target, null], `${n}: ${JSON.stringify(r[n])}`);
+      assert.deepEqual([r.s58.security?.tier, r.s58.target], ['A', null], `Debian range: plain-number order must not decide: ${JSON.stringify(r.s58)}`);
+      assert.deepEqual([r.s59.security?.tier, r.s59.target], ['A', null], `Debian versions[]: plain-number equality must not decide: ${JSON.stringify(r.s59)}`);
+      assert.deepEqual([r.s60.security?.tier, r.s60.target], ['A', null], `an ecosystem without a comparator never lifts the gate: ${JSON.stringify(r.s60)}`);
+      for (const [n, tier, target] of [['s62', 'B', '1.1.0'], ['s63', 'B', '1.1.0'], ['s64', 'A', null], ['s65', 'A', null]])
+        assert.deepEqual([r[n].security?.tier, r[n].target, r[n].error ?? null], [tier, target, null], `${n}: ${JSON.stringify(r[n])}`);
 
       hits.length = 0;
       await run(files(['s8']));
@@ -1833,13 +1991,14 @@ try {
 
       // A failed check carries the old row forward; with the fast path off it loses the security
       // tier and the target only that tier allowed, so the 7-day gate holds for cached rows too.
-      const cached = await run(files(['s3', 's14']));
+      const cached = await run(files(['s3', 'g14']));
       assert.deepEqual([rows(cached).s3.target, rows(cached).s3.security?.tier], ['1.1.0', 'A'], 'precondition: tier A target');
+      const prevHandler = handler;
       handler = () => [500, { message: 'down' }];
       await checkUpdates(cached, { dataRepo: 'demo/data', token: 'tok-xyz' });
       const keep = rows(cached);
-      assert.deepEqual([keep.s14.target, keep.s14.security?.tier, keep.s14.qualifiesAt], ['1.1.0', 'A', plusDays(pub('s14'), 2)], 'fast path on: the cached tier A target stays');
-      assert.match(keep.s14.error, /HTTP 500/, 'the row is carried forward from a failed check');
+      assert.deepEqual([keep.g14.target, keep.g14.security?.tier, keep.g14.qualifiesAt], ['1.1.0', 'A', plusDays(pub('g14'), 2)], 'fast path on: the cached tier A target stays');
+      assert.match(keep.g14.error, /HTTP 500/, 'the row is carried forward from a failed check');
       // s3 has aged past 7 days since it was cached: its target stays, only `security` goes.
       const aged8 = daysAgo(8);
       for (const r of cached.prepare('SELECT id, value FROM updates').all()) {
@@ -1848,8 +2007,32 @@ try {
       }
       await checkUpdates(cached, { dataRepo: 'demo/data', token: 'tok-xyz', securityFastPath: false });
       const gone = rows(cached);
-      assert.deepEqual([gone.s14.target, 'security' in gone.s14, gone.s14.qualifiesAt, gone.s14.latest, gone.s14.error], [null, false, plusDays(pub('s14'), 7), '1.1.0', keep.s14.error], 'fast path off: a cached young target follows the 7-day gate');
+      assert.deepEqual([gone.g14.target, 'security' in gone.g14, gone.g14.qualifiesAt, gone.g14.latest, gone.g14.error], [null, false, plusDays(pub('g14'), 7), '1.1.0', keep.g14.error], 'fast path off: a cached young target follows the 7-day gate');
       assert.deepEqual([gone.s3.target, 'security' in gone.s3, gone.s3.qualifiesAt], ['1.1.0', false, plusDays(aged8, 7)], 'fast path off: a cached target 7 days old stays');
+      handler = prevHandler;
+
+      // A carried row (fetch error) drops its tier when the switch is off, and keeps it when on.
+      // 'aged': the carried release is a week old by now, so its target stands without the tier.
+      for (const mode of ['off', 'on', 'aged']) {
+        const db = mkDb(files(['s1']));
+        await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+        assert.equal(rows(db).s1.security?.tier, 'B');
+        if (mode === 'aged') {
+          const row = db.prepare('SELECT id, value FROM updates').get();
+          db.prepare('UPDATE updates SET value = ? WHERE id = ?').run(JSON.stringify({ ...JSON.parse(row.value), publishedAt: old30 }), row.id);
+        }
+        const prev = handler;
+        handler = url => url.pathname === '/gh/repos/fake/s1/releases' ? [503, { message: 'down' }] : prev(url);
+        try {
+          await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz', ...(mode === 'on' ? {} : { securityFastPath: false }) });
+        } finally { handler = prev; }
+        const c = rows(db).s1;
+        assert.ok(typeof c.error === 'string' && c.error.includes('503'), JSON.stringify(c));
+        if (mode === 'on') assert.deepEqual([c.security?.tier, c.target], ['B', '1.1.0'], 'switch on keeps the carried tier');
+        else if (mode === 'off') assert.deepEqual(['security' in c, c.target, c.qualifiesAt], [false, null, plusDays(pub('s1'), 7)], 'switch off drops the carried tier');
+        else assert.deepEqual(['security' in c, c.target, c.qualifiesAt], [false, '1.1.0', plusDays(old30, 7)], 'a week-old carried target stays');
+        db.close();
+      }
 
       // Property: release-author signals (body text, repo advisories) never lift the gate and
       // never break the row, whatever their shape. No OSV record exists, so a 1-day-old release
