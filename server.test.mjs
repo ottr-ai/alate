@@ -1627,14 +1627,14 @@ try {
     const url = new URL(req.url, 'http://x');
     hits.push({ p: url.pathname, q: Object.fromEntries(url.searchParams), auth: req.headers.authorization ?? null });
     const r = handler ? handler(url) : null;
-    res.writeHead(r ? r[0] : 404, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(r ? r[1] : { message: 'no fixture' }));
+    res.writeHead(r ? r[0] : 404, { 'content-type': typeof r?.[1] === 'string' ? 'application/xml' : 'application/json' });
+    res.end(typeof r?.[1] === 'string' ? r[1] : JSON.stringify(r ? r[1] : { message: 'no fixture' }));
   });
   await new Promise(resolve => fakeUp.listen(0, '127.0.0.1', resolve));
   const upBase = `http://127.0.0.1:${fakeUp.address().port}`;
-  const envKeys = ['ALATE_TEST_GITHUB_API_BASE', 'ALATE_TEST_NPM_BASE', 'ALATE_TEST_NODE_DIST_BASE', 'ALATE_TEST_CFT_BASE', 'ALATE_TEST_OSV_BASE'];
+  const envKeys = ['ALATE_TEST_GITHUB_API_BASE', 'ALATE_TEST_NPM_BASE', 'ALATE_TEST_NODE_DIST_BASE', 'ALATE_TEST_CFT_BASE', 'ALATE_TEST_OSV_BASE', 'ALATE_TEST_CISA_BASE', 'ALATE_TEST_CERTEU_BASE'];
   const savedEnv = envKeys.map(k => process.env[k]);
-  envKeys.forEach((k, i) => { process.env[k] = `${upBase}/${['gh', 'npm', 'dist', 'cft', 'osv'][i]}`; });
+  envKeys.forEach((k, i) => { process.env[k] = `${upBase}/${['gh', 'npm', 'dist', 'cft', 'osv', 'cisa', 'certeu'][i]}`; });
 
   const mkDb = files => {
     const db = new DatabaseSync(':memory:');
@@ -2081,6 +2081,80 @@ try {
       age('CVE-2026-1234', 6 * 3600_000 + 1000);
       await check();
       assert.deepEqual(osvCounts(), [2, 2, 4], 'a record past its 6-hour TTL is fetched again');
+    }
+
+    // Alert feeds as tier B sources: a CISA or CERT-EU alert counts only when its title names the
+    // row's advisoryProduct (whole word) and its text names the cited CVE. OSV stays 404 here.
+    {
+      const day1 = daysAgo(1);
+      const rel = (v, body) => ({ tag_name: `v${v}`, draft: false, prerelease: false, published_at: day1, html_url: `n${v}`, body });
+      const rss = items => `<?xml version="1.0"?><rss><channel>${items.map(([t, l, d]) => `<item><title>${t}</title><link>${l}</link>${d == null ? '' : `<description>${d}</description>`}</item>`).join('')}</channel></rss>`;
+      // Lower-case ids still match; an item without a description is skipped, never fatal.
+      // A title with `: ` gives an empty pattern a match point: a blank product must bind nothing.
+      const cisaXml = rss([['Acme Widget Server: update', 'https://cisa/a1', 'Fixes cve-2026-3001, CVE-2026-3004 and CVE-2026-30050.'], ['Other Thing', 'https://cisa/a2', 'CVE-2026-3002'], ['Widget news', 'https://cisa/a3', null]]);
+      // CERT-EU links carry whitespace (as live); only `/security-advisories/<yyyy>-<n>/?` at the end of a link is an id.
+      const eu = '\n   https://cert.europa.eu/publications/security-advisories/';
+      const euXml = rss([['2026-018: Critical Vulnerabilities in Widget', `${eu}2026-018/\n  `, 'no ids here'],
+        ['bad link', 'https://cert.europa.eu/elsewhere/', 'x'], ['2026-019: Gone', `${eu}2026-019/`, 'x'],
+        ['2026-020', `${eu}2026-020/evil`, 'x'], ['2026-021', `${eu}2026-021`, 'x'], ['2026-022', `${eu}2026-022/`, 'x']]);
+      const eu18 = { title: 'Critical Vulnerabilities in Widget', content_markdown: 'Patch CVE-2026-3003 now.' };
+      // [advisoryProduct, cited body]
+      const cases = {
+        p1: ['Widget', 'Fixes CVE-2026-3001.'], // CISA alert, same product: tier B
+        p2: ['Gadget', 'Fixes CVE-2026-3001.'], // alert for another product: tier A
+        p3: ['widget', 'Fixes CVE-2026-3003.'], // CERT-EU advisory JSON names the CVE: tier B
+        p4: [undefined, 'Fixes CVE-2026-3001.'], // no binding: tier A
+        p5: ['Widget', 'Fixes CVE-2026-3005.'], // the alert names CVE-2026-30050, another id: tier A
+        p6: ['Widg', 'Fixes CVE-2026-3001.'], // product as a word part: tier A
+        p7: ['Widget', 'Fixes CVE-2026-3002.'], // CVE named only in another product's alert: tier A
+        p8: ['Widget', 'Fixes CVE-2026-3001 and CVE-2026-3004.'], // one alert names both: one source
+        p9: [' Widget', 'Fixes CVE-2026-3001.'], // the product is trimmed: tier B
+        p10: ['  ', 'Fixes CVE-2026-3001.'], // a blank product binds nothing: tier A
+      };
+      let feeds = { cisa: [200, cisaXml], eu: [200, euXml] };
+      handler = url => {
+        const gh = url.pathname.match(/^\/gh\/repos\/fake\/(p\d+)\/releases$/);
+        if (gh) return [200, [rel('1.1.0', cases[gh[1]][1])]];
+        if (url.pathname === '/cisa/cybersecurity-advisories/all.xml') return feeds.cisa;
+        if (url.pathname === '/certeu/publications/security-advisories-rss') return feeds.eu;
+        if (url.pathname === '/certeu/publications/security-advisories/2026-018/json') return [200, eu18];
+        if (url.pathname === '/certeu/publications/security-advisories/2026-022/json') return [200, null];
+        return null;
+      };
+      const files = names => ({ 'upstreams.json': UP(names.map(n => item(n, { version: '1.0.0', check: { type: 'github-release', tagPrefix: 'v', advisoryProduct: cases[n][0] } }))) });
+      const feedHits = () => hits.filter(h => h.p.startsWith('/cisa/') || h.p.startsWith('/certeu/')).map(h => h.p);
+      hits.length = 0;
+      const r = rows(await run(files(Object.keys(cases))));
+      const pub = r.p1.publishedAt;
+      assert.deepEqual([r.p1.target, r.p1.qualifiesAt, r.p1.security], ['1.1.0', pub, { cves: ['CVE-2026-3001'], ghsas: [], sources: ['cisa:https://cisa/a1'], tier: 'B' }], 'a CISA alert for the same product lifts the gate');
+      assert.deepEqual([r.p3.target, r.p3.security?.sources], ['1.1.0', ['cert-eu:2026-018']], 'a CERT-EU advisory for the same product lifts the gate');
+      assert.deepEqual(r.p8.security?.sources, ['cisa:https://cisa/a1'], 'one alert is one source');
+      assert.deepEqual([r.p9.security?.tier, r.p9.target], ['B', '1.1.0'], 'a padded product is trimmed');
+      for (const n of ['p2', 'p4', 'p5', 'p6', 'p7', 'p10'])
+        assert.deepEqual([r[n].security?.tier, r[n].target, r[n].qualifiesAt], ['A', null, plusDays(pub, 2)], `${n}: ${JSON.stringify(r[n])}`);
+      assert.deepEqual(feedHits().sort(), ['/certeu/publications/security-advisories-rss', '/certeu/publications/security-advisories/2026-018/json',
+        '/certeu/publications/security-advisories/2026-019/json', '/certeu/publications/security-advisories/2026-021/json',
+        '/certeu/publications/security-advisories/2026-022/json', '/cisa/cybersecurity-advisories/all.xml'], 'each feed once per run');
+      assert.ok(hits.filter(h => h.p.startsWith('/cisa/') || h.p.startsWith('/certeu/')).every(h => h.auth === null), 'feeds never get the GitHub token');
+
+      hits.length = 0;
+      await run(files(['p4']));
+      assert.deepEqual(feedHits(), [], 'no advisoryProduct, no feed fetch');
+      await run(files(['p1']), { securityFastPath: false });
+      assert.deepEqual(feedHits(), [], 'securityFastPath: false fetches no feed');
+
+      feeds = { cisa: [500, 'boom'], eu: [503, 'down'] };
+      const f = rows(await run(files(['p1', 'p3'])));
+      assert.deepEqual([f.p1.security?.tier, f.p1.target, f.p3.security?.tier, f.p3.target], ['A', null, 'A', null], 'a feed error fails closed to tier A');
+      // A network error (nothing listens on port 1) also fails closed, never an error row.
+      process.env.ALATE_TEST_CISA_BASE = process.env.ALATE_TEST_CERTEU_BASE = 'http://127.0.0.1:1';
+      try {
+        const n = rows(await run(files(['p1'])));
+        assert.deepEqual([n.p1.security?.tier, n.p1.target, n.p1.error ?? null], ['A', null, null], 'a feed network error fails closed to tier A');
+      } finally {
+        process.env.ALATE_TEST_CISA_BASE = `${upBase}/cisa`;
+        process.env.ALATE_TEST_CERTEU_BASE = `${upBase}/certeu`;
+      }
     }
 
     // github-path: prefix-tolerant same-sha, query string shape, error rows, missing fields.

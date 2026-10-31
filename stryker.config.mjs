@@ -39,6 +39,10 @@ export default {
   // - cloneRepo network paths: unreachable in a hermetic suite, no network in tests;
   // - runReleaseCheck advisories fallback `[]` (non-array answer, fetch error): any filler
   //   entry has no `vulnerabilities` array, so it can never name the candidate (equivalent);
+  // - alert feeds (fetchAlerts): the real cisa.gov/cert.europa.eu default bases (no network in
+  //   tests); the `''` fallbacks of a missing RSS tag, a failed feed GET, and a missing CERT-EU
+  //   title/content (any filler text names no CVE and no product, or yields no `<item>`); the
+  //   `.catch(() => null)` filler (`filter(Boolean)` drops null and undefined alike).
   // - display-only inventory internals: recursion/sort/dedup details whose observable
   //   rows are asserted; initial config.update reset values masked by the boot update check.
   // Editor (dashboard file editor) survivors, each killed or justified:

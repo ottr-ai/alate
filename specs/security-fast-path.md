@@ -52,29 +52,60 @@ The fast path applies only to `github-release` check rows (`runReleaseCheck` in 
    The checker lifts the gate: a tier B release is a target at once. These checks block a
    compromised upstream that cites an old CVE, a CVE of another project or package, a fix in a
    later interval, a look-alike host, or a withdrawn advisory.
-6. The OSV lookup is memoized per `checkUpdates` run (one GET per CVE id). An OSV 404, an HTTP
+6. Tier B from an alert: a CISA alert or a CERT-EU advisory corroborates a cited CVE id only when
+   all of these hold:
+   - The `github-release` check of the `upstreams.json` item has a non-empty string
+     `advisoryProduct` (for example `"advisoryProduct": "PHP"`). Without it, alerts never count,
+     and the checker fetches no feed for that row. The data repo owner sets this field, never the
+     upstream.
+   - The alert title names `advisoryProduct` as a whole word (case-insensitive, no letter, digit,
+     `_` or `-` on either side), so `PHP` matches "Critical Vulnerabilities in PHP" but not
+     "PHPUnit".
+   - The alert title or text names the CVE id, and no digit follows it (`CVE-2026-3005` does not
+     match `CVE-2026-30050`).
+   So an upstream cannot lift its own gate with a CVE from an alert about another product.
+   Ceiling: alerts carry no version data, so a CVE of the same product from an older alert that
+   is still in the feed also counts. The feeds hold only the newest items (CISA about 30, CERT-EU
+   about 10).
+   Feeds (verified 2026-10-30):
+   - CISA: `GET <cisaBase>/cybersecurity-advisories/all.xml` (RSS 2.0, all CISA advisories and
+     alerts, about 30 items). The alert is `<title>` plus `<description>` (it names the CVE ids).
+     Source: `cisa:<link>`.
+   - CERT-EU: `GET <certEuBase>/publications/security-advisories-rss` (RSS 2.0, about 10 items).
+     The RSS description often names no CVE, so for each `<link>` that ends in
+     `/security-advisories/<yyyy>-<nnn>/`, the checker gets
+     `<certEuBase>/publications/security-advisories/<yyyy>-<nnn>/json` and uses its `title` and
+     `content_markdown`. Source: `cert-eu:<yyyy>-<nnn>`.
+   The checker fetches the feeds at most once per `checkUpdates` run, and only when a bound row
+   has a young release that cites a CVE. A non-ok status or a network error drops the alerts of
+   that GET (fail closed). The GitHub token never goes to a feed.
+7. The OSV lookup is memoized per `checkUpdates` run (one GET per CVE id). An OSV 404, an HTTP
    error, or a network error counts as "not corroborated" (fail closed: the gate stays).
    The table `osv_cache (id TEXT PRIMARY KEY, fetchedAt TEXT NOT NULL, record TEXT)` keeps the
    raw record (`NULL` for a 404) by CVE id across runs, never a verdict: the tier B repo binding
    is recomputed each run. A cached record is reused for 6 h, a cached 404 for 1 h, so a new
    record shows up soon. A non-404 HTTP error, a bad body, or a network error is never cached.
    A withdrawn record is cached and fetched again after its TTL like any other record.
-7. The row of the picked release (`target ?? latest`) gets
-   `security: { cves: [...], ghsas: [...], sources: ['osv:<id>', ...], tier: 'A' | 'B' }` when
-   that release has security data. `cves` holds only CVE ids, `ghsas` only GHSA ids (both can be
-   empty). Only `osv:` sources give tier B. Other rows have no `security` key.
-8. `qualifiesAt = publishedAt + gate`, where the gate is 7 days, 2 days (tier A), or 0 (tier B).
-9. `checkUpdates(db, { securityFastPath: false })` turns the fast path off: no body scan, no OSV
-   call, no advisory call, no `security` key. The default is on. The server reads `securityFastPath` from
+8. The row of the picked release (`target ?? latest`) gets
+   `security: { cves: [...], ghsas: [...], sources: ['osv:<id>', 'cisa:<url>', 'cert-eu:<id>', ...], tier: 'A' | 'B' }`
+   when that release has security data. `cves` holds only CVE ids, `ghsas` only GHSA ids (both
+   can be empty). `sources` has no duplicates. Only `osv:`, `cisa:` and `cert-eu:` sources give
+   tier B. Other rows have no `security` key.
+9. `qualifiesAt = publishedAt + gate`, where the gate is 7 days, 2 days (tier A), or 0 (tier B).
+10. `checkUpdates(db, { securityFastPath: false })` turns the fast path off: no body scan, no OSV
+   call, no advisory call, no feed call, no `security` key. The default is on. The server reads `securityFastPath` from
    `server-config.json` (default `true`) and passes it on. No route changes. A row carried forward
    after a failed check also follows this switch: it loses `security`, and its target becomes
    `null` unless the release is 7 days old.
-10. `osvBase()` reads `ALATE_TEST_OSV_BASE`, else `https://api.osv.dev/v1` (test seam like `ghBase()`).
+11. `osvBase()` reads `ALATE_TEST_OSV_BASE`, else `https://api.osv.dev/v1` (test seam like `ghBase()`).
+   `cisaBase()` reads `ALATE_TEST_CISA_BASE`, else `https://www.cisa.gov`. `certEuBase()` reads
+   `ALATE_TEST_CERTEU_BASE`, else `https://cert.europa.eu`.
 
 ## Dashboard
 
 The updates table status text marks a row that has `security`:
-tier B "security fix, OSV confirmed", tier A "security fix, upstream claim".
+tier B "security fix, OSV confirmed" (an `osv:` source) or "security fix, alert confirmed" (alert
+sources only), tier A "security fix, upstream claim".
 The lede of the updates view names the shorter gates.
 
 ## Acceptance
@@ -104,6 +135,14 @@ The lede of the updates view names the shorter gates.
   `security` key, no target, `qualifiesAt` is +7 days.
 - Two runs on one db make one OSV request per cited CVE id. A 500 is fetched again each run.
   A 2-hour-old 404 is fetched again, a 2-hour-old record is not. A record older than 6 h is.
+- A 1-day-old release that cites a CVE named in a CISA alert whose title names the row's
+  `advisoryProduct` gets tier B, source `cisa:<link>`, and is the target. A CERT-EU advisory JSON
+  does the same with source `cert-eu:<id>`.
+- An alert for another product, a row without `advisoryProduct`, a product that is only part of a
+  word, or a CVE id that is only a prefix of the named id gives tier A.
+- A feed error (HTTP 500) gives tier A.
+- Each feed URL gets one GET per run. A row without `advisoryProduct` and `securityFastPath: false`
+  make no feed request.
 
 ## Non-goals (own cards)
 
@@ -111,5 +150,4 @@ The lede of the updates view names the shorter gates.
 - A `php-dist` check kind.
 - These items from the report are separate cards:
   - More tier A signals: a release marked as a security release, GHSA ids, repo-scoped GHSAs.
-  - CISA alert and CERT-EU feeds as tier B sources.
   - The node-dist announcement as an input to the advisory pass.
