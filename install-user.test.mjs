@@ -5,10 +5,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { tmpdir, homedir } from 'node:os';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fingerprint, forTarget, keepTemp } from './lib/data.mjs';
+import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-install-'));
 const scriptDir = join(tmp, 'tool'); // copy of the script + lib, so the default ../agent-data fallback misses
@@ -41,6 +42,20 @@ if (scanned) {
   mkdirSync(stubDir, { recursive: true });
   writeStub(0);
 }
+// Mirrors install-user's resolution: the pinned venv, then PATH, and a probe must report the
+// pin. Returns the binary or null; the real-skillspector checks skip without one.
+const discoverRealScanner = () => {
+  const venv = process.env.SKILLSPECTOR_VENV ?? join(homedir(), '.cache', 'skillspector-venv');
+  const candidates = [
+    join(venv, process.platform === 'win32' ? join('Scripts', 'skillspector.exe') : join('bin', 'skillspector')),
+    ...(process.env.PATH ?? '').split(delimiter).map(dir => join(dir, process.platform === 'win32' ? 'skillspector.exe' : 'skillspector')),
+  ];
+  for (const candidate of candidates) {
+    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
+    if (probe.status === 0 && String(probe.stdout).trim() === 'SkillSpector v2.13.0') return candidate;
+  }
+  return null;
+};
 const got = rel => readFileSync(join(home, rel), 'utf8');
 
 try {
@@ -507,6 +522,56 @@ try {
       `the pinned venv ran the static-only scan: ${venvCalls[0]}`);
     assert.ok(venvCalls.some(c => c.includes(join(data, 'user/omp/agent/skills/mine'))), 'the omp skill snapshot is scanned through the venv');
     assert.equal(readFileSync(callsLog, 'utf8'), callsBefore, 'the PATH scanner stays unused when the pinned venv resolves');
+
+    // The real verdict, on the real snapshot: the break-ui bytes the Windows host rejected on
+    // 2026-10-31 (P1 at SKILL.md:36 resurfaced; the shipped baseline accepts them under the
+    // pin) must install from a fresh home with no --force whenever a scanner carrying the pin
+    // resolves — the container verdict, on any platform this suite runs on. Skips without a
+    // pinned scanner, like the win32 stub skip above; the stub checks carry the offline part.
+    const scannerBin = discoverRealScanner();
+    if (!scannerBin) {
+      console.log('real-skillspector checks skipped: no scanner reporting SkillSpector v2.13.0 (set SKILLSPECTOR_VENV to the pinned venv to run them)');
+    } else {
+      mkdirSync(join(data, 'user/agents/skills/break-ui'), { recursive: true });
+      writeFileSync(join(data, 'user/agents/skills/break-ui/SKILL.md'), BREAK_UI_SKILL_MD);
+      writeFileSync(join(data, 'user/agents/skills/break-ui/.skillspector-baseline.yaml'), BREAK_UI_BASELINE);
+      const realHome = join(tmp, 'real-home');
+      r = run(['--data', data, '--skip-plugins'], realHome,
+        { ...process.env, SKILLSPECTOR_VENV: dirname(dirname(scannerBin)) });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /Scanning 2 skill snapshot\(s\)/);
+      assert.match(r.stdout, /at .+skillspector/, 'the run names the scanner it resolved');
+      assert.equal(readFileSync(join(realHome, '.agents/skills/break-ui/SKILL.md'), 'utf8'), BREAK_UI_SKILL_MD, 'the break-ui snapshot installs byte-exact');
+
+      // The divergence itself: a build that answers the version probe with the pin but
+      // behaves like an older release (a stale, shadowed, or patched install) flips the
+      // verdict to the host side — P1 resurfaces — and the run must refuse instead of
+      // installing on it. The shim wraps the real venv interpreter with a shadowed
+      // importlib.metadata, POSIX-only like the stubs above.
+      const shimDir = join(tmp, 'shadow-venv');
+      mkdirSync(join(shimDir, 'bin'), { recursive: true });
+      const shadowPy = join(tmp, 'shadow.py');
+      writeFileSync(shadowPy, [
+        "import sys",
+        "if '--version' in sys.argv[1:]:",
+        "    print('SkillSpector v2.13.0')",
+        "    raise SystemExit(0)",
+        "import importlib.metadata as im",
+        "_real = im.version",
+        "im.version = lambda name, *a, **k: '2.12.0' if name == 'skillspector' else _real(name, *a, **k)",
+        "from skillspector.cli import app",
+        "app()",
+      ].join('\n'));
+      writeFileSync(join(shimDir, 'bin', 'skillspector'), `#!/bin/sh\nexec '${join(dirname(scannerBin), 'python')}' '${shadowPy}' "$@"\n`);
+      chmodSync(join(shimDir, 'bin', 'skillspector'), 0o755);
+      r = run(['--data', data, '--skip-plugins'], join(tmp, 'diverge-home'),
+        { ...process.env, SKILLSPECTOR_VENV: shimDir });
+      assert.equal(r.status, 1, 'a build that diverges from the pin refuses the run');
+      assert.match(r.stderr, /SkillSpector rejected/);
+      assert.match(r.stderr, /break-ui/);
+      assert.ok(!existsSync(join(tmp, 'diverge-home', '.agents/skills/break-ui/SKILL.md')), 'the diverged verdict never installs');
+      rmSync(join(data, 'user/agents/skills/break-ui'), { recursive: true, force: true });
+    }
   } else {
     console.log('win32: the scanner-stub checks need a real skillspector on PATH; gate assertions skipped');
   }

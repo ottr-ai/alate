@@ -289,7 +289,7 @@ try {
     if (!scanner) {
       throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s). Install the pinned build (Python 3.12+), then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
     }
-    console.log(`Scanning ${skillDirs.length} skill snapshot(s) with SkillSpector ${SKILLSPECTOR_REF} (--no-llm, static only, shipped baselines applied)...`);
+    console.log(`Scanning ${skillDirs.length} skill snapshot(s) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied)...`);
     for (const dir of skillDirs) {
       const scan = spawnSync(scanner, ['scan', dir, '--no-llm', '--fail-on-findings', '--use-shipped-baseline'], { stdio: 'inherit' });
       if (scan.error) {
