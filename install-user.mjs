@@ -38,6 +38,10 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
 // pinned to a tag on purpose:
 // never point this at a moving ref. It needs Python 3.12+ where install-user runs:
 //   pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@v2.13.0"
+// The scan prefers the pinned venv (SKILLSPECTOR_VENV, default ~/.cache/skillspector-venv, the
+// same layout the data repo's .githooks/skillspector-scan.sh bootstraps) and verifies the
+// version before it trusts any verdict: baseline fingerprints bind to scanner_version, so a
+// scanner that is not the pin would silently suppress nothing.
 const SKILLSPECTOR_REF = 'v2.13.0';
 const SKILL_ROOT_NAMES = new Set(['skills', 'managed-skills']);
 
@@ -258,12 +262,36 @@ try {
   };
   collectSkillDirs(userRoot);
   if (skillDirs.length) {
+    // The pin is enforced, not just documented: v2 baseline fingerprints bind to scanner_version,
+    // so a scanner that is not the pinned build silently suppresses nothing and every accepted
+    // finding resurfaces as a fresh rejection (the 2026-10-31 Windows host failure). Prefer the
+    // pinned venv (same layout and SKILLSPECTOR_VENV override as the data repo's
+    // .githooks/skillspector-scan.sh), fall back to PATH only when its version matches the pin.
+    const venvBin = join(
+      process.env.SKILLSPECTOR_VENV ?? join(homedir(), '.cache', 'skillspector-venv'),
+      process.platform === 'win32' ? join('Scripts', 'skillspector.exe') : join('bin', 'skillspector'),
+    );
+    const pinnedVersion = `SkillSpector v${SKILLSPECTOR_REF.slice(1)}`;
+    let scanner = null;
+    for (const candidate of [venvBin, 'skillspector']) {
+      const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
+      if (probe.error?.code === 'ENOENT') continue;
+      if (probe.error) {
+        throw new Error(`skillspector could not run (${probe.error.code ?? probe.error.message}); refusing to install ${skillDirs.length} skill snapshot(s).`);
+      }
+      const reported = String(probe.stdout ?? '').trim();
+      if (reported !== pinnedVersion) {
+        throw new Error(`skillspector is ${reported || 'of unknown version'}, not the pinned ${pinnedVersion}; baseline fingerprints bind to the scanner version, so this build would suppress nothing and every accepted finding would resurface. Install the pinned build, then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
+      }
+      scanner = candidate;
+      break;
+    }
+    if (!scanner) {
+      throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s). Install the pinned build (Python 3.12+), then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
+    }
     console.log(`Scanning ${skillDirs.length} skill snapshot(s) with SkillSpector ${SKILLSPECTOR_REF} (--no-llm, static only, shipped baselines applied)...`);
     for (const dir of skillDirs) {
-      const scan = spawnSync('skillspector', ['scan', dir, '--no-llm', '--fail-on-findings', '--use-shipped-baseline'], { stdio: 'inherit' });
-      if (scan.error?.code === 'ENOENT') {
-        throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s). Install the pinned build (Python 3.12+), then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
-      }
+      const scan = spawnSync(scanner, ['scan', dir, '--no-llm', '--fail-on-findings', '--use-shipped-baseline'], { stdio: 'inherit' });
       if (scan.error) {
         throw new Error(`skillspector could not run (${scan.error.code ?? scan.error.message}); refusing to install ${skillDirs.length} skill snapshot(s).`);
       }

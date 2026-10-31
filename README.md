@@ -60,7 +60,7 @@ Capture is the prepared way to get a usable setup. Docker Compose is the prepare
 | Script | Purpose | Key flags |
 | --- | --- | --- |
 | `sync.mjs` | Install the data repo's rules into omp's rules dir. | `[targetDir]` |
-| `install-user.mjs` | Restore the `user/` snapshot onto a machine. Scans every skill snapshot first with SkillSpector (fail-closed, pinned tag, the snapshot's shipped `.skillspector-baseline.yaml` applied; needs Python 3.12+ and the pinned build, see the script). | `--home`, `--force`, `--skip-plugins` |
+| `install-user.mjs` | Restore the `user/` snapshot onto a machine. Scans every skill snapshot first with SkillSpector (fail-closed, pinned tag, the snapshot's shipped `.skillspector-baseline.yaml` applied; needs Python 3.12+ and the pinned build, see the script). The scan prefers the pinned venv (`SKILLSPECTOR_VENV`, same layout as the data repo's scan hook) and refuses a scanner whose version is not the pin. | `--home`, `--force`, `--skip-plugins` |
 | `sync-user.mjs` | Capture this machine's omp user layer into the repo. | `--home` |
 | `sync-projects.mjs` | Refresh per-project snapshots into the repo. | `--root` |
 

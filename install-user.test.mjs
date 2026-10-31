@@ -20,17 +20,21 @@ copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(scr
 const put = (rel, text) => { mkdirSync(join(data, 'user', rel, '..'), { recursive: true }); writeFileSync(join(data, 'user', rel), text); };
 const run = (extra, h = home, env) => spawnSync(process.execPath, [join(scriptDir, 'install-user.mjs'), '--home', h, ...extra], {
   encoding: 'utf8',
-  // Default env puts the stub skillspector first on PATH (the scan gate); an explicit env runs
-  // without it. Windows cannot exec an extensionless stub through spawnSync, so there the suite
-  // needs a real skillspector on PATH: the gate fails closed without one, by design.
-  env: env ?? (scanned ? { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}` } : undefined),
+  // Default env puts the stub skillspector first on PATH (the scan gate) and points
+  // SKILLSPECTOR_VENV at a path that does not exist, so the run resolves the PATH stub; an
+  // explicit env runs without either. Windows cannot exec an extensionless stub through
+  // spawnSync, so there the suite needs a real skillspector: the gate fails closed without
+  // one, by design.
+  env: env ?? (scanned ? { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv') } : undefined),
 });
-// The stub logs its argv and exits with a script-set code: 0 clean, 1 findings.
+// The stub logs its scan argv and exits with a script-set code: 0 clean, 1 findings. A
+// --version probe is answered but not logged: install-user probes the version once per run
+// before it scans, and the log stays a scan-only record.
 const stubDir = join(tmp, 'stub');
 const callsLog = join(stubDir, 'calls.log');
 const scanned = process.platform !== 'win32';
-const writeStub = exit => {
-  writeFileSync(join(stubDir, 'skillspector'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${callsLog}'\nexit ${exit}\n`);
+const writeStub = (exit, version = 'SkillSpector v2.13.0') => {
+  writeFileSync(join(stubDir, 'skillspector'), `#!/bin/sh\n[ "$1" = scan ] && printf '%s\\n' "$*" >> '${callsLog}'\nif [ "$1" = "--version" ]; then echo '${version}'; exit 0; fi\nexit ${exit}\n`);
   chmodSync(join(stubDir, 'skillspector'), 0o755);
 };
 if (scanned) {
@@ -457,10 +461,23 @@ try {
     assert.equal(got('.alate/installed.json'), recordBefore, 'the manifest is untouched');
 
     // A missing scanner refuses too: fail closed, and the error names the pinned build.
-    r = run(['--data', data, '--skip-plugins'], home, { ...process.env });
+    r = run(['--data', data, '--skip-plugins'], home, { ...process.env, SKILLSPECTOR_VENV: join(tmp, 'no-venv') });
     assert.equal(r.status, 1, 'a missing scanner refuses the run');
     assert.match(r.stderr, /skillspector not found/);
     assert.match(r.stderr, /SkillSpector@v2\.13\.0/);
+    assert.ok(!existsSync(join(home, '.omp/agent/skills/mine/EVIL.md')));
+
+    // A scanner that is not the pinned build refuses too, even on PATH: v2 baseline
+    // fingerprints bind to the scanner version, so a different build would silently suppress
+    // nothing and every accepted finding would resurface (the 2026-10-31 Windows host
+    // failure: break-ui rejected on the host, accepted by the same snapshot in the
+    // container). Fail closed with the pinned install command instead of a wrong verdict.
+    writeStub(0, 'SkillSpector v2.12.0');
+    r = run(['--data', data, '--skip-plugins']);
+    assert.equal(r.status, 1, 'a scanner that is not the pinned build refuses the run');
+    assert.match(r.stderr, /not the pinned SkillSpector v2\.13\.0/);
+    assert.match(r.stderr, /SkillSpector@v2\.13\.0/);
+    assert.ok(!/\d+ installed/.test(r.stdout), 'nothing was installed');
     assert.ok(!existsSync(join(home, '.omp/agent/skills/mine/EVIL.md')));
 
     // A clean snapshot installs as before, and the blocked state carried no damage.
@@ -471,6 +488,25 @@ try {
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /1 installed/);
     assert.equal(got('.omp/agent/skills/mine/RENAME.md'), '# mine, v6\n');
+
+    // The pinned venv wins over PATH: it is the layout the data repo's
+    // .githooks/skillspector-scan.sh bootstraps, so a host that pushes (venv present) and a
+    // machine that restores (this script) scan with the same build the container image
+    // carries. The PATH stub must stay unused while the venv resolves.
+    const venvDir = join(tmp, 'pinned-venv');
+    const venvCallsLog = join(venvDir, 'calls.log');
+    mkdirSync(join(venvDir, 'bin'), { recursive: true });
+    writeFileSync(join(venvDir, 'bin', 'skillspector'), `#!/bin/sh\n[ "$1" = scan ] && printf '%s\\n' "$*" >> '${venvCallsLog}'\nif [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi\nexit 0\n`);
+    chmodSync(join(venvDir, 'bin', 'skillspector'), 0o755);
+    const callsBefore = readFileSync(callsLog, 'utf8');
+    r = run(['--data', data, '--skip-plugins'], home, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: venvDir });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /4 unchanged/);
+    const venvCalls = readFileSync(venvCallsLog, 'utf8').trim().split('\n');
+    assert.ok(venvCalls.every(c => c.startsWith('scan ') && c.endsWith('--no-llm --fail-on-findings --use-shipped-baseline')),
+      `the pinned venv ran the static-only scan: ${venvCalls[0]}`);
+    assert.ok(venvCalls.some(c => c.includes(join(data, 'user/omp/agent/skills/mine'))), 'the omp skill snapshot is scanned through the venv');
+    assert.equal(readFileSync(callsLog, 'utf8'), callsBefore, 'the PATH scanner stays unused when the pinned venv resolves');
   } else {
     console.log('win32: the scanner-stub checks need a real skillspector on PATH; gate assertions skipped');
   }
