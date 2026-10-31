@@ -104,22 +104,24 @@ to `node-dist` check rows (`runNodeCheck`, see "node-dist" below).
 
 ## node-dist
 
-11. For each `index.json` entry that is newer than `current`, younger than 7 days, and has
+12. For each `index.json` entry that is newer than `current`, younger than 7 days, and has
     `security: true`, the checker fetches the release announcement
     `<nodeBlogBase>/v<version>`. `nodeBlogBase()` reads `ALATE_TEST_NODE_BLOG_BASE`, else
     `https://nodejs.org/en/blog/release`.
-12. The announcement text goes through the same advisory pass as a release body (rules 2, 5, 6)
-    with the repo `nodejs/node`, the entry version as the candidate, and `current`. So tier B
-    also needs an OSV `fixed` version `f` with `current < f <= candidate`.
-13. `security: true` without CVE ids gives tier A (`cves: []`, `sources: []`). A non-ok status,
-    a network error, or a failed body read on the announcement counts as "no CVE ids", so the
-    flag still gives tier A.
-14. An entry without `security: true` gets no announcement fetch and keeps the 7-day gate. The
+13. The announcement text goes through the same advisory pass as a release body (rules 2 to 7)
+    with the repo `nodejs/node`, the entry version as the candidate, `current`, and the row's
+    `advisoryProduct`. So tier B from OSV also needs an affected entry bound to `nodejs/node`
+    that covers `current` and not the candidate (rule 5). The row has no GitHub token, so the
+    pass gets no repo advisories.
+14. `security: true` without a signal gives tier A (`cves: []`, `ghsas: []`, `sources: []`). A
+    non-ok status, a network error, or a failed body read on the announcement counts as "no
+    signal", so the flag still gives tier A.
+15. An entry without `security: true` gets no announcement fetch and keeps the 7-day gate. The
     checker computes the tier itself. It ignores every other `index.json` field, for example an
     upstream `advisory` or `tier` field.
-15. When the picked entry has security data, `notesUrl` is its announcement URL. Else `notesUrl`
+16. When the picked entry has security data, `notesUrl` is its announcement URL. Else `notesUrl`
     stays the dist root.
-16. `securityFastPath: false` makes no announcement and no OSV call (rule 9).
+17. `securityFastPath: false` makes no announcement, OSV, or feed call (rule 10).
 
 ## Dashboard
 

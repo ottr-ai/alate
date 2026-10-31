@@ -2278,15 +2278,15 @@ try {
       hits.length = 0;
       const r = rows(await run({ 'upstreams.json': files }));
       assert.deepEqual([r.ns1.target, r.ns1.security, r.ns1.qualifiesAt, r.ns1.notesUrl],
-        ['22.31.0', { cves: ['CVE-2026-9001'], sources: ['osv:CVE-2026-9001'], tier: 'B' }, r.ns1.publishedAt, `${upBase}/blog/v22.31.0`], 'an OSV-corroborated node security release is a target at once');
+        ['22.31.0', { cves: ['CVE-2026-9001'], ghsas: [], sources: ['osv:CVE-2026-9001'], tier: 'B' }, r.ns1.publishedAt, `${upBase}/blog/v22.31.0`], 'an OSV-corroborated node security release is a target at once');
       assert.deepEqual([r.ns2.target, r.ns2.latest, r.ns2.security, r.ns2.notesUrl],
-        [null, '20.9.0', { cves: ['CVE-2026-9002'], sources: [], tier: 'A' }, `${upBase}/blog/v20.9.0`], 'no OSV record: tier A, a 1-day-old release waits');
-      assert.deepEqual([r.ns3.target, r.ns3.security, r.ns3.qualifiesAt], ['18.9.0', { cves: [], sources: [], tier: 'A' }, plusDays(r.ns3.publishedAt, 2)], 'the flag without an announcement is tier A: 3 days old passes');
+        [null, '20.9.0', { cves: ['CVE-2026-9002'], ghsas: [], sources: [], tier: 'A' }, `${upBase}/blog/v20.9.0`], 'no OSV record: tier A, a 1-day-old release waits');
+      assert.deepEqual([r.ns3.target, r.ns3.security, r.ns3.qualifiesAt], ['18.9.0', { cves: [], ghsas: [], sources: [], tier: 'A' }, plusDays(r.ns3.publishedAt, 2)], 'the flag without an announcement is tier A: 3 days old passes');
       assert.deepEqual([r.ns4.target, 'security' in r.ns4, r.ns4.notesUrl], [null, false, `${upBase}/dist/`], 'no security flag: plain 7-day gate');
       assert.ok(!hits.some(h => h.p === '/blog/v16.9.0'), 'no announcement fetch without the flag');
       assert.deepEqual([r.ns5.target, 'security' in r.ns5, r.ns5.notesUrl], [null, false, `${upBase}/dist/`], 'an upstream advisory field is ignored');
-      assert.deepEqual([r.ns6.target, r.ns6.security, r.ns6.error ?? null], ['12.9.0', { cves: [], sources: [], tier: 'A' }, null], 'a failed body read still gives tier A');
-      assert.deepEqual([r.ns7.target, r.ns7.latest, r.ns7.security], [null, '24.2.0', { cves: ['CVE-2026-9004'], sources: [], tier: 'A' }], 'an OSV fix after the candidate does not lift the gate');
+      assert.deepEqual([r.ns6.target, r.ns6.security, r.ns6.error ?? null], ['12.9.0', { cves: [], ghsas: [], sources: [], tier: 'A' }, null], 'a failed body read still gives tier A');
+      assert.deepEqual([r.ns7.target, r.ns7.latest, r.ns7.security], [null, '24.2.0', { cves: ['CVE-2026-9004'], ghsas: [], sources: [], tier: 'A' }], 'an OSV fix after the candidate does not lift the gate');
       hits.length = 0;
       const off = rows(await run({ 'upstreams.json': files }, { securityFastPath: false }));
       assert.deepEqual([off.ns1.target, 'security' in off.ns1, off.ns1.qualifiesAt, off.ns1.notesUrl], [null, false, plusDays(off.ns1.publishedAt, 7), `${upBase}/dist/`], 'securityFastPath: false keeps the 7-day gate');
