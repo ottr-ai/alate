@@ -191,11 +191,13 @@ try {
   // captured snapshot is one terminator short of the machine text minus its blocks.
   copyFileSync(fileURLToPath(new URL('./install-user.mjs', import.meta.url)), join(repo, 'install-user.mjs'));
   // install-user now scans skill snapshots before installing; an exit-0 stub keeps
-  // this roundtrip hermetic. Windows cannot exec an extensionless stub through spawnSync:
-  // there the run needs a real skillspector on PATH (the gate fails closed without one).
+  // this roundtrip hermetic, and it answers --version with the pin because the gate
+  // refuses a scanner that does not identify as the pinned build. Windows cannot exec an
+  // extensionless stub through spawnSync: there the run needs a real skillspector on
+  // PATH (the gate fails closed without one).
   const stub = join(tmp, 'skillspector-stub');
   mkdirSync(stub, { recursive: true });
-  writeFileSync(join(stub, 'skillspector'), '#!/bin/sh\nexit 0\n');
+  writeFileSync(join(stub, 'skillspector'), '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "SkillSpector v2.13.0"; exit 0; fi\nexit 0\n');
   chmodSync(join(stub, 'skillspector'), 0o755);
   const stubEnv = process.platform === 'win32' ? undefined : { ...process.env, PATH: `${stub}${delimiter}${process.env.PATH ?? ''}` };
   put('.omp/plugins/bun.lock', '{}'); // the missing-item refusal above removed it
