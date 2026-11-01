@@ -716,11 +716,13 @@ try {
     rel30: daysAgo(30), rel2: daysAgo(2), rc1: daysAgo(1), npm90: daysAgo(90), npm20: daysAgo(20),
     npm1: daysAgo(1), ctx60: daysAgo(60), ctx10: daysAgo(10), ctx3: daysAgo(3), node10: daysAgo(10),
     node4: daysAgo(4), node1: daysAgo(1), node30: daysAgo(30), node40: daysAgo(40),
-    stale10: daysAgo(10), fresh2: daysAgo(2), cur10: daysAgo(10), cav9: daysAgo(9), seen8: daysAgo(8),
+    stale10: daysAgo(10), fresh2: daysAgo(2), cur10: daysAgo(10), seen8: daysAgo(8),
+    cav3: daysAgo(3), cav30: daysAgo(30), cav40: daysAgo(40),
   };
   const SHA = {
     staleHead: 'head0000000000000000000000000000000000000000', freshHead: 'head1111111111111111111111111111111111111111',
-    curHead: 'head2222222222222222222222222222222222222222', gitPlugHead: 'deadbeef9999999999999999999999999999999999',
+    curHead: 'head2222222222222222222222222222222222222222',
+    gitPlugTag401: '401aaaaaa999999999999999999999999999999999', gitPlugTag400: 'cafebabe9999999999999999999999999999999999',
     staleLock: 'tree1111111111111111111111111111111111111111', staleTree: 'tree2222222222222222222222222222222222222222',
     curTree: 'tree3333333333333333333333333333333333333333', freshTree: 'tree4444444444444444444444444444444444444444',
     freshLock: 'tree5555555555555555555555555555555555555555', gapHead: 'gapfeed000000000000000000000000000000000000',
@@ -760,8 +762,17 @@ try {
           { path: 'skills/x/current-skill', type: 'tree', sha: SHA.curTree },
           { path: 'skills/x/fresh-skill', type: 'tree', sha: SHA.freshTree },
         ] });
-      if (url.pathname === '/gh/repos/JuliusBrussee/caveman/commits')
-        return reply(200, [{ sha: SHA.gitPlugHead, commit: { committer: { date: T.cav9 } }, html_url: `https://github.com/JuliusBrussee/caveman/commit/${SHA.gitPlugHead}` }]);
+      // The caveman plugin tracks release tags: two streams (`v…` and `bin-v…`), the
+      // locked short sha matches the v4.0.0 tag commit.
+      if (url.pathname === '/gh/repos/JuliusBrussee/caveman') return reply(200, { archived: false });
+      if (url.pathname === '/gh/repos/JuliusBrussee/caveman/releases')
+        return reply(200, [
+          { tag_name: 'v4.0.1', draft: false, prerelease: false, published_at: T.cav30, html_url: 'https://github.com/JuliusBrussee/caveman/releases/v4.0.1' },
+          { tag_name: 'bin-v4.0.2', draft: false, prerelease: false, published_at: T.cav3, html_url: 'https://github.com/JuliusBrussee/caveman/releases/bin-v4.0.2' },
+          { tag_name: 'v4.0.0', draft: false, prerelease: false, published_at: T.cav40, html_url: 'https://github.com/JuliusBrussee/caveman/releases/v4.0.0' },
+        ]);
+      if (url.pathname === '/gh/repos/JuliusBrussee/caveman/commits/v4.0.1') return reply(200, { sha: SHA.gitPlugTag401 });
+      if (url.pathname === '/gh/repos/JuliusBrussee/caveman/commits/v4.0.0') return reply(200, { sha: SHA.gitPlugTag400 });
       if (url.pathname === '/gh/repos/fake/gap/commits')
         return reply(200, [{ sha: SHA.gapHead, commit: { committer: { date: T.node40 } }, html_url: `https://github.com/fake/gap/commit/${SHA.gapHead}` }]);
       return reply(404, { message: 'no such gh fixture' });
@@ -989,18 +1000,20 @@ try {
     assert.equal(gone.error ?? null, null);
     assert.equal(gone.id, `gone-skill@${SHA.goneHead}`);
 
-    // Plugins from bun.lock: npm packages get the registry check, git ones the repo-root check.
+    // Plugins from bun.lock: npm packages get the registry check, git ones the release tags.
     const ctx = rows['context-mode'];
     assert.deepEqual(ctx.pin, { file: 'user/omp/plugins/bun.lock', key: 'context-mode' });
     assert.equal(ctx.current, '1.0.9');
     assert.equal(ctx.latest, '1.1.0', '2.0.0-alpha is not stable');
     assert.equal(ctx.target, '1.1.0');
     const cav = rows['caveman-installer'];
-    assert.equal(cav.current, 'cafebabe', 'the locked short commit');
-    assert.equal(cav.latest, SHA.gitPlugHead);
-    assert.equal(cav.target, SHA.gitPlugHead, 'a week-old head commit qualifies');
+    assert.equal(cav.current, 'v4.0.0', 'the locked short commit matched to its release tag');
+    assert.equal(cav.latest, 'v4.0.1', 'the bin-v stream stays out of the picked v stream');
+    assert.equal(cav.target, 'v4.0.1', 'a week-old newer release qualifies');
+    assert.equal(cav.publishedAt, T.cav30);
+    assert.equal(cav.notesUrl, 'https://github.com/JuliusBrussee/caveman/releases/v4.0.1');
     assert.equal(cav.origin, 'https://github.com/JuliusBrussee/caveman');
-    assert.equal(cav.id, `caveman-installer@${SHA.gitPlugHead}`);
+    assert.equal(cav.id, 'caveman-installer@v4.0.1');
 
     // npm: specs are npm checks on the named package, locked version as current.
     const pix = rows['@xynogen/pix-optimizer'];
@@ -2673,6 +2686,8 @@ try {
         if (url.pathname === '/npm/plain') return [200, { time: { '5.0.1': old30 } }];
         if (url.pathname === '/npm/a') return [200, { time: { '1.0.0': old30 } }];
         if (url.pathname === '/npm/@a@b/c') return [200, { time: {} }];
+        if (url.pathname === '/gh/repos/JuliusB/plugx') return [200, { archived: false }];
+        if (url.pathname === '/gh/repos/JuliusB/plugx/releases') return [200, []];
         if (url.pathname === '/gh/repos/JuliusB/plugx/commits') return [200, [{ sha: 'PX9', commit: { committer: { date: old30 } }, html_url: 'xu' }]];
         return null;
       };
@@ -2723,6 +2738,117 @@ try {
         assert.equal(r[gone], undefined, `${gone} is skipped`);
       assert.equal(rawRows(db).find(v => v.name === 'plug1')._row, 'plugin:plug1');
       assert.equal(rawRows(db).filter(v => v._row === 'item:plug2').length, 0, 'a plugin row takes the name from the items loop');
+    }
+
+    // Plugin rows: github specs track the picked release stream by tag, like the skill rows.
+    {
+      const full = p => p + '9'.repeat(40 - p.length); // a short pin -> the 40-hex commit it names
+      const rel = (tag, iso) => ({ tag_name: tag, draft: false, prerelease: false, published_at: iso, html_url: `u-${tag}` });
+      const ghLock = (name, spec, locked) => JSON.stringify({
+        workspaces: { '': { dependencies: { [name]: spec } } },
+        packages: { [name]: [`${name}@${locked}`, '', {}] },
+      });
+      const runPlug = (name, spec, locked) => run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': ghLock(name, spec, locked) });
+
+      // A release tag in the spec pins current; the fresh v2.0.0 never qualifies.
+      {
+        hits.length = 0;
+        handler = url => {
+          if (url.pathname === '/gh/repos/fake/tagp') return [200, { archived: false }];
+          if (url.pathname === '/gh/repos/fake/tagp/releases') return [200, [rel('v2.0.0', fresh2), rel('v1.5.0', old30), rel('v1.0.0', old30)]];
+          return null;
+        };
+        const r = rows(await runPlug('tagp', 'github:fake/tagp#v1.0.0', 'github:fake/tagp#v1.0.0'));
+        assert.deepEqual([r.tagp.current, r.tagp.latest, r.tagp.target, r.tagp.publishedAt, r.tagp.notesUrl, r.tagp.id],
+          ['v1.0.0', 'v2.0.0', 'v1.5.0', old30, 'u-v1.5.0', 'tagp@v1.5.0'], JSON.stringify(r.tagp));
+        assert.ok(!hits.some(h => h.p.startsWith('/gh/repos/fake/tagp/commits')), 'a tag pin needs no commit lookups');
+      }
+
+      // A spec without a tag matches the locked short sha against the tags, newest first.
+      {
+        hits.length = 0;
+        handler = url => {
+          if (url.pathname === '/gh/repos/fake/shamatch') return [200, { archived: false }];
+          if (url.pathname === '/gh/repos/fake/shamatch/releases') return [200, [rel('v1.1.0', old30), rel('v1.0.0', old30)]];
+          if (url.pathname === '/gh/repos/fake/shamatch/commits/v1.1.0') return [200, { sha: full('1101') }];
+          if (url.pathname === '/gh/repos/fake/shamatch/commits/v1.0.0') return [200, { sha: full('1001') }];
+          return null;
+        };
+        const r = rows(await runPlug('shamatch', 'github:fake/shamatch', 'github:fake/shamatch#1001'));
+        assert.deepEqual([r.shamatch.current, r.shamatch.latest, r.shamatch.target, r.shamatch.publishedAt, r.shamatch.notesUrl],
+          ['v1.0.0', 'v1.1.0', 'v1.1.0', old30, 'u-v1.1.0'], JSON.stringify(r.shamatch));
+        assert.deepEqual(hits.filter(h => h.p.startsWith('/gh/repos/fake/shamatch/commits')).map(h => h.p.split('/').pop()),
+          ['v1.1.0', 'v1.0.0'], 'newest tags first, stop at the match');
+      }
+
+      // A pin that matches none of the 10 newest tags keeps its sha and offers no target.
+      {
+        hits.length = 0;
+        const rels = Array.from({ length: 11 }, (_, i) => rel(`v1.${i}.0`, old30));
+        handler = url => {
+          if (url.pathname === '/gh/repos/fake/shamiss') return [200, { archived: false }];
+          if (url.pathname === '/gh/repos/fake/shamiss/releases') return [200, rels];
+          const tag = url.pathname.split('/').pop();
+          return [200, { sha: tag === 'v1.0.0' ? full('cafe') : full('ffff') }];
+        };
+        const r = rows(await runPlug('shamiss', 'github:fake/shamiss', 'github:fake/shamiss#cafe'));
+        assert.deepEqual([r.shamiss.current, r.shamiss.latest, r.shamiss.target, r.shamiss.publishedAt, r.shamiss.notesUrl],
+          ['cafe', 'v1.10.0', null, old30, 'u-v1.10.0'], 'an unmatched pin keeps its sha and offers no target');
+        assert.equal(hits.filter(h => h.p.startsWith('/gh/repos/fake/shamiss/commits')).length, 10, 'only the 10 newest tags are checked');
+      }
+
+      // Two streams: the empty prefix (v...) is picked without a spec ref, bin-v stays out.
+      {
+        hits.length = 0;
+        handler = url => {
+          if (url.pathname === '/gh/repos/fake/streams') return [200, { archived: false }];
+          if (url.pathname === '/gh/repos/fake/streams/releases') return [200, [
+            rel('bin-v4.0.2', fresh2), rel('v4.0.1', old30), rel('bin-v4.0.1', old30), rel('v4.0.0', old30),
+          ]];
+          if (url.pathname === '/gh/repos/fake/streams/commits/v4.0.1') return [200, { sha: full('4011') }];
+          if (url.pathname === '/gh/repos/fake/streams/commits/v4.0.0') return [200, { sha: full('4001') }];
+          return null;
+        };
+        const r = rows(await runPlug('streams', 'github:fake/streams', 'github:fake/streams#4001'));
+        assert.deepEqual([r.streams.current, r.streams.latest, r.streams.target],
+          ['v4.0.0', 'v4.0.1', 'v4.0.1'], 'the unprefixed v stream wins; bin-v stays out');
+        assert.ok(!hits.some(h => h.p.includes('bin-v')), 'the bin stream is never fetched');
+      }
+
+      // No usable release stream keeps the head behavior.
+      {
+        handler = url => {
+          if (url.pathname === '/gh/repos/fake/norel') return [200, { archived: false }];
+          if (url.pathname === '/gh/repos/fake/norel/releases') return [200, []];
+          if (url.pathname === '/gh/repos/fake/norel/commits') return [200, [{ sha: full('head1'), commit: { committer: { date: old30 } }, html_url: 'hu' }]];
+          return null;
+        };
+        const r = rows(await runPlug('norel', 'github:fake/norel', 'github:fake/norel#cafe'));
+        assert.deepEqual([r.norel.current, r.norel.latest, r.norel.target, r.norel.publishedAt],
+          ['cafe', full('head1'), full('head1'), old30], 'no release stream keeps the head behavior');
+      }
+
+      // An archived repo keeps the head behavior and never reads releases.
+      {
+        hits.length = 0;
+        handler = url => {
+          if (url.pathname === '/gh/repos/fake/arch') return [200, { archived: true }];
+          if (url.pathname === '/gh/repos/fake/arch/releases') return [200, [rel('v9.9.9', old30)]];
+          if (url.pathname === '/gh/repos/fake/arch/commits') return [200, [{ sha: full('arch1'), commit: { committer: { date: old30 } }, html_url: 'au' }]];
+          return null;
+        };
+        const r = rows(await runPlug('arch', 'github:fake/arch', 'github:fake/arch#cafe'));
+        assert.deepEqual([r.arch.current, r.arch.latest, r.arch.target],
+          ['cafe', full('arch1'), full('arch1')], 'an archived repo keeps the head behavior');
+        assert.ok(!hits.some(h => h.p === '/gh/repos/fake/arch/releases'), 'an archived repo never reads releases');
+      }
+
+      // A gone repo fails the row like the head check always did.
+      {
+        handler = url => url.pathname === '/gh/repos/fake/goneplug' ? [404, { message: 'no such repo' }] : null;
+        const r = rows(await runPlug('goneplug', 'github:fake/goneplug', 'github:fake/goneplug#cafe'));
+        assert.match(r.goneplug.error, /repos\/fake\/goneplug failed: HTTP 404$/, 'a gone repo fails the row like before');
+      }
     }
 
     // checkUpdates: failed checks carry the previous row forward; prev rows come from stored JSON.
