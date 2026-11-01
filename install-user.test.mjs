@@ -480,6 +480,7 @@ try {
     assert.equal(r.status, 1, 'a missing scanner refuses the run');
     assert.match(r.stderr, /skillspector not found/);
     assert.match(r.stderr, /SkillSpector@v2\.13\.0/);
+    assert.match(r.stderr, /python3 -m venv .*no-venv/, 'the refusal names the venv path and its rebuild command');
     assert.ok(!existsSync(join(home, '.omp/agent/skills/mine/EVIL.md')));
 
     // A scanner that is not the pinned build refuses too, even on PATH: v2 baseline
@@ -522,6 +523,34 @@ try {
       `the pinned venv ran the static-only scan: ${venvCalls[0]}`);
     assert.ok(venvCalls.some(c => c.includes(join(data, 'user/omp/agent/skills/mine'))), 'the omp skill snapshot is scanned through the venv');
     assert.equal(readFileSync(callsLog, 'utf8'), callsBefore, 'the PATH scanner stays unused when the pinned venv resolves');
+
+    // A venv a Python upgrade broke (bin/skillspector exists but exits 1 with no output: its
+    // packages sit in lib/python3.x while bin/python3 is the new interpreter, the 2026-11-01
+    // ottr-alate-1 failure that stopped every provision) must not stop the run: the gate skips
+    // the unusable candidate and scans with the pinned scanner on PATH.
+    const brokenVenv = join(tmp, 'broken-venv');
+    const brokenCallsLog = join(brokenVenv, 'calls.log');
+    mkdirSync(join(brokenVenv, 'bin'), { recursive: true });
+    writeFileSync(join(brokenVenv, 'bin', 'skillspector'), `#!/bin/sh\n[ "$1" = scan ] && printf '%s\\n' "$*" >> '${brokenCallsLog}'\nexit 1\n`);
+    chmodSync(join(brokenVenv, 'bin', 'skillspector'), 0o755);
+    writeStub(0);
+    const pathCallsBefore = readFileSync(callsLog, 'utf8');
+    r = run(['--data', data, '--skip-plugins'], home, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: brokenVenv });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /4 unchanged/);
+    assert.ok(readFileSync(callsLog, 'utf8').length > pathCallsBefore.length, 'the PATH scanner scanned when the venv was broken');
+    assert.ok(!existsSync(brokenCallsLog), 'the broken venv scanner stays unused');
+
+    // But a venv scanner that runs and reports a version is held to the pin even when a pinned
+    // scanner sits on PATH: a build below the pin would silently suppress nothing, so the run
+    // refuses and the venv must be rebuilt, not silently swapped for a different build.
+    const oldVenv = join(tmp, 'old-venv');
+    mkdirSync(join(oldVenv, 'bin'), { recursive: true });
+    writeFileSync(join(oldVenv, 'bin', 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'SkillSpector v2.12.0'; exit 0; fi\nexit 0\n`);
+    chmodSync(join(oldVenv, 'bin', 'skillspector'), 0o755);
+    r = run(['--data', data, '--skip-plugins'], home, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: oldVenv });
+    assert.equal(r.status, 1, 'a venv scanner below the pin refuses even with a pinned PATH scanner');
+    assert.match(r.stderr, /not the pinned SkillSpector v2\.13\.0/);
 
     // The real verdict, on the real snapshot: the break-ui bytes the Windows host rejected on
     // 2026-10-31 (P1 at SKILL.md:36 resurfaced; the shipped baseline accepts them under the

@@ -280,14 +280,21 @@ try {
         throw new Error(`skillspector could not run (${probe.error.code ?? probe.error.message}); refusing to install ${skillDirs.length} skill snapshot(s).`);
       }
       const reported = String(probe.stdout ?? '').trim();
+      // A candidate that cannot answer the probe is broken, not wrong: a Python upgrade leaves
+      // the venv's packages in lib/python3.x while bin/python3 points at the new interpreter,
+      // so its entry point dies before printing a version (the 2026-11-01 ottr-alate-1 failure
+      // that stopped every provision). Skip it and let the next candidate serve. A candidate
+      // that runs and reports a version is held to the pin.
+      if (probe.status !== 0 || !reported) continue;
       if (reported !== pinnedVersion) {
-        throw new Error(`skillspector is ${reported || 'of unknown version'}, not the pinned ${pinnedVersion}; baseline fingerprints bind to the scanner version, so this build would suppress nothing and every accepted finding would resurface. Install the pinned build, then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
+        throw new Error(`skillspector is ${reported}, not the pinned ${pinnedVersion}; baseline fingerprints bind to the scanner version, so this build would suppress nothing and every accepted finding would resurface. Install the pinned build, then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
       }
       scanner = candidate;
       break;
     }
     if (!scanner) {
-      throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s). Install the pinned build (Python 3.12+), then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
+      const venvRoot = join(venvBin, '..', '..');
+      throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s). The venv at ${venvRoot} is broken (a Python upgrade makes an old venv unusable) or missing: rebuild it with rm -rf "${venvRoot}" && python3 -m venv "${venvRoot}" && "${join(venvRoot, 'bin', 'pip')}" install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}", or install the pinned build (Python 3.12+), then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
     }
     console.log(`Scanning ${skillDirs.length} skill snapshot(s) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied)...`);
     for (const dir of skillDirs) {
