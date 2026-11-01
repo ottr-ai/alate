@@ -102,7 +102,7 @@ One manifest, one lockfile, no build step. The verified chain:
 npm ci && node zero-deps.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && npx tsc --noEmit && node server.test.mjs
 ```
 
-CI runs this chain on every push. `release.yml` builds a multi-arch Docker image and publishes it to `ghcr.io/ottr-ai/alate` on each GitHub release.
+CI runs this chain on every push. `release.yml` builds a multi-arch Docker image and publishes it to `ghcr.io/ottr-ai/alate` on each GitHub release, tagged `latest`, `vX.Y.Z` and `X.Y.Z`, and `vX.Y` and `X.Y`.
 
 ## License
 
