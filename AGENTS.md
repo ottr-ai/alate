@@ -32,8 +32,11 @@ works for a dry run).
   The smoke sync passes a throwaway target dir, so the chain never writes the example rule
   into the rules dir of the home that runs it.
   `npm run test:mutation` is the StrykerJS mutation gate for server logic
-  changes; it is slow, so it is not part of the
-  fast chain.
+  changes. It is slow, so it is not part of the fast chain.
+  Work turns skip `npm run test:mutation` and say so in their report.
+  Only reviews (the Review button and every release) and explicit architecture
+  work run it. Architecture work asks to review the architecture or test
+  quality, or uses the codebase-design or ponytail-audit skill.
   Reviews additionally run the property deep tier once, as a source of findings, never
   as a gate (the gate tier runs inside the chain above at the fixed seed 42, 200 runs):
   `PROP_RUNS=20000 node server.test.mjs && PROP_RUNS=20000 node sync-projects.test.mjs && PROP_RUNS=20000 node sync-user.test.mjs && PROP_RUNS=20000 node clone.test.mjs`.
