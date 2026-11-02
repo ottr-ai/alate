@@ -64,7 +64,7 @@ Then ask your agent to run the skill. The scan stops before any commit when it f
 ## Data repo layout
 
 - Root `*.md` files: the rules, each with a `description:` frontmatter line.
-- `user/`: home-relative snapshot without the leading dot (`~/.omp/agent/config.yml` → `user/omp/agent/config.yml`).
+- `user/`: home-relative snapshot without the leading dot (`~/.omp/agent/config.yml` → `user/omp/agent/config.yml`). A `*.md` file directly under `user/omp/agent/rules/` is a rule: it needs the same `description:` frontmatter and clean characters as the root rules.
 - `projects/projects.json` plus `projects/<name>/`: per-project agent-context snapshots.
 - `workers/<project>/` plus the fleet folder `workers/_all/`: the worker additions Ottr's turns install. `apt.txt` lists Debian packages, one per line, `#` comments. `tools.json` is a JSON array of downloads; each entry has `name`, `url` (`https://` only), `sha256` (64 lowercase hex characters), `unpack` (`zip`, `tar.gz` or `none`), and `bin` (the executable inside the archive; absent when `unpack` is `none`). `env.txt` lists env var names, one per line, `#` comments; names only, never values. `install-user.mjs` validates `tools.json` and `env.txt` before it writes anything.
 - `upstreams.json` (optional): records the origin of each public item. When the file exists, `sync.mjs` refuses items with no recorded origin. The root `own` list holds files you wrote yourself.
@@ -74,7 +74,7 @@ Then ask your agent to run the skill. The scan stops before any commit when it f
 | Script | Purpose | Key flags |
 | --- | --- | --- |
 | `sync.mjs` | Install the data repo's rules into omp's rules dir. | `[targetDir]` |
-| `install-user.mjs` | Restore the `user/` snapshot onto a machine. Scans every skill snapshot first with SkillSpector (fail-closed, pinned tag, the snapshot's shipped `.skillspector-baseline.yaml` applied; needs Python 3.12+ and the pinned build, see the script). The scan prefers the pinned venv (`SKILLSPECTOR_VENV`, same layout as the data repo's scan hook) and refuses a scanner whose version is not the pin. | `--home`, `--force`, `--skip-plugins` |
+| `install-user.mjs` | Restore the `user/` snapshot onto a machine. Refuses a rule file under `user/omp/agent/rules/` with hidden characters or no `description:` frontmatter, before any write. Scans every skill snapshot first with SkillSpector (fail-closed, pinned tag, the snapshot's shipped `.skillspector-baseline.yaml` applied; needs Python 3.12+ and the pinned build, see the script). The scan prefers the pinned venv (`SKILLSPECTOR_VENV`, same layout as the data repo's scan hook) and refuses a scanner whose version is not the pin. | `--home`, `--force`, `--skip-plugins` |
 | `sync-user.mjs` | Capture this machine's omp user layer into the repo. | `--home` |
 | `sync-projects.mjs` | Refresh per-project snapshots into the repo. | `--root` |
 

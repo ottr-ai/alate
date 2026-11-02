@@ -8,7 +8,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { assertSourceInside, checkDestination, cleanupData, descriptionText, die, fingerprint, parseArgs, resolveDataDir, unwrapCmd } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, cleanupData, die, fingerprint, parseArgs, resolveDataDir, ruleProblems, unwrapCmd } from './lib/data.mjs';
 
 const args = parseArgs(process.argv.slice(2), ['--data', '--repo'], [], true);
 if (args.positional.length > 1) die('Usage: node sync.mjs [targetDir] [--data <dir>|--repo <owner/name[@ref]>]');
@@ -21,9 +21,6 @@ try {
   }
   const NOT_RULES = new Set(['AGENTS.md', 'README.md']);
   const isMd = name => /\.mdc?$/.test(name); // omp loads <agentDir>/rules/*.{md,mdc}, top level only
-  // Invisible characters smuggle instructions past human review ("Rules File Backdoor"): C0/C1 controls
-  // except tab/LF/CR, Unicode format chars (zero-width, bidi overrides, tag characters, BOM), variation selectors.
-  const HIDDEN = /[\0-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\p{Cf}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]/u;
 
   const rules = new Map();
   const problems = [];
@@ -32,21 +29,10 @@ try {
     const file = join(data.dir, entry.name);
     assertSourceInside(data.dir, file);
     const bytes = readFileSync(file);
-    const text = bytes.toString('utf8');
-    // AGENTS.md is agent context too, so it gets the same scan.
-    text.split('\n').forEach((line, i) => {
-      const hit = HIDDEN.exec(line);
-      if (hit) {
-        const codePoint = hit[0].codePointAt(0).toString(16).toUpperCase().padStart(4, '0');
-        problems.push(`${entry.name}:${i + 1}:${hit.index + 1}: hidden character U+${codePoint}`);
-      }
-    });
+    // AGENTS.md is agent context too, so it gets the hidden-character scan, never the rule frontmatter gate.
+    problems.push(...ruleProblems(entry.name, bytes.toString('utf8'), { frontmatter: !NOT_RULES.has(entry.name) }));
     if (NOT_RULES.has(entry.name)) continue;
     rules.set(entry.name, bytes);
-    const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
-    if (!frontmatter || !descriptionText(frontmatter[1])) {
-      problems.push(`${entry.name}: needs frontmatter with a description`);
-    }
   }
   // Origin gate: when the data repo ships upstreams.json, every public item needs a recorded origin there.
   const upFile = join(data.dir, 'upstreams.json');

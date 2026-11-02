@@ -605,6 +605,36 @@ try {
     console.log('win32: the scanner-stub checks need a real skillspector on PATH; gate assertions skipped');
   }
 
+  // Rules restored through user/ land in the live agent rules dir, so they pass the same
+  // content gate sync.mjs applies to data-root rules: hidden characters that smuggle
+  // instructions past human review (the U+202E bidi override below), plus a frontmatter
+  // description. The refusal happens before any write, and Markdown outside
+  // omp/agent/rules/ stays unscanned.
+  const backdoorData = join(tmp, 'data-backdoor');
+  const backdoorHome = join(tmp, 'home-backdoor');
+  const putRule = (rel, text) => { mkdirSync(dirname(join(backdoorData, 'user', rel)), { recursive: true }); writeFileSync(join(backdoorData, 'user', rel), text); };
+  const gotRule = rel => readFileSync(join(backdoorHome, rel), 'utf8');
+  const runBackdoor = extra => run(['--data', backdoorData, ...extra], backdoorHome);
+  putRule('omp/agent/rules/clean.md', '---\ndescription: clean rule\n---\n\nClean body\n');
+  putRule('omp/agent/rules/backdoor.md', '---\ndescription: innocent rule\n---\n\nDirection\u202E: togglE\n');
+  putRule('notes/hidden.md', 'notes\u202Efile\n'); // not a rule: the gate must not scan it
+  r = runBackdoor(['--skip-plugins']);
+  assert.equal(r.status, 1, 'a hidden character in a snapshot rule refuses the restore');
+  assert.match(r.stderr, /Nothing installed\. Fix:/);
+  assert.match(r.stderr, /user\/omp\/agent\/rules\/backdoor\.md:5:10: hidden character U\+202E/);
+  assert.ok(!existsSync(backdoorHome), 'the refusal happens before any write');
+  rmSync(join(backdoorData, 'user/omp/agent/rules/backdoor.md'));
+  r = runBackdoor(['--skip-plugins']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /2 installed/);
+  assert.equal(gotRule('.omp/agent/rules/clean.md'), '---\ndescription: clean rule\n---\n\nClean body\n', 'a clean snapshot rule installs');
+  assert.equal(gotRule('.notes/hidden.md'), 'notes\u202Efile\n', 'a non-rule file with a hidden character installs unscanned');
+  putRule('omp/agent/rules/clean.md', 'no frontmatter\n');
+  r = runBackdoor(['--skip-plugins']);
+  assert.equal(r.status, 1, 'a snapshot rule without a description refuses like a data-root rule');
+  assert.match(r.stderr, /user\/omp\/agent\/rules\/clean\.md: needs frontmatter with a description/);
+  assert.equal(gotRule('.omp/agent/rules/clean.md'), '---\ndescription: clean rule\n---\n\nClean body\n', 'the refusal leaves the installed rule alone');
+
   // The server image must carry the scanner the gate refuses to run without; the two pins
   // must not drift (an unpinned image made every containerized provision fail).
   const source = readFileSync(fileURLToPath(new URL('./install-user.mjs', import.meta.url)), 'utf8');

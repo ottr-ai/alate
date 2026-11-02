@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, rmdirSync, readdirSync, readFileSync, unlinkSync
 import { homedir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { assertSourceInside, checkDestination, cleanupData, fingerprint, forTarget, parseArgs, resolveDataDir, sameContent, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, cleanupData, fingerprint, forTarget, parseArgs, resolveDataDir, ruleProblems, sameContent, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
 
 const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home'], ['--force', '--skip-plugins']);
 const home = args.values['--home'] ?? homedir();
@@ -121,6 +121,8 @@ try {
   const plan = [];
   const conflicts = [];
   const notes = [];
+  // Content-gate problems for the snapshot's rules, collected during the walk and refused before any write.
+  const ruleGate = [];
   // Snapshot path -> fingerprint of the content alate last installed (or found already in place).
   const manifest = join(home, '.alate', 'installed.json');
   checkDestination(home, manifest);
@@ -184,6 +186,11 @@ try {
       const kept = base.kept[base.kept.length - 1] === '' ? base.kept.slice(0, -1) : base.kept;
       src = Buffer.from([...kept, ...deployed.dropped].join('\n'), 'utf8');
     }
+    // Rules restored through user/ land in the live agent rules dir, so every Markdown there
+    // passes the same content gate sync.mjs applies to data-root rules: hidden characters
+    // that smuggle instructions past human review ("Rules File Backdoor"), plus a frontmatter
+    // description. Markdown anywhere else in the snapshot is not a rule and stays unscanned.
+    if (/^omp\/agent\/rules\/[^/]+\.mdc?$/.test(rel)) ruleGate.push(...ruleProblems(`user/${rel}`, src.toString('utf8')));
     // The machine text minus its deployment blocks (lib/data.mjs keeps the last kept line's
     // terminator). `dropped` holds credentials: never log it.
     const have = machineFingerprint(rel, dest);
@@ -191,6 +198,9 @@ try {
     else if (have === null || have === last[rel] || force) plan.push(['installed', dest, src]);
     else conflicts.push(dest);
     current[rel] = want;
+  }
+  if (ruleGate.length) {
+    throw new Error(`Nothing installed. Fix:\n  ${ruleGate.join('\n  ')}`);
   }
   const workersRoot = join(data.dir, 'workers');
   const shipped = new Set();
