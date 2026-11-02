@@ -20,6 +20,8 @@ jobs:
       # self-check below exercises that path, so bun must be on PATH first.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - run: npm ci
+      # Advisory gate for the npm production tree; a vulnerable pin fails the job.
+      - run: npm audit --omit=dev --audit-level=low
       # Architecture gates run in order; sync.mjs needs a data repo, so it is smoked
       # against the committed fixture into a throwaway target dir (the .test.mjs
       # scripts are hermetic, and a bare run would write this job's own home).
