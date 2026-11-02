@@ -98,6 +98,7 @@ Dashboard routes under `/api` need no key on a loopback bind. On a loopback bind
 - Keep credentials in environment variables. Capture refuses credential-shaped values, but it cannot prove that a file is secret-free.
 - A non-loopback bind serves plain HTTP, and the session cookie carries no `Secure` flag. Put a TLS reverse proxy in front for remote access.
 - The compose file publishes the port on host loopback only (`127.0.0.1:4570:4570`).
+- The dashboard refuses to be framed (`frame-ancestors 'none'`, `X-Frame-Options: DENY`). On a loopback bind the dashboard is key-free, so a framed page could otherwise change its state with one click.
 - Keep `/state` (server key and SQLite db) out of the image.
 
 ## Run without Docker

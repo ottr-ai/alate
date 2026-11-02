@@ -418,6 +418,8 @@ try {
   assert.equal(r.status, 200);
   assert.match(r.headers.get('content-type'), /text\/html/);
   assert.match(r.headers.get('content-security-policy'), /default-src 'none'/);
+  assert.match(r.headers.get('content-security-policy'), /frame-ancestors 'none'/);
+  assert.equal(r.headers.get('x-frame-options'), 'DENY');
   assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
   assert.equal(r.headers.get('cache-control'), 'no-store');
   assert.match(r.headers.get('content-security-policy'), /manifest-src 'self'/);

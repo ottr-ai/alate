@@ -259,9 +259,13 @@ let dashState = loadState(db)
 // production builds never set it, so the served CSP stays unchanged.
 const liveDev = process.env.ALATE_LIVE ? " http://localhost:8400" : ""
 const DASH_HEADERS = {
-  'Content-Security-Policy': `default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'${liveDev}; font-src 'self'; connect-src 'self'${liveDev}; manifest-src 'self'`,
+  // frame-ancestors 'none' (plus X-Frame-Options for older engines) blocks clickjacking:
+  // on a loopback bind the dashboard is key-free, so one click in a framed page can
+  // import a source or store a key (validated in the ALAT-49 browser run).
+  'Content-Security-Policy': `default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'${liveDev}; font-src 'self'; connect-src 'self'${liveDev}; manifest-src 'self'; frame-ancestors 'none'`,
   'X-Content-Type-Options': 'nosniff',
   'Cache-Control': 'no-store',
+  'X-Frame-Options': 'DENY',
 }
 app.addHook('onSend', async (_req, reply, payload) => {
   for (const [name, value] of Object.entries(DASH_HEADERS)) reply.header(name, value)
