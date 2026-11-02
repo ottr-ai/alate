@@ -2900,6 +2900,22 @@ try {
       dbx.close();
     }
 
+    // A repeated upstreams item name becomes a problem row: the run degrades instead of
+    // aborting on the updates primary key.
+    {
+      const db = mkDb({ 'upstreams.json': UP([item('dup'), item('dup'), item('n1')]) });
+      await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      const stored = rawRows(db);
+      const ids = stored.map(v => v.id);
+      assert.deepEqual([...ids].sort(), ['dup@latest', 'item:dup#2:latest', 'n1@latest'],
+        'the first copy keeps the plain id, the repeated name falls back to the row key, all ids stay unique');
+      const second = stored.find(v => v._row === 'item:dup#2');
+      assert.match(second.error, /duplicate item name "dup" in upstreams\.json/, 'the repeated name reports a problem row');
+      await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      assert.deepEqual(rawRows(db).map(v => v.id).sort(), [...ids].sort(), 'a rerun over the same snapshot stays green');
+      db.close();
+    }
+
     // loadUpdates: sort by name then id, junk rows skipped, _row stripped, checkedAt max.
     {
       const db = new DatabaseSync(':memory:');
