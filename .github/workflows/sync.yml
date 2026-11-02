@@ -23,7 +23,7 @@ jobs:
       # Architecture gates run in order; sync.mjs needs a data repo, so it is smoked
       # against the committed fixture into a throwaway target dir (the .test.mjs
       # scripts are hermetic, and a bare run would write this job's own home).
-      - run: node zero-deps.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs
+      - run: node zero-deps.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs
       - run: npx tsc --noEmit && node server.test.mjs
       # The audit step is required; the manifest needs it, and the gates run in order.
       - run: bun install

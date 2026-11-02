@@ -28,7 +28,7 @@ Every script needs a data repo, passed with `--data <dir>` (`examples/data`
 works for a dry run).
 - "Verified" means this exact chain passes from the repo root (the same chain
   `.github/workflows/sync.yml` runs):
-  `npm ci && node zero-deps.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && npx tsc --noEmit && node server.test.mjs`
+  `npm ci && node zero-deps.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && npx tsc --noEmit && node server.test.mjs`
   The smoke sync passes a throwaway target dir, so the chain never writes the example rule
   into the rules dir of the home that runs it.
   `npm run test:mutation` is the StrykerJS mutation gate for server logic

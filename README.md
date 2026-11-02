@@ -41,6 +41,18 @@ alate provisions an [omp](https://github.com/can1357/oh-my-pi) agent on any mach
 
 Capture is the prepared way to get a usable setup. Docker Compose is the prepared way to run the server.
 
+## Start from your current setup
+
+The `create-data-repo` skill runs the quick start for you. It checks the prerequisites, captures this machine's omp setup with `sync-user.mjs` and `sync-projects.mjs`, scans the result for secrets, and creates the private repo. It asks before each step outside your machine and refuses a public repo.
+
+Install it on the machine that already runs omp:
+
+```sh
+npx skills add ottr-ai/alate --skill create-data-repo
+```
+
+Then ask your agent to run the skill. The scan stops before any commit when it finds a secret. The quick start above is the manual path.
+
 ## How it works
 
 - **Import** stores a snapshot of the data repo in SQLite on the server.
@@ -101,7 +113,7 @@ Needs Node 24.12+. Flags: `--port` or `PORT`, `--host` or `ALATE_HOST`, `--confi
 One manifest, one lockfile, no build step. The verified chain:
 
 ```sh
-npm ci && node zero-deps.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && npx tsc --noEmit && node server.test.mjs
+npm ci && node zero-deps.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && npx tsc --noEmit && node server.test.mjs
 ```
 
 CI runs this chain on every push. `release.yml` builds a multi-arch Docker image and publishes it to `ghcr.io/ottr-ai/alate` on each GitHub release, tagged `latest`, `vX.Y.Z` and `X.Y.Z`, and `vX.Y` and `X.Y`.
