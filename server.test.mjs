@@ -319,21 +319,25 @@ try {
     assert.equal(typeof item.output, 'string');
     assert.equal(typeof item.truncated, 'boolean');
   }
-  // 4b. Mixed failure: one script fails while the others pass, ok stays false (every, not some).
+  // 4b. A sync.mjs refusal stops the pipeline: install-user.mjs never runs, and the
+  // user/ layer of the refused source stays out of the home. ok stays false (every, not some).
   const mixedDir = join(tmp, 'mixed');
   mkdirSync(join(mixedDir, 'user', 'omp', 'agent'), { recursive: true });
   mkdirSync(join(mixedDir, 'projects'), { recursive: true });
   writeFileSync(join(mixedDir, 'bad.md'), 'no frontmatter\n'); // sync.mjs refuses, exit 1
-  writeFileSync(join(mixedDir, 'user', 'omp', 'agent', 'config.yml'), 'model: test\n'); // same bytes origin already installed: install-user passes
+  // Bytes the installed home does not carry: if install-user.mjs ran, it would overwrite
+  // the config.yml the earlier origin provision installed (its manifest fingerprint matches).
+  writeFileSync(join(mixedDir, 'user', 'omp', 'agent', 'config.yml'), 'model: hijacked\n');
   writeFileSync(join(mixedDir, 'projects', 'projects.json'), JSON.stringify({ contextFiles: [], projects: {} })); // sync-projects passes
   r = await postJson('/config', { path: mixedDir }, true);
   assert.equal(r.status, 200);
   r = await postJson('/provision', {}, true);
   assert.equal(r.status, 200);
   body = await r.json();
-  assert.deepEqual(body.results.map(x => x.code), [1, 0]);
+  assert.deepEqual(body.results.map(x => x.code), [1]); // only sync.mjs ran; the failed result stays in the response
   assert.equal(body.ok, false); // one failing script fails the provision
   assert.ok(body.results[0].output.includes('bad.md'), 'failure reports the rule that needs a fix');
+  assert.equal(readFileSync(join(tmpHome, '.omp', 'agent', 'config.yml'), 'utf8'), 'model: test\n', 'the refused source never reaches install-user, so the home keeps the last installed bytes');
 
   // restore the repo source for later cases; a provision refreshes the update state
   await postJson('/config', { repo: origin }, true);

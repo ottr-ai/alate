@@ -102,6 +102,9 @@ async function provision(): Promise<ProvisionResult[]> {
       const truncated = output.length > CAP
       const raw = truncated ? output.slice(0, CAP) : output
       results.push({ script, code, output: redactSecrets(raw, dashToken()), truncated })
+      // Fail closed: a nonzero or null code stops the pipeline, so a source sync.mjs
+      // refused never reaches install-user.mjs and its user/ layer stays unwritten.
+      if (code !== 0) break
     }
     return results
   } finally {
