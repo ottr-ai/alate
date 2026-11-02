@@ -90,7 +90,7 @@ All install scripts take `--data <dir>` or `--repo <owner/name[@ref]>` (set `GH_
 | `POST /provision` | Bearer | Run `sync.mjs` and `install-user.mjs` from the stored snapshot. |
 | `GET /api/updates` | Bearer | One record per tracked upstream. |
 
-Dashboard routes under `/api` need no key on a loopback bind. On any other bind they need the key or a login session.
+Dashboard routes under `/api` need no key on a loopback bind. On a loopback bind, dashboard writes also need a same-origin `Origin` header (the dashboard sends it; scripts use the Bearer token). On any other bind they need the key or a login session.
 
 ## Security
 

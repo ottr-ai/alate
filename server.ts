@@ -156,8 +156,14 @@ function cookieAuthed(req: FastifyRequest): boolean {
 // dashboard routes that read or change repo state then need the provisioning key, as a
 // Bearer token or a login cookie. Loopback-only binds stay key-free.
 async function dashGuard(req: FastifyRequest, reply: FastifyReply): Promise<void | FastifyReply> {
-  if (loopbackBind || authorized(req) || cookieAuthed(req)) return
-  return reply.code(401).send({ error: 'unauthorized' })
+  if (authorized(req) || cookieAuthed(req)) return
+  if (!loopbackBind) return reply.code(401).send({ error: 'unauthorized' })
+  // The loopback bind is key-free, but a browser write carries no key: without the
+  // sameOrigin check, any web page could ride this shortcut with a bodyless no-cors
+  // POST (no preflight; POST /api/key reads no body) and rotate the provisioning key.
+  // Browsers send Origin on every non-GET request, and the dashboard's own requests
+  // are same-origin; scripts keep using the Bearer path above.
+  if (req.method !== 'GET' && req.method !== 'HEAD' && !sameOrigin(req)) return reply.code(401).send({ error: 'unauthorized' })
 }
 
 // Auth model: the provisioning API (/config, /provision, /api/updates) always needs

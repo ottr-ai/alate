@@ -214,6 +214,28 @@ try {
     assert.equal((await fetch(new URL(open, base))).status, 200, `${open} stays open`);
   }
 
+  // 2d. A loopback write without a key still needs a same-origin Origin header: a
+  // cross-site page could otherwise ride the key-free shortcut with a bodyless
+  // no-cors POST (no preflight) and rotate the key. GETs stay key-free on loopback.
+  r = await post('/api/key', undefined);
+  assert.equal(r.status, 401, 'loopback write without Origin is rejected');
+  assert.equal((await r.json()).error, 'unauthorized');
+  assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'key unchanged after rejected write');
+  r = await post('/api/key', undefined, { origin: 'https://evil.example' });
+  assert.equal(r.status, 401, 'cross-site Origin is rejected');
+  assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'key unchanged after cross-site write');
+  r = await post('/api/key', undefined, { origin: 'not a url' });
+  assert.equal(r.status, 401, 'malformed Origin is rejected');
+  assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'key unchanged after malformed Origin');
+  r = await post('/api/key', undefined, { origin: base });
+  assert.equal(r.status, 200, 'same-origin write rotates the key like the dashboard UI');
+  apiKey = (await r.json()).key;
+  assert.equal(typeof apiKey, 'string');
+  assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'rotated key persisted to config file');
+  r = await get('/config');
+  assert.equal(r.status, 200, 'fresh bearer key accepted after same-origin rotation');
+  assert.equal((await fetch(new URL('/api/state', base))).status, 200, 'GETs stay key-free on loopback');
+
   // 5. Update loop: poll lastChecked, then provision refreshes shas, then a new origin commit flips behind.
   await waitFor(async () => {
     body = await (await get('/health')).json();
@@ -3342,9 +3364,9 @@ try {
       return { p, up };
     };
     const mut10Json = (base, path, opts) => fetch(new URL(path, base), opts).then(async r => [r.status, await r.json(), r]);
-    const mut10Post = (base, path, bodyObj, key) => mut10Json(base, path, {
+    const mut10Post = (base, path, bodyObj, key, extraHeaders = {}) => mut10Json(base, path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+      headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}), ...extraHeaders },
       body: JSON.stringify(bodyObj),
     });
     const mut10ReadRow = dbFile => {
@@ -3401,7 +3423,8 @@ try {
       assert.equal(st, 400);
       assert.equal(body.error, 'invalid token');
       // /api/import request-shape 400s: empty source, non-string source, bogus kind.
-      const mut10Import = payload => mut10Post(base, '/api/import', payload, null);
+      // Without a key, a loopback write needs the dashboard's Origin header (dashGuard).
+      const mut10Import = payload => mut10Post(base, '/api/import', payload, null, { origin: base });
       [st, body] = await mut10Import({ source: '' });
       assert.equal(st, 400);
       assert.equal(body.error, 'source required');
@@ -3473,7 +3496,8 @@ try {
       [st, body] = await mut10Json(base, '/api/settings');
       assert.equal(st, 200);
       assert.equal(body.autoUpdate, false, 'a config file without autoUpdate defaults to false');
-      [st, body] = await mut10Post(base, '/api/settings', { token: '' }, null);
+      // Loopback write without a key: carries the dashboard's Origin header (dashGuard).
+      [st, body] = await mut10Post(base, '/api/settings', { token: '' }, null, { origin: base });
       assert.equal(st, 200);
       assert.equal(statSync(cfgA2).mode & 0o777, 0o600, 'saveConfig re-asserts 0600 on an existing file');
       assert.ok(readFileSync(cfgA2, 'utf8').endsWith('\n'), 'the config file ends with a newline');
@@ -3659,9 +3683,10 @@ try {
         const { base, key } = await G.up;
         const rowsG = async () => (await (await fetch(new URL('/api/updates', base), { headers: { Authorization: `Bearer ${key}` } })).json()).updates;
         // Check #1 is held open at the fake: a rapid second import must not start a second checker.
-        let [st, body] = await mut10Post(base, '/api/import', { source: fdir }, null);
+        // Loopback write without a key: carries the dashboard's Origin header (dashGuard).
+        let [st, body] = await mut10Post(base, '/api/import', { source: fdir }, null, { origin: base });
         assert.equal(st, 200, JSON.stringify(body).slice(0, 200));
-        [st, body] = await mut10Post(base, '/api/import', { source: fdir }, null);
+        [st, body] = await mut10Post(base, '/api/import', { source: fdir }, null, { origin: base });
         assert.equal(st, 200);
         await new Promise(r => setTimeout(r, 2500));
         assert.equal(npmHits, 1, 'an overlapping update check is skipped by the re-entrancy guard');
@@ -3671,7 +3696,7 @@ try {
         assert.equal(body.updates[0].repo, fdir, 'a path source reports its spec as the pin repo');
         // A new npm version is picked up by the next import's check.
         npmTime = { '1.0.0': new Date(Date.now() - 30 * 86_400_000).toISOString(), '2.0.0': new Date(Date.now() - 20 * 86_400_000).toISOString() };
-        [st, body] = await mut10Post(base, '/api/import', { source: fdir }, null);
+        [st, body] = await mut10Post(base, '/api/import', { source: fdir }, null, { origin: base });
         assert.equal(st, 200);
         await waitFor(async () => (await rowsG()).find(u => u.name === 'mut10-pin')?.latest === '2.0.0', 20_000);
         await mut10Kill(G.p);
