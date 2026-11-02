@@ -181,12 +181,23 @@ const captureDir = (abs, rel, root) => {
         if (ancestors.has(real)) throw new Error(`~/${childRel}: recursion cycle through links`);
         visit(child, childRel, new Set(ancestors).add(real));
       } else if (!st.isFile()) throw new Error(`~/${childRel}: is not a regular file`);
-      else out.push([childRel, readFileSync(child)]);
+      else out.push([childRel, readFileSync(child), real]);
     }
   };
   visit(abs, rel, new Set([root]));
   return out;
 };
+
+// Credential gates key on the canonical ORIGIN of the bytes, never the capture-relative
+// path: a link inside an item may alias a CONFIG file (its target is an item anchor, so
+// the walk allows it), and the aliased copy must pass the same deployment-strip and
+// secret gates as the canonical capture, or the strip's credential control never runs.
+// A missing CONFIG item resolves nowhere and is reported by the ITEMS loop below.
+const configRealPaths = new Map();
+for (const item of CONFIG) {
+  try { configRealPaths.set(realpathSync.native(join(realHome, item)), item); }
+  catch { /* missing: reported by the ITEMS loop below */ }
+}
 
 const problems = [];
 const plan = [];
@@ -206,10 +217,11 @@ for (const item of ITEMS) {
     }
     const st = statSync(src);
     if (!st.isDirectory() && !st.isFile()) throw new Error(`~/${item}: is not a regular file`);
-    const found = st.isDirectory() ? captureDir(src, item, root) : [[item, readFileSync(src)]];
-    for (let [rel, bytes] of found) {
+    const found = st.isDirectory() ? captureDir(src, item, root) : [[item, readFileSync(src), root]];
+    for (let [rel, bytes, real] of found) {
+      const configItem = configRealPaths.get(real); // origin of the bytes, not the path
       let text = bytes.toString('utf8');
-      if (rel === '.omp/agent/config.yml') {
+      if (configItem !== undefined && configItem.endsWith('.yml')) {
         for (const p of yamlProblems(text, rel)) problems.push(p);
         // Deployment settings stay on the target, not in the portable user layer; the shared
         // rule keeps the last kept line's terminator, so install-user compares like against like.
@@ -220,8 +232,8 @@ for (const item of ITEMS) {
         const hit = shape.exec(text);
         if (hit) problems.push(`~/${rel}:${lineOf(text, hit.index)}: possible ${name}`);
       }
-      if (CONFIG.includes(rel)) {
-        if (rel.endsWith('.json')) jsonProblems(text, msg => problems.push(`~/${rel}: ${msg}`));
+      if (configItem !== undefined) {
+        if (configItem.endsWith('.json')) jsonProblems(text, msg => problems.push(`~/${rel}: ${msg}`));
         else {
           const lines = text.split('\n');
           lines.forEach((line, i) => {

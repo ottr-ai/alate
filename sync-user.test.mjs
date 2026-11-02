@@ -1,7 +1,7 @@
 // Self-check for sync-user.mjs: node sync-user.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -172,6 +172,29 @@ try {
     assert.equal(snap('omp/agent/config.yml'), portable, 'capture omits deployment blocks but preserves nested names and the selected backend');
     assert.ok(!r.stdout.includes(FAKES['GitHub token']) && !r.stderr.includes(FAKES['GitHub token']), 'excluded credentials are never printed');
   }
+  put('.omp/agent/config.yml', good);
+
+  // A link inside an item may alias a CONFIG file: its canonical target is an item anchor,
+  // so the walk allows it. The aliased copy must pass the same deployment-strip and secret
+  // gates as the canonical capture, or the strip's credential control never runs on the
+  // alias and the deployment credentials reach the repo under the link's name.
+  const aliasPlain = 'user:pass' + 'w0rd'; // assembled: no credential-shaped or import-shaped source text
+  const aliasCred = Buffer.from(aliasPlain, 'latin1').toString('base64');
+  put('.omp/agent/config.yml',
+    `hindsight:\n  apiUrl: https://nas.internal\n  basic: ${aliasCred}\n  cookie_jar: ${aliasCred}\n` +
+    'alate:\n  url: https://provision.example\n  apiKey: local-only\nmodelRoles:\n  default: zai/glm\n');
+  symlinkSync(join(home, '.omp/agent/config.yml'), join(home, '.agents/skills/leaked-config.md'));
+  r = run();
+  assert.equal(r.status, 0, r.stderr);
+  const portableConfig = snap('omp/agent/config.yml');
+  assert.equal(snap('agents/skills/leaked-config.md'), portableConfig,
+    'an aliased CONFIG copy is captured through the same gates as the canonical one');
+  const walk = dir => readdirSync(dir, { withFileTypes: true }).flatMap(e =>
+    e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]);
+  for (const f of walk(join(data, 'user')))
+    assert.ok(!readFileSync(f, 'utf8').includes(aliasCred) && !readFileSync(f, 'utf8').includes('hindsight:'),
+      `deployment bytes leaked into ${f}`);
+  rmSync(join(home, '.agents/skills/leaked-config.md'));
   put('.omp/agent/config.yml', good);
 
   rmSync(join(home, '.omp/plugins/bun.lock'));
