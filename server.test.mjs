@@ -92,6 +92,8 @@ const sha1 = ghSha();
 const serverEnv = { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, TMPDIR: serverTmp, TEMP: serverTmp, TMP: serverTmp, ALATE_KEEP_TEMP: '', ALATE_TEST_PROVISION_GATE: provisionGate, ALATE_TEST_GH_BASE: pathToFileURL(join(tmp, 'gh')).href, GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_GLOBAL: 'nul', GIT_CONFIG_SYSTEM: 'nul' };
 // sync.mjs prefers PI_CODING_AGENT_DIR over HOME: an inherited value would install fixture rules into a real agent dir.
 delete serverEnv.PI_CODING_AGENT_DIR;
+// ALATE_API_KEY would seed the first-start key of every fresh-config server this suite boots.
+delete serverEnv.ALATE_API_KEY;
 // Every server this suite starts dies with it. A failed assertion (a killed mutant) exits the
 // suite early; an untracked server would outlive it forever and hold the mutation runner's pipes.
 const servers = new Set();
@@ -3654,6 +3656,101 @@ try {
         await waitFor(async () => (await rowsG()).find(u => u.name === 'mut10-pin')?.latest === '2.0.0', 20_000);
         await mut10Kill(G.p);
       } finally { await new Promise(resolve => fakeNpm.close(resolve)); }
+    }
+  }
+
+  // ALATE_API_KEY boot: the env seeds the first-start key, a short value refuses to boot.
+  {
+    // Like spawnServer, but both output pipes are captured and ALATE_API_KEY is always explicit.
+    const keyBoot = (configFile, dbFile, envValue) => {
+      const p = spawn(process.execPath, [join(repoRoot, 'server.ts'), '--port', '0', '--config', configFile, '--db', dbFile], {
+        cwd: repoRoot, env: { ...serverEnv, ALATE_API_KEY: envValue }, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      servers.add(p);
+      p.once('exit', () => servers.delete(p));
+      return p;
+    };
+    const bootOutput = p => new Promise((resolve, reject) => {
+      let buf = '';
+      const onChunk = c => {
+        buf += c;
+        const l = /alate server on (http:\/\/\S+)\n/.exec(buf);
+        if (l) resolve({ base: l[1], out: buf });
+      };
+      p.stdout.on('data', onChunk);
+      p.stderr.on('data', onChunk);
+      p.once('exit', code => reject(new Error(`env-key server exited early (${code}): ${buf.slice(-300)}`)));
+      setTimeout(() => reject(new Error(`env-key server did not start: ${buf.slice(-300)}`)), 30_000).unref();
+    });
+    // GET /config is public: the key probes use POST /provision, where the preHandler
+    // rejects a wrong key with 401 and an accepted key reaches the 400 "no data source
+    // configured" branch of a fresh server, with no provisioning started.
+    const bearer = (base, key) => fetch(new URL('/provision', base), {
+      method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: '{}',
+    });
+
+    // K1: a fresh config adopts a 40-char ALATE_API_KEY; the value never reaches the output.
+    {
+      const envKey = 'env-secret-' + 'k'.repeat(29); // exactly 40 characters
+      const cfgK1 = join(tmp, 'server-config-env1.json');
+      writeFileSync(cfgK1, JSON.stringify({ apiKey: null }));
+      const K1 = keyBoot(cfgK1, join(tmp, 'state-env1.db'), envKey);
+      const { base, out } = await bootOutput(K1);
+      assert.ok(!out.includes(envKey), 'the env key value never appears in the boot output');
+      assert.match(out, /alate API key: taken from ALATE_API_KEY\n/);
+      assert.equal(JSON.parse(readFileSync(cfgK1, 'utf8')).apiKey, envKey, 'the env key persisted to the config file');
+      assert.equal((await bearer(base, envKey)).status, 400, 'the env key authorizes an API route');
+      await new Promise(resolve => { K1.once('close', resolve); K1.kill(); });
+    }
+
+    // K1b: the minimum is inclusive — exactly 32 characters is accepted.
+    {
+      const envKey = 'b'.repeat(32);
+      const cfgK1b = join(tmp, 'server-config-env1b.json');
+      writeFileSync(cfgK1b, JSON.stringify({ apiKey: null }));
+      const K1b = keyBoot(cfgK1b, join(tmp, 'state-env1b.db'), envKey);
+      const { base, out } = await bootOutput(K1b);
+      assert.ok(!out.includes(envKey), 'the 32-char env key value never appears in the boot output');
+      assert.equal((await bearer(base, envKey)).status, 400, 'a 32-char env key authorizes an API route');
+      await new Promise(resolve => { K1b.once('close', resolve); K1b.kill(); });
+    }
+
+    // K2: a short ALATE_API_KEY exits non-zero, names the variable, and writes no fallback key.
+    {
+      const shortKey = 'short-key!'; // 10 characters
+      const cfgK2 = join(tmp, 'server-config-env2.json');
+      writeFileSync(cfgK2, JSON.stringify({ apiKey: null }));
+      const K2 = keyBoot(cfgK2, join(tmp, 'state-env2.db'), shortKey);
+      const { code, out } = await new Promise((resolve, reject) => {
+        let buf = '';
+        const onChunk = c => {
+          buf += c;
+          if (/alate server on /.test(buf)) reject(new Error('a short ALATE_API_KEY started the server instead of exiting'));
+        };
+        K2.stdout.on('data', onChunk);
+        K2.stderr.on('data', onChunk);
+        K2.once('exit', code => resolve({ code, out: buf }));
+        setTimeout(() => reject(new Error(`the weak-key server neither exited nor started: ${buf.slice(-300)}`)), 30_000).unref();
+      });
+      assert.equal(code, 1, `the weak env key exits non-zero (got ${code})`);
+      assert.ok(out.includes('ALATE_API_KEY'), 'the refusal names the variable');
+      assert.equal(JSON.parse(readFileSync(cfgK2, 'utf8')).apiKey, null, 'no fallback key was written for the weak env value');
+    }
+
+    // K3: a stored key wins over ALATE_API_KEY; the env value is refused.
+    {
+      const cfgKey = 'stored-key-0123456789abcdef'; // 27 characters: config keys have no minimum
+      const otherEnvKey = 'other-env-key-' + 'x'.repeat(26); // exactly 40 characters
+      const cfgK3 = join(tmp, 'server-config-env3.json');
+      writeFileSync(cfgK3, JSON.stringify({ apiKey: cfgKey }));
+      const K3 = keyBoot(cfgK3, join(tmp, 'state-env3.db'), otherEnvKey);
+      const { base, out } = await bootOutput(K3);
+      assert.ok(!out.includes('taken from ALATE_API_KEY'), 'the env key is not adopted when the config has a key');
+      assert.ok(!out.includes(otherEnvKey), 'the env value never reaches the boot output');
+      assert.equal((await bearer(base, cfgKey)).status, 400, 'the stored config key stays valid');
+      assert.equal((await bearer(base, otherEnvKey)).status, 401, 'the env key is refused');
+      assert.equal(JSON.parse(readFileSync(cfgK3, 'utf8')).apiKey, cfgKey, 'the config key is unchanged on disk');
+      await new Promise(resolve => { K3.once('close', resolve); K3.kill(); });
     }
   }
 

@@ -6,6 +6,8 @@ services:
     ports:
       - "127.0.0.1:4570:4570"
     command: ["node", "server.ts", "--config", "/state/server-config.json"]
+    environment:
+      - ALATE_API_KEY
     volumes:
       - state:/state
       - home:/root

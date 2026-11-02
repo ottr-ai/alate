@@ -51,9 +51,20 @@ function saveConfig(cfg: Config): void {
 
 const config = loadConfig()
 if (!config.apiKey) {
-  config.apiKey = randomBytes(32).toString('base64url')
-  saveConfig(config)
-  console.log(`alate API key: ${config.apiKey}`)
+  const envKey = process.env.ALATE_API_KEY
+  if (envKey !== undefined && envKey.length < 32) {
+    console.error('ALATE_API_KEY is set but shorter than 32 characters; refusing to start, because the paired board would then fail silently')
+    process.exit(1)
+  }
+  if (envKey !== undefined) {
+    config.apiKey = envKey
+    saveConfig(config)
+    console.log('alate API key: taken from ALATE_API_KEY')
+  } else {
+    config.apiKey = randomBytes(32).toString('base64url')
+    saveConfig(config)
+    console.log(`alate API key: ${config.apiKey}`)
+  }
 }
 
 const dbFile = flagValue('--db') ?? join(dirname(CONFIG_FILE), 'alate.db')

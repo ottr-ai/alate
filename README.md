@@ -106,7 +106,9 @@ Dashboard routes under `/api` need no key on a loopback bind. On any other bind 
 npm ci && node server.ts --data examples/data
 ```
 
-Needs Node 24.12+. Flags: `--port` or `PORT`, `--host` or `ALATE_HOST`, `--config <file>`, `--db <file>`. The default bind is `127.0.0.1:4570`. The server prints `alate API key: <key>` on first start.
+Needs Node 24.12+. Flags: `--port` or `PORT`, `--host` or `ALATE_HOST`, `--config <file>`, `--db <file>`. The default bind is `127.0.0.1:4570`. The server prints `alate API key: <key>` on first start; with `ALATE_API_KEY` set, it prints `alate API key: taken from ALATE_API_KEY`.
+
+`ALATE_API_KEY` sets the first-start API key from the environment, so a deployment can pair a board (for example Ottr's compose file) without a manual copy of the key. The value needs 32 characters or more: a shorter value makes the server exit with an error instead of generating a key, because the paired board would then fail silently. The value is saved to the config file and never printed. A key that is already in the config wins over the env value, and `POST /api/key` keeps rotating the key as before.
 
 ## Development
 
