@@ -981,7 +981,8 @@ try {
     const gap = rows['gap-demo'];
     assert.equal(gap.current, null);
     assert.equal(gap.latest, SHA.gapHead);
-    assert.equal(gap.target, SHA.gapHead, 'a week-old head qualifies without a pin');
+    assert.equal(gap.target, null, 'a first-seen head never qualifies, whatever its commit date claims');
+    assert.ok(Math.abs(Date.parse(gap.publishedAt) - Date.now()) < 60_000, 'publishedAt is the first-seen moment, not the commit date');
 
     // node-dist within the configured major only.
     const node = rows['node-demo'];
@@ -1003,15 +1004,16 @@ try {
     assert.equal(managed.target, null);
     assert.equal(managed.latest, null);
 
-    // Skills: tree-hash compare decides outdated, the head commit qualifies only when a week old.
+    // Skills: tree-hash compare decides outdated, the head qualifies only once its
+    // first-seen record is a week old; the commit date is never trusted.
     const stale = rows['stale-skill'];
     assert.equal(stale.current, SHA.staleLock);
     assert.equal(stale.latest, SHA.staleHead);
-    assert.equal(stale.target, SHA.staleHead, 'a week-old head qualifies');
+    assert.equal(stale.target, null, 'first seen this run: the soak starts now');
     assert.equal(stale.repo, 'demo/updates');
     assert.deepEqual(stale.pin, { file: 'user/agents/.skill-lock.json', key: 'stale-skill' });
     assert.equal(stale.origin, 'https://github.com/fake/skills', 'origin merges from the upstreams item');
-    assert.equal(stale.publishedAt, T.stale10);
+    assert.ok(Math.abs(Date.parse(stale.publishedAt) - Date.now()) < 60_000, 'publishedAt is the first-seen moment, not the commit date');
     const fresh = rows['fresh-skill'];
     assert.equal(fresh.latest, SHA.freshHead);
     assert.equal(fresh.target, null, 'the skills CLI clones a branch, so a fresh head never qualifies');
@@ -1067,10 +1069,11 @@ try {
     assert.ok(ghAuth.every(a => a.authorization === 'Bearer updates-gh-token-3f9'));
     assert.deepEqual(authSeen.filter(a => a.prefix !== 'gh' && a.authorization), [], 'the GitHub key never travels to npm, node or cft');
 
-    // Backdate the first-seen record: the cft version now clears the age gate.
+    // Backdate the first-seen records: the cft version and the skill head now clear the age gate.
     {
       const seen = new DatabaseSync(upDb);
-      seen.prepare("UPDATE update_seen SET seenAt = ? WHERE key LIKE 'item:cft-demo|%'").run(T.seen8);
+      seen.prepare("UPDATE update_seen SET seenAt = ? WHERE key LIKE 'item:cft-demo|%' OR key = ?")
+        .run(T.seen8, `skill:stale-skill|${SHA.staleHead}`);
       seen.close();
     }
     r = await postImport(JSON.stringify({ source: 'https://github.com/demo/updates.git' }));
@@ -1079,6 +1082,9 @@ try {
     const cft2 = (await (await authed('/api/updates')).json()).updates.find(u => u.name === 'cft-demo');
     assert.equal(cft2.publishedAt, T.seen8);
     assert.equal(cft2.qualifiesAt, plusDays(T.seen8, 7));
+    const stale2 = (await (await authed('/api/updates')).json()).updates.find(u => u.name === 'stale-skill');
+    assert.equal(stale2.target, SHA.staleHead, 'the soaked skill head qualifies');
+    assert.equal(stale2.publishedAt, T.seen8);
 
     // A failed check keeps the last result and records the error for the dashboard.
     relFails = true;
@@ -2202,7 +2208,7 @@ try {
       }
     }
 
-    // github-path: prefix-tolerant same-sha, query string shape, error rows, missing fields.
+    // github-path: first-seen gate, prefix-tolerant same-sha, query string shape, error rows, missing fields.
     {
       handler = url => {
         if (url.pathname === '/gh/repos/o/p/commits') return [200, [{ sha: 'abc1234567890', commit: { committer: { date: old30 } }, html_url: 'pu' }]];
@@ -2229,20 +2235,58 @@ try {
         item('p12', { origin: null, check: { type: 'github-path' } }),
         item('p13', { origin: 'https://github.com/o/nocommit2', check: { type: 'github-path' } }),
       ]) }));
-      assert.deepEqual([r.p1.latest, r.p1.target, r.p1.publishedAt, r.p1.notesUrl], ['abc1234567890', 'abc1234567890', old30, 'pu']);
+      assert.deepEqual([r.p1.latest, r.p1.target, r.p1.notesUrl], ['abc1234567890', null, 'pu'], 'a backdated commit date never qualifies on first sight');
+      assert.ok(Math.abs(Date.parse(r.p1.publishedAt) - Date.now()) < 60_000, 'publishedAt is the first-seen moment, not the commit date');
       assert.deepEqual([r.p2.target, r.p2.current], [null, 'abc1234'], 'prefix-tolerant current never targets');
-      assert.equal(r.p3.target, 'abc1234567890');
-      assert.deepEqual([r.p8.latest, r.p8.target, r.p8.current ?? null], ['def4567890', null, null], 'an unknown current still gates on head age');
+      assert.equal(r.p3.target, null);
+      assert.deepEqual([r.p8.latest, r.p8.target, r.p8.current ?? null], ['def4567890', null, null], 'an unknown current never targets on first sight');
       assert.equal(r.p9.target, null);
       assert.deepEqual(hits.find(h => h.p === '/gh/repos/o/p9/commits').q, { per_page: '1', path: 'sub/dir', sha: 'main' });
       assert.deepEqual(hits.find(h => h.p === '/gh/repos/o/p/commits').q, { per_page: '1' });
-      assert.equal(r.p10.target, 'abc1234567890', 'a suffix current is not the same commit');
+      assert.equal(r.p10.target, null, 'a suffix current is not the same commit, but first-seen still gates');
       assert.equal(r.p5.error, 'no commit found on o/empty');
       assert.equal(r.p6.error, 'no commit found on o/nosha');
-      assert.deepEqual([r.p7.latest, r.p7.publishedAt, r.p7.error ?? null], ['x7', null, null], 'a head without committer data stays error-free');
+      assert.deepEqual([r.p7.latest, r.p7.error ?? null], ['x7', null], 'a head without committer data stays error-free and gates on first-seen');
+      assert.ok(Math.abs(Date.parse(r.p7.publishedAt) - Date.now()) < 60_000);
       assert.equal(r.p11.error, 'cannot parse repo from origin https://gitlab.com/g');
       assert.equal(r.p12.error, 'cannot parse repo from origin (none)');
-      assert.deepEqual([r.p13.latest, r.p13.publishedAt, r.p13.error ?? null], ['x8', null, null], 'a head without a commit object keeps publishedAt null');
+      assert.deepEqual([r.p13.latest, r.p13.error ?? null], ['x8', null], 'a head without a commit object stays error-free');
+      assert.ok(Math.abs(Date.parse(r.p13.publishedAt) - Date.now()) < 60_000);
+    }
+
+    // github-path and skill head mode: only a soaked update_seen record qualifies a head, a
+    // backdated committer date (GIT_COMMITTER_DATE) never does, and a new sha restarts the soak.
+    {
+      let head = { sha: 'oldsha', commit: { committer: { date: old30 } }, html_url: 'hu' };
+      handler = url => {
+        if (url.pathname === '/gh/repos/o/soak/commits') return [200, [head]];
+        if (url.pathname === '/gh/repos/o/soak/releases') return [200, []];
+        if (url.pathname === '/gh/repos/o/soak/git/trees/HEAD') return [200, { tree: [{ path: 'skills/soak', type: 'tree', sha: 'newTree' }] }];
+        return null;
+      };
+      const db = await run({
+        'upstreams.json': UP([item('gp1', { origin: 'https://github.com/o/soak', check: { type: 'github-path' } })]),
+        'user/agents/.skill-lock.json': JSON.stringify({ skills: {
+          soak: { sourceUrl: 'https://github.com/o/soak.git', skillPath: 'skills/soak/SKILL.md', skillFolderHash: 'staleHash' },
+        } }),
+      });
+      const first = rows(db);
+      assert.deepEqual([first.gp1.target, first.soak.target], [null, null], 'backdated commit dates never qualify on first sight');
+      assert.ok(Math.abs(Date.parse(first.gp1.publishedAt) - Date.now()) < 60_000);
+      assert.equal(first.gp1.qualifiesAt, plusDays(first.gp1.publishedAt, 7), 'qualifiesAt repeats the first-seen moment, not the forged date');
+      assert.equal(first.soak.publishedAt, first.gp1.publishedAt, 'both rows share the run clock as their first-seen moment');
+      const back = daysAgo(9);
+      db.prepare("UPDATE update_seen SET seenAt = ? WHERE key IN ('item:gp1|oldsha', 'skill:soak|oldsha')").run(back);
+      await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      const second = rows(db);
+      assert.deepEqual([second.gp1.target, second.gp1.publishedAt], ['oldsha', back], 'INSERT OR IGNORE keeps the first-seen moment');
+      assert.deepEqual([second.soak.target, second.soak.publishedAt], ['oldsha', back], 'the skill head rule gates on the same soaked row');
+      // A new head sha starts its own soak, even when its commit date claims to be ancient.
+      head = { sha: 'newsha', commit: { committer: { date: old30 } }, html_url: 'hu2' };
+      await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      const third = rows(db);
+      assert.deepEqual([third.gp1.target, third.soak.target], [null, null], 'a new sha restarts the soak');
+      assert.ok(Math.abs(Date.parse(third.gp1.publishedAt) - Date.now()) < 60_000);
     }
 
     // npm: created/modified exclusion, prerelease exclusion, pick, package fallback, empty doc.
@@ -2496,15 +2540,15 @@ try {
       });
       const r = rows(db);
       assert.deepEqual([r.s1.latest, r.s1.target, r.s1.current, r.s1.origin, r.s1.repo, r.s1.kind, r.s1.pin],
-        ['H1', 'H1', 'h1', 'https://github.com/o/s.git', 'demo/data', 'skill', { file: 'user/agents/.skill-lock.json', key: 's1' }], JSON.stringify(r.s1));
+        ['H1', null, 'h1', 'https://github.com/o/s.git', 'demo/data', 'skill', { file: 'user/agents/.skill-lock.json', key: 's1' }], 'first sight never targets, whatever the commit date claims');
       assert.deepEqual([r.s2.target, r.s2.current], [null, 'H2'], 'an installed tree equal to head reads as current; blobs never match');
       assert.deepEqual([r.s3.latest, r.s3.target, r.s3.current, r.s3.removed, r.s3.error ?? null], ['H3', null, 'h3', true, null]);
       assert.equal(r.s4.error, 'cannot parse repo from sourceUrl https://x/y');
-      assert.deepEqual([r.s5.latest, r.s5.target], ['H5', 'H5']);
+      assert.deepEqual([r.s5.latest, r.s5.target], ['H5', null], 'the branch head gates on first-seen too');
       assert.deepEqual(hits.find(h => h.p === '/gh/repos/o/s5/commits').q, { per_page: '1', path: 'skills/s5', sha: 'dev' });
       assert.ok(hits.some(h => h.p === '/gh/repos/o/s5/git/trees/dev'));
       // A lock `ref` rides the commit and tree queries of the no-release path like `branch` does.
-      assert.deepEqual([r.s6.latest, r.s6.target, r.s6.current, r.s6.error ?? null], ['H5', 'H5', 'h6', null], JSON.stringify(r.s6));
+      assert.deepEqual([r.s6.latest, r.s6.target, r.s6.current, r.s6.error ?? null], ['H5', null, 'h6', null], JSON.stringify(r.s6));
       assert.deepEqual(hits.find(h => h.p === '/gh/repos/o/s5/commits' && h.q.sha === 'r6').q.path, 'skills/s6');
       assert.ok(hits.some(h => h.p === '/gh/repos/o/s5/git/trees/r6'));
       // The releases probe is memoized per repo: s1/s2 and s5/s6 fetch it once each.
@@ -2687,9 +2731,9 @@ try {
       // Parsed-version ordering: 4.10.0 sorts above 4.9.0.
       assert.deepEqual([r.ord.current, r.ord.latest, r.ord.target],
         ['skill-v4.9.0', 'skill-v4.10.0', 'skill-v4.10.0'], JSON.stringify(r.ord));
-      // Rule f: no usable stream, the row keeps the SHA head/path behavior.
+      // Rule f: no usable stream, the row keeps the SHA head/path behavior, gated on first-seen.
       assert.deepEqual([r.fall.current, r.fall.latest, r.fall.target, r.fall.error ?? null],
-        ['hF', 'HF', 'HF', null], JSON.stringify(r.fall));
+        ['hF', 'HF', null, null], JSON.stringify(r.fall));
       // The release list is still memoized per repo across the three ms rows.
       assert.equal(hits.filter(h => h.p === '/gh/repos/o/ms/releases').length, 1);
       // Rule b with an unprefixed ref: the empty-prefix stream wins over the skill- stream.
@@ -2756,7 +2800,11 @@ try {
 }`;
       const db = await run({ 'upstreams.json': UP([{ name: 'plug2', kind: 't' }]), 'user/omp/plugins/bun.lock': bun });
       const r = rows(db);
-      assert.deepEqual([r.plug1.current, r.plug1.latest, r.plug1.target, r.plug1.origin], ['cafe123', 'PX9', 'PX9', 'https://github.com/JuliusB/plugx']);
+      assert.deepEqual([r.plug1.current, r.plug1.latest, r.plug1.target, r.plug1.origin], ['cafe123', 'PX9', null, 'https://github.com/JuliusB/plugx'], 'the plugin head row gates on first-seen');
+      // Soaking the seen row opens the window: the key rides the row key and the head sha.
+      db.prepare("UPDATE update_seen SET seenAt = ? WHERE key = 'plugin:plug1|PX9'").run(daysAgo(9));
+      await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      assert.equal(rows(db).plug1.target, 'PX9', 'a soaked plugin head row qualifies');
       assert.deepEqual(hits.find(h => h.p === '/gh/repos/JuliusB/plugx/commits').q, { per_page: '1' });
       assert.deepEqual([r.g1.current, r.g1.latest, r.g1.target, r.g1.kind, r.g1.pin], ['1.2.3', '3.0.0', '3.0.0', 'plugin', { file: 'user/omp/plugins/bun.lock', key: 'g1' }], 'npm: aliases check the aliased package');
       assert.equal(r.al.current, '1.0.0', 'an npm: body with a slash before @ checks the package before the slash');
@@ -2854,8 +2902,8 @@ try {
           return null;
         };
         const r = rows(await runPlug('norel', 'github:fake/norel', 'github:fake/norel#cafe'));
-        assert.deepEqual([r.norel.current, r.norel.latest, r.norel.target, r.norel.publishedAt],
-          ['cafe', full('head1'), full('head1'), old30], 'no release stream keeps the head behavior');
+        assert.deepEqual([r.norel.current, r.norel.latest, r.norel.target], ['cafe', full('head1'), null], 'no release stream keeps the head behavior, gated on first-seen');
+        assert.ok(Math.abs(Date.parse(r.norel.publishedAt) - Date.now()) < 60_000);
       }
 
       // An archived repo keeps the head behavior and never reads releases.
@@ -2869,7 +2917,7 @@ try {
         };
         const r = rows(await runPlug('arch', 'github:fake/arch', 'github:fake/arch#cafe'));
         assert.deepEqual([r.arch.current, r.arch.latest, r.arch.target],
-          ['cafe', full('arch1'), full('arch1')], 'an archived repo keeps the head behavior');
+          ['cafe', full('arch1'), null], 'an archived repo keeps the head behavior, gated on first-seen');
         assert.ok(!hits.some(h => h.p === '/gh/repos/fake/arch/releases'), 'an archived repo never reads releases');
       }
 
