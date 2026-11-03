@@ -8,7 +8,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir, homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fingerprint, forTarget, keepTemp } from './lib/data.mjs';
+import { fingerprint, forAll, forTarget, keepTemp, sameContent } from './lib/data.mjs';
 import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-install-'));
@@ -175,6 +175,50 @@ try {
   assert.equal(t.bytes, elsewhere, 'a path outside the layer has no target: installed as captured');
   assert.deepEqual(t.notes, []);
 
+  // Mirror direction: a Linux worker capture holds POSIX absolute paths, and a Windows target
+  // roots them at its own home with Windows separators. Only paths through a layer root move.
+  const winTarget = { home: 'C:\\Users\\me', platform: 'win32', roots: new Set(['.omp', '.agents']) };
+  const captured = Buffer.from(JSON.stringify({ marketplaces: [{ catalogPath: '/root/.omp/plugins/cache/marketplaces/m/marketplace.json' }] }));
+  t = forTarget('omp/marketplaces.json', captured, winTarget);
+  assert.equal(JSON.parse(t.bytes).marketplaces[0].catalogPath, 'C:\\Users\\me\\.omp\\plugins\\cache\\marketplaces\\m\\marketplace.json');
+  assert.deepEqual(t.notes, ['omp/marketplaces.json: 1 POSIX path(s) now point into C:\\Users\\me']);
+  const usr = Buffer.from(JSON.stringify({ node: '/usr/bin/node' }));
+  t = forTarget('omp/agent/x.json', usr, winTarget);
+  assert.equal(t.bytes, usr, 'a POSIX path outside the layer roots stays as captured');
+  assert.deepEqual(t.notes, []);
+  // The conflict compare rides on the ported form: what install writes differs from the
+  // captured bytes, so a compare that skipped the port would turn every rerun into a conflict.
+  assert.ok(!sameContent('omp/marketplaces.json', t.bytes, captured), 'the ported bytes differ from the captured ones');
+  assert.ok(sameContent('omp/marketplaces.json', t.bytes, t.bytes), 'a machine copy of the ported form is unchanged');
+
+  // Property: a ported path always lands inside the target home, and porting the ported form
+  // changes nothing. '..' stays out of the generator: a real capture never carries it, and a
+  // join above the home would legitimately leave the home prefix.
+  const SEG = ['root', 'home', 'u', 'dom', 'usr', 'bin', 'plugins', 'cache', 'm', 'x', 'skills'];
+  const absPath = rand => {
+    let p = '';
+    for (let i = 0, n = Math.floor(rand() * 3); i < n; i++) p += `/${SEG[Math.floor(rand() * SEG.length)]}`;
+    const rootsList = [...winTarget.roots];
+    p += rand() < 0.7 ? `/${rootsList[Math.floor(rand() * rootsList.length)]}` : `/${SEG[Math.floor(rand() * SEG.length)]}`;
+    for (let i = 0, n = Math.floor(rand() * 3); i < n; i++) p += `/${SEG[Math.floor(rand() * SEG.length)]}`;
+    return p;
+  };
+  forAll(rand => {
+    const doc = {};
+    for (let i = 0, n = 1 + Math.floor(rand() * 3); i < n; i++) doc[`k${i}`] = rand() < 0.6 ? absPath(rand) : SEG[Math.floor(rand() * SEG.length)];
+    return doc;
+  }, doc => {
+    const first = forTarget('omp/agent/prop.json', Buffer.from(JSON.stringify(doc)), winTarget);
+    const out = JSON.parse(first.bytes);
+    for (const [k, v] of Object.entries(doc)) {
+      if (out[k] === v) continue;
+      assert.ok(String(out[k]).startsWith(winTarget.home), `a moved value stays inside the target home: ${v} -> ${out[k]}`);
+    }
+    const again = forTarget('omp/agent/prop.json', first.bytes, winTarget);
+    assert.deepEqual(JSON.parse(again.bytes), out, 'porting the ported form changes nothing');
+    assert.deepEqual(again.notes, [], 'the second port moves nothing');
+  });
+
   // install-user applies it for the machine it runs on.
   put('omp/agent/mcp.json', `${JSON.stringify(mcp, null, 2)}\n`);
   const linuxHome = join(tmp, 'linux-home');
@@ -202,6 +246,24 @@ try {
   writeFileSync(join(regHome, '.omp/marketplaces.json'), registry('2026-10-09T17:41:01.581Z').replace('/x/', '/y/'));
   r = run(['--data', data, '--skip-plugins'], regHome);
   assert.equal(r.status, 1, 'a changed catalog path still is');
+
+  // On a Windows machine, the Linux worker capture's POSIX catalog path installs ported into
+  // the Windows home, and the rerun counts the file unchanged without --force: the compare
+  // saw the ported form (the stray C:\root folder this prevents is cleaned by hand).
+  if (process.platform === 'win32') {
+    put('omp/marketplaces.json', `${JSON.stringify({ version: 1, marketplaces: [{ name: 'm', catalogPath: '/root/.omp/plugins/cache/marketplaces/m/marketplace.json' }] }, null, 2)}\n`);
+    const winHome = join(tmp, 'win-home');
+    r = run(['--data', data, '--skip-plugins'], winHome);
+    assert.equal(r.status, 0, r.stderr);
+    const winRegistry = JSON.parse(readFileSync(join(winHome, '.omp/marketplaces.json'), 'utf8'));
+    assert.equal(winRegistry.marketplaces[0].catalogPath,
+      join(winHome, '.omp', 'plugins', 'cache', 'marketplaces', 'm', 'marketplace.json'),
+      'the captured POSIX path installs rooted at the Windows home');
+    r = run(['--data', data, '--skip-plugins'], winHome);
+    assert.equal(r.status, 0, `the ported install is unchanged on the rerun: ${r.stderr}`);
+    assert.match(r.stdout, /0 installed, \d+ unchanged/, 'the rerun installs nothing, so no --force is needed');
+    assert.ok(!existsSync(join('C:', 'root')), 'nothing writes the captured prefix as a Windows folder');
+  }
 
   // Deployment settings stay on the target: the snapshot's config.yml carries no top-level
   // hindsight:/alate: blocks (capture drops them), and the machine's own ride along on every

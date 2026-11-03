@@ -9,7 +9,8 @@
 // deliberate refresh. Fresh homes (CI, worker images) just copy.
 // A path the snapshot dropped is deleted when it still holds what alate installed; a copy changed
 // here stays and loses its record.
-// On a non-Windows machine, JSON config captured on Windows is adapted to it first (forTarget, lib/data.mjs).
+// JSON config is adapted to the target machine first (forTarget, lib/data.mjs): a Windows capture
+// on a non-Windows machine, a POSIX-absolute capture path on Windows.
 // Plugins install from the captured lockfile with `bun install --frozen-lockfile` in ~/.omp/plugins, the
 // same root omp's plugin manager installs into.
 // Also installs the per-project worker additions Ottr's turns read: workers/<project>/apt.txt
