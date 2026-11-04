@@ -198,7 +198,7 @@ try {
   const base = join(home, '.alate');
   const currentLink = join(base, 'current');
   const layersDir = join(base, 'layers');
-  let writeRoot = home, readRoot = home, newLayerDir = null;
+  let writeRoot = home, readRoot = home, machineRoot = home, newLayerDir = null;
   if (layerMode) {
     // Preflight before any write: current is absent or a symlink, never anything else —
     // an in-place migration of a real directory is out of scope.
@@ -213,6 +213,10 @@ try {
     let live = null;
     try { live = realpathSync(currentLink); } catch { /* absent or dangling */ }
     readRoot = live !== null && live.startsWith(layersDir + sep) ? live : newLayerDir;
+    // The machine part of config.yml comes from the live layer when there is one; on a
+    // first layer over an in-place home it comes from the home itself, so the deployment
+    // blocks and the entry script's machine edit survive the migration.
+    machineRoot = live !== null ? live : (existsSync(join(home, '.omp', 'agent', 'config.yml')) ? home : newLayerDir);
   }
 
   const plan = [];
@@ -267,7 +271,8 @@ try {
     // symlink, hardlink, or directory at dest refuses the whole restore up front —
     // --force overrides the conflict refusal, never this alias guard.
     checkDestination(writeRoot, dest);
-    const readDest = join(readRoot, '.' + rel);
+    const machineSrc = layerMode && rel === 'omp/agent/config.yml' ? machineRoot : readRoot;
+    const readDest = join(machineSrc, '.' + rel);
     const target = forTarget(rel, readFileSync(srcPath), { home: writeRoot, platform: process.platform, roots });
     notes.push(...target.notes);
     // Captured config can point at absolute paths in the capture home; a layer re-roots them
@@ -312,7 +317,12 @@ try {
         plan.push(['installed', dest, src]);
         notes.push(`machine change overridden by --force: ${readDest}`);
       } else {
-        plan.push(['installed', dest, readFileSync(readDest)]);
+        // A kept file can hold paths re-rooted into the live layer at its install, so they
+        // re-root into the new layer and clean-up can delete the live one; paths into the
+        // shared home stay shared.
+        let keptBytes = readFileSync(readDest);
+        if (/\.(?:json|ya?ml)$/.test(rel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, newLayerDir), 'utf8');
+        plan.push(['installed', dest, keptBytes]);
         notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
       }
     }

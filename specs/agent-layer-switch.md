@@ -87,12 +87,19 @@ non-zero. A failure after the switch changes nothing about the switch itself.
 
 - The current layer's top-level `hindsight:`/`alate:` blocks ride onto the new layer's
   `config.yml` (the same `splitDeploymentBlocks` merge the in-place mode does). A first
-  layer with no current layer gets none, like a fresh home.
+  layer with no current layer gets none, like a fresh home — unless the home holds an
+  in-place install: the first layer over an in-place home reads the machine part of
+  `config.yml` from the home itself, so the blocks and the entry script's memory-backend
+  edit survive the migration to layers. Every other file starts from the snapshot in that
+  case, and the home's `installed.json` stays unconsulted.
 - A machine change in the current layer that goes beyond the deployment blocks: machine
   state wins. The new layer keeps the machine bytes for that file, and the run reports each
   kept path. `--force` takes the snapshot instead; the deployment blocks still ride along.
   This is how the compose entry script's memory-backend edit of `config.yml` survives every
   switch, wherever in the file it sits.
+- A machine-kept JSON/YAML file can hold absolute paths that were re-rooted into the live
+  layer at its install. The copy re-roots them into the new layer, so clean-up can delete
+  the live layer; paths into the shared home stay shared.
 - A path the snapshot dropped is simply absent from the new layer. Nothing is deleted from
   the current layer; a pinned turn keeps reading it.
 
@@ -104,7 +111,9 @@ starts at `<home>/` to `<layer>/` while installing `.json`, `.yml`, and `.yaml` 
 rewrite fires only behind a boundary (a JSON string start, whitespace, or `:`), so a path
 fragment inside a longer word never changes. A pinned turn then reads its own layer's file
 under the path it expects; a test proves it with `marketplaces.json`. Non-layer installs
-keep the bytes exactly as today.
+keep the bytes exactly as today. Captures must not run with `HOME` inside a layer: a
+capture that reads layer files would ship layer-prefixed absolute paths into the snapshot,
+and no re-root can repair a foreign layer id.
 
 ## Turn pinning (ottr side)
 
@@ -156,6 +165,10 @@ them at turn end.
 - Machine part: a machine-edited `config.yml` with deployment blocks carries the blocks and
   keeps the machine bytes in the new layer; `--force` takes the snapshot and still carries
   the blocks; block content never reaches the output.
+- Migration: the first layer over an in-place home keeps the home's deployment blocks and
+  the machine edit of `config.yml` in the new layer.
+- A machine-kept file holding a re-rooted path lands pointing into the new layer, never
+  into the live one that clean-up deletes.
 - Captured paths: a `catalogPath` under the home prefix lands re-rooted into the new layer.
 - `current` as a real directory refuses the run before any write.
 - The non-layer suite (`install-user.test.mjs`) passes unchanged.

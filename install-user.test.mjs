@@ -778,6 +778,35 @@ try {
     assert.equal(lgot(join(llayers, 'nogit-8'), '.omp/agent/config.yml'),
       'modelRoles:\n  default: zai/glm-5.3\n' + blocksL, '--force takes the snapshot, the blocks still ride along');
 
+    // A machine-kept file that holds a re-rooted path: the copy re-roots into the new layer,
+    // never into the live one that clean-up deletes after this provision.
+    writeFileSync(join(llayers, 'nogit-8', '.omp/agent/marketplaces.json'),
+      `${JSON.stringify({ marketplaces: [{ name: 'm', catalogPath: `${llayers}/nogit-8/.omp/marketplaces/moved.json` }] }, null, 2)}\n`);
+    r = runL(layerHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /machine change kept: .*marketplaces\.json/);
+    assert.equal(JSON.parse(lgot(join(llayers, 'nogit-9'), '.omp/agent/marketplaces.json')).marketplaces[0].catalogPath,
+      join(llayers, 'nogit-9', '.omp/marketplaces/moved.json'), 'a kept machine file re-roots into the new layer, never the old one');
+
+    // Migration: the first layer over an existing in-place home reads the machine part of
+    // config.yml from the home, so the deployment blocks and the entry script's edit survive
+    // the switch (compose turns ALATE_LAYER=1 on over exactly such a home).
+    const layerHome4 = join(tmp, 'layer-home-4');
+    r = run(['--data', ldata, '--skip-plugins'], layerHome4);
+    assert.equal(r.status, 0, r.stderr);
+    writeFileSync(join(layerHome4, '.omp/agent/config.yml'),
+      'modelRoles:\n  default: zai/glm-5.3\nmemoryBackend: $OTTR_MEMORY\n' + blocksL);
+    r = runL(layerHome4, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    const base4 = join(layerHome4, '.alate');
+    const l4 = join(base4, 'layers', 'nogit-1');
+    assert.equal(realpathSync(join(base4, 'current')), l4);
+    assert.equal(lgot(l4, '.omp/agent/config.yml'),
+      'modelRoles:\n  default: zai/glm-5.3\nmemoryBackend: $OTTR_MEMORY\n' + blocksL,
+      'the first layer takes the machine part of config.yml from the home');
+    assert.match(r.stdout, /machine change kept: /);
+    assert.equal(lgot(l4, '.ottr/workers/web/apt.txt'), 'libnss3\n', 'everything else starts from the snapshot');
+
     // A failed scan deletes the failed layer folder and keeps the old current: a busy board
     // provisions while turns run, and a bad skill must not take the live layer down.
     const layerHome2 = join(tmp, 'layer-home-2');
