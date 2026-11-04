@@ -1275,6 +1275,22 @@ try {
   assert.ok(existsSync(join(editDir, 'docs', 'new.md')), 'stale delete kept the file');
   assert.equal(commitSubject(), 'alate: edit docs/new.md', 'no new commit on conflict');
 
+  // An edit commits only its own path: unrelated staged work never enters the commit or the push.
+  writeFileSync(join(editDir, 'secret-wip.txt'), 'wip\n');
+  assert.equal(git(['-C', editDir, 'add', 'secret-wip.txt']).status, 0);
+  const wipHash = (await (await get('/api/file?path=keep.md')).json()).hash;
+  r = await putJson({ path: 'keep.md', content: 'staged guard\n', base: wipHash, message: 'test: edit only keep.md' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(body.pushed, true);
+  assert.deepEqual(git(['-C', editDir, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'], { encoding: 'utf8' }).stdout.trim().split('\n'),
+    ['keep.md'], 'the commit carries only the edited path');
+  assert.equal(remoteText('keep.md'), 'staged guard\n');
+  assert.equal(inRemote('secret-wip.txt'), false, 'the unrelated staged file never reaches the remote');
+  assert.deepEqual(git(['-C', editDir, 'diff', '--cached', '--name-only'], { encoding: 'utf8' }).stdout.trim().split('\n'),
+    ['secret-wip.txt'], 'the unrelated file stays staged');
+  assert.equal(commitSubject(), 'test: edit only keep.md');
+
   // A path that exists as a directory refuses on both write and delete.
   r = await putJson({ path: 'docs', content: 'x', base: null });
   assert.equal(r.status, 400);

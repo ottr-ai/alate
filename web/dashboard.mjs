@@ -466,11 +466,14 @@ function identArgs(dir, env) {
   return id.status !== 0 || !id.stdout.trim() ? ['-c', 'user.name=alate', '-c', 'user.email=alate@localhost'] : [];
 }
 
-// Stage the one path, commit, return the new sha. A failure is a client-safe 400.
+// Stage the one path, commit only that path (never other staged work), return the new sha.
+// A failure is a client-safe 400.
 function commitEdit(dir, rel, message, env, token) {
   const add = runGit(dir, ['add', '-A', '--', rel], env);
   if (add.status !== 0) fail(400, `git add failed: ${redactSecrets(add.stderr.trim(), token)}`);
-  const commit = runGit(dir, [...identArgs(dir, env), 'commit', '-m', message], env);
+  // The pathspec keeps a path-kind edit from sweeping the operator's unrelated staged index
+  // into this commit and the push that follows it.
+  const commit = runGit(dir, [...identArgs(dir, env), 'commit', '-m', message, '--', rel], env);
   if (commit.status !== 0) fail(400, `git commit failed: ${redactSecrets(commit.stderr.trim(), token)}`);
   const head = runGit(dir, ['rev-parse', 'HEAD'], env);
   if (head.status !== 0) fail(400, `cannot read the new commit for ${rel}`);
