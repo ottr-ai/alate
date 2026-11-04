@@ -162,6 +162,20 @@ const waitFor = async (fn, ms) => {
   }
 };
 
+// node:sqlite has no busy timeout: a write against a database that a checker tick holds
+// locked throws at once. Fixture writes into a live server's database wait the tick out.
+const retryOnLocked = async fn => {
+  const end = Date.now() + 10_000;
+  for (;;) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (Date.now() >= end || !/database is locked/.test(String(err?.message))) throw err;
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
+};
+
 try {
   let base, apiKey, listenLine = '';
   await new Promise((res, rej) => {
@@ -1079,8 +1093,15 @@ try {
     assert.equal((await postJson('/api/settings', { token: 'updates-gh-token-3f9' })).status, 200);
     r = await postImport(JSON.stringify({ source: 'https://github.com/demo/updates.git', kind: 'repo' }));
     assert.equal(r.status, 200, JSON.stringify(await r.json()));
-    await waitFor(async () => (await (await authed('/api/updates')).json()).updates.length === 17, 20_000);
-    const rows = Object.fromEntries((await (await authed('/api/updates')).json()).updates.map(u => [u.name, u]));
+    // Capture the rows in the same poll that sees 17: a bare refetch could read a later
+    // tick that carried a lock-lost row forward.
+    let rows;
+    await waitFor(async () => {
+      const updates = (await (await authed('/api/updates')).json()).updates;
+      if (updates?.length !== 17) return false;
+      rows = Object.fromEntries(updates.map(u => [u.name, u]));
+      return true;
+    }, 20_000);
 
     // github-release: tag prefix/suffix stripped, drafts and prereleases skipped, age gate on published_at.
     const rel = rows['rel-demo'];
@@ -1220,38 +1241,43 @@ try {
     assert.deepEqual(authSeen.filter(a => a.prefix !== 'gh' && a.authorization), [], 'the GitHub key never travels to npm, node or cft');
 
     // Backdate the first-seen records: the cft version and the skill head now clear the age gate.
-    {
+    await retryOnLocked(() => {
       const seen = new DatabaseSync(upDb);
       seen.prepare("UPDATE update_seen SET seenAt = ? WHERE key LIKE 'item:cft-demo|%' OR key = ?")
         .run(T.seen8, `skill:stale-skill|${SHA.staleHead}`);
       seen.close();
-    }
+    });
     r = await postImport(JSON.stringify({ source: 'https://github.com/demo/updates.git' }));
     assert.equal(r.status, 200);
     // Both rows are recomputed by the same checker tick, but a tick can abort mid-run on a
-    // transient database lock (the import's own state write), so one row can land while the
-    // other still carries its pre-backdate values. Wait for both preconditions, then assert.
+    // transient database lock, so one row lands qualified while the other still carries its
+    // pre-backdate values; the next tick repairs it. Wait for both qualified rows in one
+    // committed snapshot, then assert on it: bare refetches could read a later tick that
+    // regressed the carried row again.
+    let soaked;
     await waitFor(async () => {
-      const us = (await (await authed('/api/updates')).json()).updates;
-      return us.find(u => u.name === 'cft-demo')?.target === '154.0.8037.92'
-        && us.find(u => u.name === 'stale-skill')?.target === SHA.staleHead;
+      const updates = (await (await authed('/api/updates')).json()).updates;
+      const cft2 = updates?.find(u => u.name === 'cft-demo');
+      const stale2 = updates?.find(u => u.name === 'stale-skill');
+      if (cft2?.target !== '154.0.8037.92' || stale2?.target !== SHA.staleHead) return false;
+      soaked = { cft2, stale2 };
+      return true;
     }, 20_000);
-    const cft2 = (await (await authed('/api/updates')).json()).updates.find(u => u.name === 'cft-demo');
-    assert.equal(cft2.publishedAt, T.seen8);
-    assert.equal(cft2.qualifiesAt, plusDays(T.seen8, 7));
-    const stale2 = (await (await authed('/api/updates')).json()).updates.find(u => u.name === 'stale-skill');
-    assert.equal(stale2.target, SHA.staleHead, 'the soaked skill head qualifies');
-    assert.equal(stale2.publishedAt, T.seen8);
+    assert.equal(soaked.cft2.target, '154.0.8037.92');
+    assert.equal(soaked.cft2.publishedAt, T.seen8);
+    assert.equal(soaked.cft2.qualifiesAt, plusDays(T.seen8, 7));
+    assert.equal(soaked.stale2.target, SHA.staleHead, 'the soaked skill head qualifies');
+    assert.equal(soaked.stale2.publishedAt, T.seen8);
 
     // A failed check keeps the last result and records the error for the dashboard.
     relFails = true;
     r = await postImport(JSON.stringify({ source: 'https://github.com/demo/updates.git' }));
     assert.equal(r.status, 200);
+    let rel2;
     await waitFor(async () => {
-      const u = (await (await authed('/api/updates')).json()).updates.find(x => x.name === 'rel-demo');
-      return u && /HTTP 500/.test(u.error ?? '');
+      rel2 = (await (await authed('/api/updates')).json()).updates?.find(x => x.name === 'rel-demo');
+      return rel2 && /HTTP 500/.test(rel2.error ?? '');
     }, 20_000);
-    const rel2 = (await (await authed('/api/updates')).json()).updates.find(u => u.name === 'rel-demo');
     assert.equal(rel2.latest, '2.0.0', 'a failed check keeps the last result');
     assert.equal(rel2.target, '2.0.0');
     assert.ok(rel2.checkedAt > rel.checkedAt, 'the carried row reports the fresh checkedAt');
