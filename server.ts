@@ -134,7 +134,13 @@ function authorized(req: FastifyRequest): boolean {
   return !!m && keyMatch(m[1], config.apiKey ?? '')
 }
 
-// Dashboard session cookie: a hash of the provisioning key, so the key itself never
+// The provisioning API (/config, /provision, /api/updates) always needs the key, on every
+// bind: one shared guard so the three routes cannot drift apart.
+async function keyGuard(req: FastifyRequest, reply: FastifyReply): Promise<void | FastifyReply> {
+  if (!authorized(req)) return reply.code(401).send({ error: 'unauthorized' })
+}
+
+// Dashboard session cookie: a hash of the provisioning key, so the key never
 // reaches the browser and a rotation (POST /api/key) ends every session at once.
 const sessionToken = (): string => createHash('sha256').update(`alate-session:${config.apiKey ?? ''}`).digest('hex')
 
@@ -206,9 +212,7 @@ app.get('/config', async () => ({ repo: config.repo, path: config.path, tokenSet
 interface ConfigBody { repo?: unknown; path?: unknown; token?: unknown }
 
 app.post<{ Body: ConfigBody | undefined }>('/config', {
-  preHandler: async (req, reply) => {
-    if (!authorized(req)) return reply.code(401).send({ error: 'unauthorized' })
-  },
+  preHandler: keyGuard,
 }, async (req, reply) => {
   const body = req.body ?? {}
   if (running) return reply.code(409).send({ error: 'provision already running' })
@@ -231,9 +235,7 @@ app.post<{ Body: ConfigBody | undefined }>('/config', {
 })
 
 app.post('/provision', {
-  preHandler: async (req, reply) => {
-    if (!authorized(req)) return reply.code(401).send({ error: 'unauthorized' })
-  },
+  preHandler: keyGuard,
 }, async (_req, reply) => {
   if (running) return reply.code(409).send({ error: 'provision already running' })
   if (!config.repo && !config.path) return reply.code(400).send({ error: 'no data source configured' })
@@ -373,9 +375,7 @@ async function updateCheck(): Promise<void> {
 app.get('/api/state', { preHandler: dashGuard }, async () => ({ ...dashState, updates: loadUpdates(db) }))
 
 app.get('/api/updates', {
-  preHandler: async (req, reply) => {
-    if (!authorized(req)) return reply.code(401).send({ error: 'unauthorized' })
-  },
+  preHandler: keyGuard,
 }, async () => loadUpdates(db))
 
 // Dashboard login: exchange the provisioning key for a session cookie, because phone
