@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { forAll, keepTemp } from './lib/data.mjs';
 
 import { diffLines } from './web/diff.mjs';
-import { checkUpdates, cmpVer, initUpdates } from './lib/updates.mjs';
+import { checkUpdates, cmpVer, initUpdates, isValidUpdateRecord } from './lib/updates.mjs';
 
 // Proof-mark diff: change, pure addition, pure deletion, and no change.
 assert.deepEqual(diffLines(['a', 'b', 'c'], ['a', 'B', 'c']), [{ start: 1, count: 1, old: ['b'] }]);
@@ -924,21 +924,33 @@ try {
   };
   const b64 = s => Buffer.from(s).toString('base64');
   let relFails = false;
+  let slowRel = false; // stretch the rel-demo releases request: two overlapping POSTs join one run
+  let child2 = null; // the trigger-check server, spawned and killed inside the try
+  // Resolves for an already-exited child too: a `close` listener on a dead child never fires.
+  const stopServer = p => new Promise(resolve => {
+    if (p.exitCode !== null || p.signalCode !== null) return resolve();
+    p.once('close', resolve);
+    p.kill();
+  });
   const authSeen = [];
+  const upHits = [];
   const fakeUp = createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
+    upHits.push(url.pathname);
     const reply = (code, body2) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body2)); };
     const prefix = url.pathname.split('/')[1];
     authSeen.push({ prefix, authorization: req.headers.authorization ?? null });
     if (prefix === 'gh') {
       if (url.pathname === '/gh/repos/fake/rel/releases') {
         if (relFails) return reply(500, { message: 'boom' });
-        return reply(200, [
+        const rels = [
           { tag_name: 'v2.0.0-rel', draft: false, prerelease: false, published_at: T.rel30, html_url: 'https://github.com/fake/rel/releases/v2.0.0' },
           { tag_name: 'v1.9.0-rel', draft: false, prerelease: false, published_at: T.rel2, html_url: 'https://github.com/fake/rel/releases/v1.9.0' },
           { tag_name: 'v3.0.0-rc1', draft: false, prerelease: true, published_at: T.rc1, html_url: 'https://github.com/fake/rel/releases/v3.0.0-rc1' },
           { tag_name: 'v4.0.0-rel', draft: true, prerelease: false, published_at: T.rc1, html_url: 'https://github.com/fake/rel/releases/v4.0.0' },
-        ]);
+        ];
+        if (slowRel) return setTimeout(() => reply(200, rels), 400);
+        return reply(200, rels);
       }
       if (url.pathname === '/gh/repos/demo/private/contents/Dockerfile.worker')
         return reply(200, { content: b64('FROM ghcr.io/fake/image:9.9.9\nARG DEMO_IMAGE=ghcr.io/fake/image:1.2.2-debian\n'), encoding: 'base64' });
@@ -1093,18 +1105,25 @@ try {
     assert.equal((await postJson('/api/settings', { token: 'updates-gh-token-3f9' })).status, 200);
     r = await postImport(JSON.stringify({ source: 'https://github.com/demo/updates.git', kind: 'repo' }));
     assert.equal(r.status, 200, JSON.stringify(await r.json()));
-    // Capture the rows in the same poll that sees 17: a bare refetch could read a later
-    // tick that carried a lock-lost row forward.
-    let rows;
+    // GET /api/updates serves only records the board accepts; /api/state keeps all 17.
+    // Capture both views in the same poll that sees them: a bare refetch could read a
+    // later tick that carried a lock-lost row forward.
+    let stateRows, providerRows;
     await waitFor(async () => {
-      const updates = (await (await authed('/api/updates')).json()).updates;
-      if (updates?.length !== 17) return false;
-      rows = Object.fromEntries(updates.map(u => [u.name, u]));
+      const state = (await (await get('/api/state')).json()).updates;
+      providerRows = (await (await authed('/api/updates')).json()).updates;
+      if (state?.updates?.length !== 17 || providerRows?.length !== 7) return false;
+      stateRows = Object.fromEntries(state.updates.map(u => [u.name, u]));
       return true;
     }, 20_000);
+    const rows = Object.fromEntries(providerRows.map(u => [u.name, u]));
+    assert.deepEqual(Object.keys(stateRows).filter(n => !rows[n]).sort(),
+      ['@xynogen/pix-optimizer', '@xynogen/pix-skills', 'cft-demo', 'context-mode', 'gap-demo', 'managed-demo', 'miss-demo', 'node-demo', 'pin-demo', 'rel-demo'],
+      'the provider list omits exactly the records the board would drop');
+    assert.ok(providerRows.every(isValidUpdateRecord), 'every served record passes the board shape');
 
     // github-release: tag prefix/suffix stripped, drafts and prereleases skipped, age gate on published_at.
-    const rel = rows['rel-demo'];
+    const rel = stateRows['rel-demo'];
     assert.equal(rel.current, '1.5.0');
     assert.equal(rel.latest, '2.0.0', 'drafts and prereleases never become latest');
     assert.equal(rel.target, '2.0.0', 'the fresh v1.9.0 does not qualify yet');
@@ -1117,7 +1136,7 @@ try {
     assert.equal(rel.error ?? null, null);
 
     // A pin in another repo is read through the contents API: ARG wins over FROM, suffix stripped.
-    const pin = rows['pin-demo'];
+    const pin = stateRows['pin-demo'];
     assert.equal(pin.current, '1.2.2');
     assert.equal(pin.repo, 'demo/private');
     assert.deepEqual(pin.pin, { file: 'Dockerfile.worker', key: 'DEMO_IMAGE' });
@@ -1135,7 +1154,7 @@ try {
     assert.equal(from.publishedAt, T.npm20);
 
     // A pin key that matches nothing in the file is an error row, never a false update.
-    const miss = rows['miss-demo'];
+    const miss = stateRows['miss-demo'];
     assert.match(miss.error ?? '', /pin MISSING_PIN not found in Dockerfile/);
     assert.equal(miss.current, null);
     assert.equal(miss.latest, null);
@@ -1149,28 +1168,28 @@ try {
     assert.deepEqual(mcp.pin, { file: 'user/omp/agent/mcp.json', key: 'chrome-devtools-mcp@' });
 
     // No pin and no lock entry: the check still runs with an unknown current.
-    const gap = rows['gap-demo'];
+    const gap = stateRows['gap-demo'];
     assert.equal(gap.current, null);
     assert.equal(gap.latest, SHA.gapHead);
     assert.equal(gap.target, null, 'a first-seen head never qualifies, whatever its commit date claims');
     assert.ok(Math.abs(Date.parse(gap.publishedAt) - Date.now()) < 60_000, 'publishedAt is the first-seen moment, not the commit date');
 
     // node-dist within the configured major only.
-    const node = rows['node-demo'];
+    const node = stateRows['node-demo'];
     assert.equal(node.current, '22.1.0');
     assert.equal(node.latest, '22.20.0', 'other majors and rc builds stay out');
     assert.equal(node.target, '22.20.0');
     assert.equal(node.publishedAt, T.node10);
 
     // chrome-for-testing has no publish time: the first-seen moment gates the target.
-    const cft = rows['cft-demo'];
+    const cft = stateRows['cft-demo'];
     assert.equal(cft.latest, '154.0.8037.92');
     assert.equal(cft.target, null, 'first seen moments ago, not qualified yet');
     assert.ok(Math.abs(Date.parse(cft.publishedAt) - Date.now()) < 60_000);
     assert.equal(cft.qualifiesAt, plusDays(cft.publishedAt, 7));
 
     // managedBy rows are recorded, never targeted.
-    const managed = rows['managed-demo'];
+    const managed = stateRows['managed-demo'];
     assert.equal(managed.managedBy, 'alate sync');
     assert.equal(managed.target, null);
     assert.equal(managed.latest, null);
@@ -1204,7 +1223,7 @@ try {
     assert.equal(gone.id, `gone-skill@${SHA.goneHead}`);
 
     // Plugins from bun.lock: npm packages get the registry check, git ones the release tags.
-    const ctx = rows['context-mode'];
+    const ctx = stateRows['context-mode'];
     assert.deepEqual(ctx.pin, { file: 'user/omp/plugins/bun.lock', key: 'context-mode' });
     assert.equal(ctx.current, '1.0.9');
     assert.equal(ctx.latest, '1.1.0', '2.0.0-alpha is not stable');
@@ -1219,12 +1238,12 @@ try {
     assert.equal(cav.id, 'caveman-installer@v4.0.1');
 
     // npm: specs are npm checks on the named package, locked version as current.
-    const pix = rows['@xynogen/pix-optimizer'];
+    const pix = stateRows['@xynogen/pix-optimizer'];
     assert.equal(pix.current, '1.2.0');
     assert.equal(pix.latest, '1.3.0');
     assert.equal(pix.target, '1.3.0');
     assert.deepEqual(pix.pin, { file: 'user/omp/plugins/bun.lock', key: '@xynogen/pix-optimizer' });
-    const pix2 = rows['@xynogen/pix-skills'];
+    const pix2 = stateRows['@xynogen/pix-skills'];
     assert.equal(pix2.current, '0.8.5', 'the range in npm:<package>@<range> is ignored');
     assert.equal(pix2.latest, '0.8.5');
     assert.equal(pix2.target, null);
@@ -1253,7 +1272,7 @@ try {
     // transient database lock, so one row lands qualified while the other still carries its
     // pre-backdate values; the next tick repairs it. Wait for both qualified rows in one
     // committed snapshot, then assert on it: bare refetches could read a later tick that
-    // regressed the carried row again.
+    // regressed the carried row again. Both rows are board-valid, so the provider serves them.
     let soaked;
     await waitFor(async () => {
       const updates = (await (await authed('/api/updates')).json()).updates;
@@ -1275,7 +1294,8 @@ try {
     assert.equal(r.status, 200);
     let rel2;
     await waitFor(async () => {
-      rel2 = (await (await authed('/api/updates')).json()).updates?.find(x => x.name === 'rel-demo');
+      // rel-demo has no pin, so the provider list omits it; read the carried row on /api/state.
+      rel2 = (await (await get('/api/state')).json()).updates.updates?.find(x => x.name === 'rel-demo');
       return rel2 && /HTTP 500/.test(rel2.error ?? '');
     }, 20_000);
     assert.equal(rel2.latest, '2.0.0', 'a failed check keeps the last result');
@@ -1294,8 +1314,123 @@ try {
     health = await (await get('/health')).json();
     assert.equal(health.pending, false, 'provisioning records the stored snapshot commit');
     assert.equal(health.update.behind, false);
+
+    // 78b. Snapshot-change and provision triggers: a changed snapshot re-runs the
+    // check ahead of the 24 h timer, and POST /api/updates/check starts one now.
+    // Dedicated server: one-second dash ticks so the auto-update refresh fires,
+    // an hour-long update interval so the timer can never be the cause.
+    await stopServer(child);
+    const upd2 = join(tmp, 'gh', 'demo', 'upd2'); // bare remote: editor pushes need it
+    const upd2Seed = join(tmp, 'upd2-seed');
+    const upd2Work = join(tmp, 'upd2-work');
+    assert.equal(git(['init', '-q', '--bare', '-b', 'main', upd2]).status, 0);
+    assert.equal(git(['clone', '-q', upRepo, upd2Seed]).status, 0);
+    git(['-C', upd2Seed, 'config', 'user.name', 't']);
+    git(['-C', upd2Seed, 'config', 'user.email', 't@t']);
+    // This data repo is demo/upd2: its in-repo pins must name the same repo, or the
+    // checker reads them through the contents API and the rows turn into error rows.
+    const upd2Items = JSON.parse(readFileSync(join(upd2Seed, 'upstreams.json'), 'utf8'));
+    for (const it of upd2Items.items) if (it.pin && it.pin.repo === 'demo/updates') it.pin.repo = 'demo/upd2';
+    writeFileSync(join(upd2Seed, 'upstreams.json'), JSON.stringify(upd2Items));
+    assert.equal(git(['-C', upd2Seed, 'add', '-A']).status, 0);
+    assert.equal(git(['-C', upd2Seed, 'commit', '-qm', 'test: name the pins after this repo']).status, 0);
+    assert.equal(git(['-C', upd2Seed, 'push', '-q', upd2, 'HEAD:main']).status, 0);
+    const upConfig2 = join(tmp, 'server-config-updates2.json');
+    const upDb2 = join(tmp, 'state-updates2.db');
+    child2 = spawnServer(['--port', '0', '--config', upConfig2, '--db', upDb2, '--interval', '1', '--update-interval', '3600'], {
+      ...serverEnv, PATH: `${tmpBin}${delimiter}${serverEnv.PATH ?? ''}`,
+      ALATE_TEST_GITHUB_API_BASE: `${upBase}/gh`, ALATE_TEST_NPM_BASE: `${upBase}/npm`,
+      ALATE_TEST_NODE_DIST_BASE: `${upBase}/dist`, ALATE_TEST_CFT_BASE: `${upBase}/cft`,
+    });
+    let apiKey2 = '';
+    base = await new Promise((resolve, reject) => {
+      let buf = '';
+      child2.stdout.on('data', chunk => {
+        buf += chunk;
+        const k = /alate API key: (\S+)\n/.exec(buf);
+        const l = /alate server on (http:\/\/127\.0\.0\.1:\d+)\n/.exec(buf);
+        if (k) apiKey2 = k[1];
+        if (k && l) resolve(l[1]);
+      });
+      child2.once('exit', code => reject(new Error(`trigger server exited early (${code})`)));
+      setTimeout(() => reject(new Error(`trigger server did not start; got: ${buf}`)), 10_000).unref();
+    });
+    apiKey = apiKey2; // the shared get/postJson helpers follow the active instance
+    const putFile = b => fetch(new URL('/api/file', base), { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify(b) });
+    const updatesBody = async () => (await (await authed('/api/updates')).json());
+    const boardNames = list => list.filter(u => u.current !== u.latest && u.current !== u.target).map(u => u.name);
+
+    assert.equal((await postJson('/api/settings', { token: 'updates-gh-token-3f9' })).status, 200);
+    assert.equal((await postJson('/api/settings', { autoUpdate: true })).status, 200, 'auto-update refresh drives the selectSource trigger');
+    r = await postImport(JSON.stringify({ source: 'https://github.com/demo/upd2.git', kind: 'repo' }));
+    assert.equal(r.status, 200, JSON.stringify(await r.json()));
+    // Same split as the first server: /api/state keeps all 17 rows, the provider serves 7.
+    const allRows = async () => (await (await get('/api/state')).json()).updates.updates;
+    await waitFor(async () => (await allRows()).length === 17, 20_000);
+    await waitFor(async () => (await updatesBody()).updates.length === 7, 20_000);
+    assert.ok((await updatesBody()).updates.every(isValidUpdateRecord), 'every served record passes the board shape');
+    let rows2 = await updatesBody();
+    const from0 = rows2.updates.find(u => u.name === 'from-demo');
+    assert.equal(from0.current, '2.3.3');
+    assert.equal(from0.latest, '3.0.0', 'the pin target is already qualified in this fixture');
+    assert.ok(boardNames(rows2.updates).includes('from-demo'), 'the row is an available update before the pin moves');
+
+    // Editor path: PUT /api/file moves the pin to its target; the row follows at once.
+    const pinFile = await (await get('/api/file?path=Dockerfile')).json();
+    assert.equal(pinFile.binary, false);
+    const moved = pinFile.content.replace('ghcr.io/fake/other:2.3.3-alpine', 'ghcr.io/fake/other:3.0.0-alpine');
+    assert.notEqual(moved, pinFile.content, 'the pinned FROM line is in the fixture');
+    r = await putFile({ path: 'Dockerfile', content: moved, base: pinFile.hash, message: 'test: pin fake/other at 3.0.0' });
+    assert.equal(r.status, 200, JSON.stringify(await r.json()));
+    await waitFor(async () => (await updatesBody()).updates.find(u => u.name === 'from-demo')?.current === '3.0.0', 20_000);
+    rows2 = await updatesBody();
+    assert.ok(rows2.checkedAt > from0.checkedAt, 'the check re-ran without the 24 h timer');
+    assert.ok(!boardNames(rows2.updates).includes('from-demo'), 'the applied pin left the board list at once');
+
+    // Auto-update refresh path: a pushed commit moves the pin back; the dash tick
+    // re-imports it and the check follows.
+    const checkedAtEdit = rows2.checkedAt;
+    assert.equal(git(['clone', '-q', upd2, upd2Work]).status, 0);
+    git(['-C', upd2Work, 'config', 'user.name', 't']);
+    git(['-C', upd2Work, 'config', 'user.email', 't@t']);
+    writeFileSync(join(upd2Work, 'Dockerfile'), 'ARG OTHER_KEY=1\nFROM --platform=linux/amd64 fake/base:1.0.0 AS build\nFROM ghcr.io/fake/other:2.3.3-alpine\n');
+    assert.equal(git(['-C', upd2Work, 'add', '-A']).status, 0);
+    assert.equal(git(['-C', upd2Work, 'commit', '-qm', 'test: pin fake/other back at 2.3.3']).status, 0);
+    assert.equal(git(['-C', upd2Work, 'push', '-q', upd2, 'HEAD:main']).status, 0);
+    await waitFor(async () => (await updatesBody()).updates.find(u => u.name === 'from-demo')?.current === '2.3.3', 20_000);
+    rows2 = await updatesBody();
+    assert.ok(rows2.checkedAt > checkedAtEdit, 'the auto-update refresh re-ran the check');
+
+    // Provision path: provisioning re-runs the check so an applied update leaves at once.
+    const checkedAtRefresh = rows2.checkedAt;
+    r = await postJson('/provision', {});
+    assert.equal(r.status, 200);
+    const prov2 = await r.json();
+    assert.equal(prov2.ok, true, JSON.stringify(prov2.results?.map(x => [x.script, x.code, x.output.slice(-300)])));
+    await waitFor(async () => (await updatesBody()).checkedAt > checkedAtRefresh, 20_000);
+
+    // POST /api/updates/check: the board's refresh can start a check now. Same
+    // Bearer rule as GET /api/updates; overlapping POSTs join one run (single flight).
+    assert.equal((await fetch(new URL('/api/updates/check', base), { method: 'POST' })).status, 401, 'check needs the bearer key');
+    assert.equal((await fetch(new URL('/api/updates/check', base), { method: 'POST', headers: { Authorization: 'Bearer wrong-key' } })).status, 401);
+    assert.equal((await get('/api/updates/check')).status, 405, 'known route refuses other methods');
+    slowRel = true;
+    const relHits = () => upHits.filter(p => p === '/gh/repos/fake/rel/releases').length;
+    const hitsBefore = relHits();
+    const [c1, c2] = await Promise.all([
+      fetch(new URL('/api/updates/check', base), { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` } }),
+      fetch(new URL('/api/updates/check', base), { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` } }),
+    ]);
+    assert.equal(c1.status, 200);
+    assert.equal(c2.status, 200);
+    const checkBody = await c1.json();
+    assert.ok(typeof checkBody.checkedAt === 'string' && Array.isArray(checkBody.updates), 'the route serves the fresh list');
+    assert.ok(checkBody.checkedAt > checkedAtRefresh, 'the route ran a check now');
+    assert.equal(relHits() - hitsBefore, 1, 'overlapping checks joined one run');
+    slowRel = false;
   } finally {
-    await new Promise(resolve => { child.once('close', resolve); child.kill(); });
+    await stopServer(child);
+    if (child2) await stopServer(child2);
     await new Promise(resolve => fakeUp.close(resolve));
   }
 
@@ -4027,7 +4162,7 @@ try {
         const cfgG = join(tmp, 'server-config-mutG.json');
         const G = mut10Spawn(['--port', '0', '--config', cfgG, '--db', join(tmp, 'state-mutG.db'), '--interval', '100000', '--update-interval', '100000'], { ALATE_TEST_NPM_BASE: npmBase });
         const { base, key } = await G.up;
-        const rowsG = async () => (await (await fetch(new URL('/api/updates', base), { headers: { Authorization: `Bearer ${key}` } })).json()).updates;
+        const rowsG = async () => (await (await fetch(new URL('/api/state', base), { headers: { Authorization: `Bearer ${key}` } })).json()).updates.updates;
         // Check #1 is held open at the fake: a rapid second import must not start a second checker.
         // Loopback write without a key: carries the dashboard's Origin header (dashGuard).
         let [st, body] = await mut10Post(base, '/api/import', { source: fdir }, null, { origin: base });
@@ -4038,8 +4173,8 @@ try {
         assert.equal(npmHits, 1, 'an overlapping update check is skipped by the re-entrancy guard');
         releaseNpm(); // let the first check finish and write its row
         await waitFor(async () => (await rowsG()).length === 1, 20_000);
-        [st, body] = await mut10Json(base, '/api/updates', { headers: { Authorization: `Bearer ${key}` } });
-        assert.equal(body.updates[0].repo, fdir, 'a path source reports its spec as the pin repo');
+        [st, body] = await mut10Json(base, '/api/state', { headers: { Authorization: `Bearer ${key}` } });
+        assert.equal(body.updates.updates[0].repo, fdir, 'a path source reports its spec as the pin repo');
         // A new npm version is picked up by the next import's check.
         npmTime = { '1.0.0': new Date(Date.now() - 30 * 86_400_000).toISOString(), '2.0.0': new Date(Date.now() - 20 * 86_400_000).toISOString() };
         [st, body] = await mut10Post(base, '/api/import', { source: fdir }, null, { origin: base });

@@ -90,7 +90,8 @@ All install scripts take `--data <dir>` or `--repo <owner/name[@ref]>` (set `GH_
 | `POST /api/login` | none | `{"key": "<app key>"}` sets a session cookie for the dashboard. |
 | `POST /config` | Bearer | Import `{"repo": "owner/name"}` or `{"path": "<dir>"}`. |
 | `POST /provision` | Bearer | Run `sync.mjs` and `install-user.mjs` from the stored snapshot. The run stops at the first failed script, and `results` lists only the scripts that ran. |
-| `GET /api/updates` | Bearer | One record per tracked upstream. |
+| `GET /api/updates` | Bearer | Board contract records only, one record per pinnable upstream. `/api/state` keeps every row. |
+| `POST /api/updates/check` | Bearer | Run the upstream check now and return the fresh list. |
 
 Dashboard routes under `/api` need no key on a loopback bind. On a loopback bind, dashboard writes also need a same-origin `Origin` header or a same-host `Referer` header (the dashboard sends them; scripts use the Bearer token). On a loopback bind, the server also refuses any request whose `Host` header does not name the server (`localhost`, `127.x.x.x`, `[::1]`). On any other bind they need the key or a login session.
 

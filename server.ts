@@ -11,13 +11,13 @@ import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
 import { cleanupData, parseDataSpec, redactSecrets } from './lib/data.mjs'
 import { applyFileEdit, importSource, listStoredFiles, loadState, readStoredFile, remoteHead, snapshotData } from './web/dashboard.mjs'
-import { checkUpdates, initUpdates, loadUpdates } from './lib/updates.mjs'
+import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
 
 const repoRoot = import.meta.dirname
 const CONFIG_FILE = flagValue('--config') ?? join(repoRoot, 'server-config.json')
 const CAP = 200000
 const SCRIPTS = ['sync.mjs', 'install-user.mjs']
-const KNOWN_ROUTES = ['/health', '/config', '/provision', '/api/updates', '/api/files', '/api/file']
+const KNOWN_ROUTES = ['/health', '/config', '/provision', '/api/updates', '/api/updates/check', '/api/files', '/api/file']
 
 interface UpdateState { lastChecked: string | null; remoteSha: string; provisionedSha: string }
 interface Config {
@@ -257,6 +257,8 @@ app.post('/provision', {
       config.update.provisionedSha = dashState.source.importedSha
       saveConfig(config)
     }
+    // An applied update leaves the list at once, not at the next timer tick.
+    if (ok) void updateCheck()
     return { ok, results }
   } finally {
     running = false
@@ -334,6 +336,7 @@ const dashToken = (): string | undefined => config.token ?? process.env.GH_TOKEN
 function selectSource(spec: string, kind?: string, token = dashToken()): void {
   const next = importSource(dashState, spec, kind, token, db)
   const changed = dashState.source?.spec !== next.source.spec || dashState.source?.kind !== next.source.kind
+  const newCommit = next.source.kind === 'repo' && !!next.source.importedSha && next.source.importedSha !== dashState.source?.importedSha
   dashState = next
   const isRepo = next.source.kind === 'repo'
   config.repo = isRepo ? next.source.spec : null
@@ -346,6 +349,8 @@ function selectSource(spec: string, kind?: string, token = dashToken()): void {
   dashState.update = isRepo ? { checkedAt: next.source.importedAt, remoteSha: next.source.importedSha, available: false } : null
   persistDash()
   saveConfig(config)
+  // A fresh snapshot invalidates the stored update rows at once, not at the next timer tick.
+  if (newCommit) void updateCheck()
 }
 
 // Periodic remote check for a repo source: refresh update state, optionally auto re-import.
@@ -368,21 +373,43 @@ function dashCheck(): void {
 }
 
 let updateRunning = false
-async function updateCheck(): Promise<void> {
-  if (updateRunning) return
+let updatePromise: Promise<void> = Promise.resolve()
+// Single-flight: one checkUpdates at a time; a caller that arrives during a run
+// awaits the running one instead of starting a second. Never rejects, so the
+// fire-and-forget callers (timer, snapshot triggers) stay safe.
+function updateCheck(): Promise<void> {
+  if (updateRunning) return updatePromise
   updateRunning = true
-  try {
-    await checkUpdates(db, { token: dashToken(), securityFastPath: config.securityFastPath, dataRepo: dashState.source ? (dashState.source.kind === 'repo' ? dashState.source.name : dashState.source.spec) : null })
-  } catch (err) {
-    console.error(`update check failed: ${redactSecrets((err as Error).message, dashToken())}`)
-  } finally { updateRunning = false }
+  updatePromise = (async () => {
+    try {
+      await checkUpdates(db, { token: dashToken(), securityFastPath: config.securityFastPath, dataRepo: dashState.source ? (dashState.source.kind === 'repo' ? dashState.source.name : dashState.source.spec) : null })
+    } catch (err) {
+      console.error(`update check failed: ${redactSecrets((err as Error).message, dashToken())}`)
+    } finally { updateRunning = false }
+  })()
+  return updatePromise
 }
 
 app.get('/api/state', { preHandler: dashGuard }, async () => ({ ...dashState, updates: loadUpdates(db) }))
 
+// The provider payload keeps only records the board accepts (isValidUpdateRecord mirrors
+// the board's record() checks), so a pull never logs dropped records; /api/state keeps all.
+const boardUpdates = () => {
+  const u = loadUpdates(db)
+  return { checkedAt: u.checkedAt, updates: u.updates.filter(isValidUpdateRecord) }
+}
+
 app.get('/api/updates', {
   preHandler: keyGuard,
-}, async () => loadUpdates(db))
+}, async () => boardUpdates())
+
+// Run a check now for callers such as the board's refresh button, then serve the fresh list.
+app.post('/api/updates/check', {
+  preHandler: keyGuard,
+}, async () => {
+  await updateCheck()
+  return boardUpdates()
+})
 
 // Dashboard login: exchange the provisioning key for a session cookie, because phone
 // browsers cannot set an Authorization header. The key never returns in a response
@@ -451,6 +478,8 @@ async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) 
       ? { checkedAt: new Date().toISOString(), remoteSha: dashState.source.importedSha, available: false }
       : null
     persistDash()
+    // A pushed edit changed the snapshot; the stored update rows follow at once.
+    if (dashState.source.kind === 'repo') void updateCheck()
     return {
       ok: true,
       commit: res.commit,
