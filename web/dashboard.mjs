@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { assertSourceInside, checkDestination, cloneCommand, descriptionText, gitAuthEnv, normText, parseDataSpec, redactSecrets, SNAP_AGENTS_DIR } from '../lib/data.mjs';
+import { assertSourceInside, checkDestination, cloneCommand, descriptionText, gitAuthEnv, parseDataSpec, redactSecrets, SNAP_AGENTS_DIR } from '../lib/data.mjs';
 
 // Test hook: point the dashboard's GitHub traffic at a local fixture remote.
 const GH_BASE = process.env.ALATE_TEST_GH_BASE ?? 'https://github.com';
@@ -20,6 +20,9 @@ function mdDescription(file) {
   const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
   return (front && descriptionText(front[1])) ?? '';
 }
+
+// CRLF-normalized comparison basis (same as sync-projects.mjs)
+const norm = b => b.toString('latin1').replaceAll('\r\n', '\n');
 
 // Relative '/'-separated paths of regular files under dir; symlinks are never followed; [] when missing.
 function listFiles(dir) {
@@ -188,7 +191,7 @@ function scanInventory(dir, liveRoot = null) {
         if (live === 'off') status = 'unknown';
         else {
           const liveFile = join(liveDir, ...snapRel.split('/'));
-          status = !existsSync(liveFile) ? 'missing' : (normText(readFileSync(snapFile)) === normText(readFileSync(liveFile)) ? 'sync' : 'changed');
+          status = !existsSync(liveFile) ? 'missing' : (norm(readFileSync(snapFile)) === norm(readFileSync(liveFile)) ? 'sync' : 'changed');
         }
         entries.push({ path: snapRel, bytes: statSync(snapFile).size, status });
       }
