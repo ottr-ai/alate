@@ -1277,10 +1277,11 @@ try {
     // transient database lock, so one row lands qualified while the other still carries its
     // pre-backdate values; the next tick repairs it. Wait for both qualified rows in one
     // committed snapshot, then assert on it: bare refetches could read a later tick that
-    // regressed the carried row again. Both rows are board-valid, so the provider serves them.
+    // regressed the carried row again. cft-demo is an unpinned item, so the provider list
+    // omits it; read both rows on /api/state.
     let soaked;
     await waitFor(async () => {
-      const updates = (await (await authed('/api/updates')).json()).updates;
+      const updates = (await (await get('/api/state')).json()).updates.updates;
       const cft2 = updates?.find(u => u.name === 'cft-demo');
       const stale2 = updates?.find(u => u.name === 'stale-skill');
       if (cft2?.target !== '154.0.8037.92' || stale2?.target !== SHA.staleHead) return false;
@@ -1488,7 +1489,8 @@ try {
   const fastUp = `http://127.0.0.1:${fastApi.address().port}`;
   try {
     const fastRow = async () => {
-      const u = (await (await get('/api/updates')).json()).updates.find(x => x.name === 'fast-demo');
+      // fast-demo is an unpinned item: the provider list omits it, the state view keeps it.
+      const u = (await (await get('/api/state')).json()).updates.updates.find(x => x.name === 'fast-demo');
       assert.ok(u, 'the fast-demo row exists');
       return u;
     };
@@ -1519,7 +1521,7 @@ try {
     await bootFast('fast-off');
     assert.equal((await postJson('/api/settings', { token: 'fast-gh-token-4c1' })).status, 200);
     assert.equal((await postImport(JSON.stringify({ source: 'https://github.com/demo/fastup.git', kind: 'repo' }))).status, 200);
-    await waitFor(async () => (await (await get('/api/updates')).json()).updates.length === 1, 20_000);
+    await waitFor(async () => (await (await get('/api/state')).json()).updates.updates.length === 1, 20_000);
     const off = await fastRow();
     assert.equal(off.latest, '2.0.0');
     assert.equal(off.target, null, 'securityFastPath: false keeps the plain 7-day gate');
@@ -1530,7 +1532,7 @@ try {
     // Same database, fresh default config (the fast path on): the release-body CVE is a
     // tier A signal, so the 4-day-old release qualifies at the 2-day gate.
     await bootFast('fast-on');
-    await waitFor(async () => (await (await get('/api/updates')).json()).updates.find(x => x.name === 'fast-demo')?.target === '2.0.0', 20_000);
+    await waitFor(async () => (await (await get('/api/state')).json()).updates.updates.find(x => x.name === 'fast-demo')?.target === '2.0.0', 20_000);
     const on = await fastRow();
     assert.equal(on.security?.tier, 'A', 'the release-body CVE is a tier A signal');
     assert.equal(on.qualifiesAt, plusDays(on.publishedAt, 2));
