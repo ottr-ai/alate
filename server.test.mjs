@@ -2287,6 +2287,16 @@ try {
       const third = rows(db);
       assert.deepEqual([third.gp1.target, third.soak.target], [null, null], 'a new sha restarts the soak');
       assert.ok(Math.abs(Date.parse(third.gp1.publishedAt) - Date.now()) < 60_000);
+      // Force-push revert and restore: the returning sha must not inherit the soaked row that
+      // its earlier stay built, so the same 7-day soak applies again.
+      head = { sha: 'oldsha', commit: { committer: { date: old30 } }, html_url: 'hu' };
+      await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      const fourth = rows(db);
+      assert.deepEqual([fourth.gp1.target, fourth.soak.target], [null, null], 'a sha that left and returned restarts its soak');
+      assert.ok(Math.abs(Date.parse(fourth.gp1.publishedAt) - Date.now()) < 60_000, 'the returning sha starts a fresh first-seen moment');
+      assert.equal(
+        db.prepare('SELECT count(*) AS n FROM update_seen WHERE substr(key, 1, ?) = ?').get('item:gp1|'.length, 'item:gp1|').n, 1,
+        'only the current head keeps a seen row');
     }
 
     // npm: created/modified exclusion, prerelease exclusion, pick, package fallback, empty doc.
