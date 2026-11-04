@@ -89,14 +89,17 @@ non-zero. A failure after the switch changes nothing about the switch itself.
   `config.yml` (the same `splitDeploymentBlocks` merge the in-place mode does). A first
   layer with no current layer gets none, like a fresh home — unless the home holds an
   in-place install: the first layer over an in-place home reads the machine part of
-  `config.yml` from the home itself, so the blocks and the entry script's memory-backend
-  edit survive the migration to layers. Every other file starts from the snapshot in that
+  `config.yml` from the home itself, so the blocks and the machine edits of `config.yml`
+  survive the migration to layers. Every other file starts from the snapshot in that
   case, and the home's `installed.json` stays unconsulted.
 - A machine change in the current layer that goes beyond the deployment blocks: machine
   state wins. The new layer keeps the machine bytes for that file, and the run reports each
   kept path. `--force` takes the snapshot instead; the deployment blocks still ride along.
-  This is how the compose entry script's memory-backend edit of `config.yml` survives every
-  switch, wherever in the file it sits.
+  This is how a machine edit such as the entry script's top-level `memoryBackend:` key
+  survives every switch, wherever in the file it sits. The memory backend itself is a
+  deployment choice (OTTR-453): the board injects it at spawn time. Capture strips the
+  `backend:` entry under the top-level `memory:` key, install drops the entry from the
+  snapshot, and the entry never rides along with the machine part.
 - A machine-kept JSON/YAML file can hold absolute paths that were re-rooted into the live
   layer at its install. The copy re-roots them into the new layer, so clean-up can delete
   the live layer; paths into the shared home stay shared.
@@ -166,7 +169,7 @@ them at turn end.
   keeps the machine bytes in the new layer; `--force` takes the snapshot and still carries
   the blocks; block content never reaches the output.
 - Migration: the first layer over an in-place home keeps the home's deployment blocks and
-  the machine edit of `config.yml` in the new layer.
+  the machine edits of `config.yml` in the new layer.
 - A machine-kept file holding a re-rooted path lands pointing into the new layer, never
   into the live one that clean-up deletes.
 - Captured paths: a `catalogPath` under the home prefix lands re-rooted into the new layer.

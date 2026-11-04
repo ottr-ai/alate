@@ -5,7 +5,7 @@ import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, 
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { forAll, keepTemp, yamlProblems } from './lib/data.mjs';
+import { forAll, keepTemp, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-user-'));
 const repo = join(tmp, 'repo');
@@ -164,13 +164,39 @@ try {
   assert.equal(snap('omp/agent/config.yml'), rich);
   put('.omp/agent/config.yml', good);
 
-  const portable = 'memory:\n  backend: hindsight\ncomposer:\n  alate: keep\nmodelRoles:\n  default: zai/glm\n';
+  // The memory backend is a deployment choice (OTTR-453): the board injects it at spawn with
+  // a --config overlay, so capture drops it like the deployment blocks. The BOM rides with
+  // the dropped first lines; the portable keys after the blocks stay.
+  const portable = 'composer:\n  alate: keep\nmodelRoles:\n  default: zai/glm\n';
   for (const key of ['hindsight', '"hindsight"', "'hindsight'"]) {
     put('.omp/agent/config.yml', `\uFEFFmemory:\n  backend: hindsight\n${key}:\n  apiKey: ${FAKES['GitHub token']}\n\n# Deployment details\n  nested:\n    apiUrl: https://local.example\n"alate":\n  url: https://provision.example\n  apiKey: local-only\ncomposer:\n  alate: keep\nmodelRoles:\n  default: zai/glm\n`);
     r = run();
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(snap('omp/agent/config.yml'), portable, 'capture omits deployment blocks but preserves nested names and the selected backend');
+    assert.equal(snap('omp/agent/config.yml'), portable, 'capture omits deployment blocks and the memory backend, and preserves the portable keys');
     assert.ok(!r.stdout.includes(FAKES['GitHub token']) && !r.stderr.includes(FAKES['GitHub token']), 'excluded credentials are never printed');
+  }
+  put('.omp/agent/config.yml', good);
+
+  // Only the backend entry goes: other keys under memory: are agent-layer content and stay,
+  // and a deeper backend: is not the deployment entry.
+  for (const [yml, out, why] of [
+    ['memory:\n  backend: hindsight\n  autoRecall: true\ntheme:\n  dark: amethyst\n',
+     'memory:\n  autoRecall: true\ntheme:\n  dark: amethyst\n',
+     'only the backend entry is dropped; the rest of memory: stays'],
+    ['memory:\n  recall:\n    backend: mnemopi\ntheme:\n  dark: amethyst\n',
+     'memory:\n  recall:\n    backend: mnemopi\ntheme:\n  dark: amethyst\n',
+     'a deeper backend: is not the deployment entry'],
+    ['"memory":\n  backend: hindsight\ntheme:\n  dark: amethyst\n',
+     'theme:\n  dark: amethyst\n',
+     'a quoted memory key strips the same way'],
+    ['theme:\n  dark: amethyst\n\nmemory:\n  # omp chose this\n  backend: hindsight\n\nmodel:\n  x: y\n',
+     'theme:\n  dark: amethyst\n\nmodel:\n  x: y\n',
+     'an emptied memory mapping goes with its interior comments and blanks'],
+  ]) {
+    put('.omp/agent/config.yml', yml);
+    r = run();
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(snap('omp/agent/config.yml'), out, why);
   }
   put('.omp/agent/config.yml', good);
 
@@ -348,6 +374,21 @@ try {
       return HIDDEN[Math.floor(rand() * HIDDEN.length)](`${key}: sk-test-literal`);
     }, text => {
       assert.ok(yamlProblems(text, 'c.yml').length > 0, `hidden credential pair must not scan clean: ${JSON.stringify(text)}`);
+    });
+
+    // The memory-backend strip is idempotent, and a config without a top-level memory key
+    // stays byte for byte (a BOM can only sit ahead of the text's first key).
+    const MEM_LINES = ['a: v', 'memory:', '"memory":', "'memory':", '  backend: hindsight', '  backend: mnemopi',
+      '  other: keep', '    deeper: backend: x', '  # note', '', 'b: w', 'theme:', '  dark: x'];
+    forAll((rand, size) => {
+      const lines = Array.from({ length: Math.floor(rand() * (size + 4)) }, () => MEM_LINES[Math.floor(rand() * MEM_LINES.length)]);
+      const text = lines.join('\n') + (rand() < 0.5 ? '\n' : '');
+      return rand() < 0.2 ? `\uFEFF${text}` : text;
+    }, text => {
+      const out = withoutMemoryBackend(text);
+      assert.equal(withoutMemoryBackend(out), out, `the strip is idempotent: ${JSON.stringify(text)}`);
+      if (!/^(?:\uFEFF)?(?:memory|"(?:memory)"|'(?:memory)')[ \t]*:/m.test(text))
+        assert.equal(out, text, `no top-level memory key, no change: ${JSON.stringify(text)}`);
     });
   }
 

@@ -338,6 +338,51 @@ try {
   assert.equal(readFileSync(join(dep2Home, '.omp/agent/config.yml'), 'utf8'),
     `${v3}\nhindsight:\n  apiUrl: http://nas:8888`, 'the merge adds the missing terminator');
 
+  // The memory backend is a deployment choice (OTTR-453): the board injects it at spawn with
+  // a --config overlay, so the provisioned config.yml never carries it. A snapshot captured
+  // by an older alate loses the entry (and its emptied memory: mapping) at install; only the
+  // entry goes, other keys under memory: are agent-layer content.
+  const memBase = 'theme:\n  dark: amethyst\nmodelRoles:\n  default: zai/glm\n';
+  const memHome = join(tmp, 'mem-home');
+  put('omp/agent/config.yml', 'memory:\n  backend: hindsight\n' + memBase);
+  r = run(['--data', data, '--skip-plugins'], memHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(memHome, '.omp/agent/config.yml'), 'utf8'), memBase,
+    'a snapshot with a memory backend block installs without it');
+  assert.equal(JSON.parse(readFileSync(join(memHome, '.alate/installed.json'), 'utf8'))['omp/agent/config.yml'],
+    fingerprint('omp/agent/config.yml', Buffer.from(memBase)), 'the record holds the stripped snapshot fingerprint');
+
+  // A fresh capture has the entry gone: install agrees with capture, so the rerun is unchanged.
+  put('omp/agent/config.yml', memBase);
+  r = run(['--data', data, '--skip-plugins'], memHome);
+  assert.match(r.stdout, /0 installed, 8 unchanged/, `the re-captured snapshot matches what was installed: ${r.stderr}`);
+
+  put('omp/agent/config.yml', 'memory:\n  backend: mnemopi\n  autoRecall: true\n' + memBase);
+  r = run(['--data', data, '--skip-plugins'], memHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /1 installed/);
+  assert.equal(readFileSync(join(memHome, '.omp/agent/config.yml'), 'utf8'),
+    'memory:\n  autoRecall: true\n' + memBase, 'only the backend entry is dropped; the rest of memory: installs');
+
+  // A snapshot without any memory block is byte for byte what installs.
+  const plainHome = join(tmp, 'mem-plain-home');
+  put('omp/agent/config.yml', memBase);
+  r = run(['--data', data, '--skip-plugins'], plainHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(plainHome, '.omp/agent/config.yml'), 'utf8'), memBase, 'no memory block, no change');
+
+  // The target's deployment blocks ride along even over a stale snapshot entry: --force takes
+  // the snapshot minus the entry, plus the machine's own blocks.
+  const memBlocksHome = join(tmp, 'mem-blocks-home');
+  r = run(['--data', data, '--skip-plugins'], memBlocksHome);
+  assert.equal(r.status, 0, r.stderr);
+  writeFileSync(join(memBlocksHome, '.omp/agent/config.yml'), 'memory:\n  backend: hindsight\n' + memBase + blocks);
+  r = run(['--data', data, '--force', '--skip-plugins'], memBlocksHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(memBlocksHome, '.omp/agent/config.yml'), 'utf8'), memBase + blocks,
+    'the stale entry goes, the target deployment blocks stay');
+  put('omp/agent/config.yml', v3);
+
   // Ottr's per-project package lists come from the data repo only: a changed list replaces the copy.
   mkdirSync(join(data, 'workers', 'web'), { recursive: true });
   writeFileSync(join(data, 'workers', 'web', 'apt.txt'), 'libnss3\n');
@@ -767,8 +812,9 @@ try {
     assert.deepEqual(readdirSync(llayers).sort(), ['nogit-5', 'nogit-6'], 'a valid empty record lets cleanup run again');
 
     // Machine state wins in layer mode: a machine edit beyond the deployment blocks rides
-    // into the new layer (this is how the entry script's memory-backend edit survives every
-    // switch), the blocks ride along either way, and block content never reaches the output.
+    // into the new layer (a top-level memoryBackend: key is machine content too — the strip
+    // only removes backend: under memory:), the blocks ride along either way, and block
+    // content never reaches the output.
     const blocksL = 'hindsight:\n  apiUrl: http://nas:8888\n  apiToken: $HINDSIGHT_TOKEN\n';
     const live6 = lgot(join(llayers, 'nogit-6'), '.omp/agent/config.yml');
     writeFileSync(join(llayers, 'nogit-6', '.omp/agent/config.yml'), live6.replace('zai/glm', 'zai/glm-edited') + blocksL);
@@ -796,8 +842,8 @@ try {
       join(llayers, 'nogit-9', '.omp/marketplaces/moved.json'), 'a kept machine file re-roots into the new layer, never the old one');
 
     // Migration: the first layer over an existing in-place home reads the machine part of
-    // config.yml from the home, so the deployment blocks and the entry script's edit survive
-    // the switch (compose turns ALATE_LAYER=1 on over exactly such a home).
+    // config.yml from the home, so the deployment blocks and other machine edits survive the
+    // switch (compose turns ALATE_LAYER=1 on over exactly such a home).
     const layerHome4 = join(tmp, 'layer-home-4');
     r = run(['--data', ldata, '--skip-plugins'], layerHome4);
     assert.equal(r.status, 0, r.stderr);

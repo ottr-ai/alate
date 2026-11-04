@@ -26,7 +26,7 @@ import { homedir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { assertSourceInside, checkDestination, cleanupData, fingerprint, forTarget, nextLayerCounter, parseArgs, remapHomePaths, resolveDataDir, ruleProblems, sameContent, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, cleanupData, fingerprint, forTarget, nextLayerCounter, parseArgs, remapHomePaths, resolveDataDir, ruleProblems, sameContent, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend } from './lib/data.mjs';
 
 const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home'], ['--force', '--skip-plugins', '--layer']);
 const home = args.values['--home'] ?? homedir();
@@ -278,6 +278,10 @@ try {
     // Captured config can point at absolute paths in the capture home; a layer re-roots them
     // so a turn pinned to the layer resolves files under its own path.
     let snapshot = target.bytes;
+    // The memory backend is a deployment choice the board injects at spawn (--config overlay),
+    // never snapshot content: capture strips it, and a snapshot captured by an older alate
+    // loses the entry here, so the provisioned config.yml never carries the choice.
+    if (rel === 'omp/agent/config.yml') snapshot = Buffer.from(withoutMemoryBackend(snapshot.toString('utf8')), 'utf8');
     if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) snapshot = Buffer.from(remapHomePaths(snapshot.toString('utf8'), home, newLayerDir), 'utf8');
     // config.yml's top-level hindsight:/alate: blocks are deployment settings that stay on the
     // target: the snapshot never carries them (capture strips them), and the machine's own ride

@@ -7,7 +7,7 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
-import { assertSourceInside, checkDestination, normText, parseArgs, resolveDataDir, withoutDeploymentBlocks, yamlProblems } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, normText, parseArgs, resolveDataDir, withoutDeploymentBlocks, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
 
 // --repo is a valued option so resolveDataDir can refuse cloning with the capture-specific
 // message; capture takes no flags and no positional arguments.
@@ -231,6 +231,9 @@ for (const item of ITEMS) {
         // Deployment settings stay on the target, not in the portable user layer; the shared
         // rule keeps the last kept line's terminator, so install-user compares like against like.
         text = withoutDeploymentBlocks(text);
+        // The memory backend is a deployment choice too: the board injects it at spawn with a
+        // --config overlay, so the portable layer never carries it either.
+        text = withoutMemoryBackend(text);
         bytes = Buffer.from(text);
       }
       for (const [name, shape] of SHAPES) {
