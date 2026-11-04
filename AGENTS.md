@@ -13,6 +13,8 @@ with `--data`. `examples/data` is a neutral fixture used by tests and CI.
 - `install-user.mjs`: restore the data repo's `user/` snapshot onto this machine. Before any write it scans every skill snapshot (`skills/`, `managed-skills/`) with the pinned SkillSpector build (`--no-llm --fail-on-findings --use-shipped-baseline`, static only; the snapshot's shipped `.skillspector-baseline.yaml` supplies its accepted findings), findings, a missing scanner, or a crashed scan abort the run with a non-zero exit and leave the home untouched. The scanner needs Python 3.12+ where it runs: the server image carries the pinned build (`Dockerfile`, `SKILLSPECTOR_REF` — the test suite checks that it matches the script's pin), and a host that runs the script outside the image installs it by hand (pin and bootstrap command live in the script).
 - `sync-user.mjs`: capture this machine's omp user layer into the data repo.
 - `sync-projects.mjs`: refresh project agent-context snapshots into the data repo.
+- `license-gate.mjs` (+ `license-gate.test.mjs`): license gate over the npm tree; every
+  `package-lock.json` entry's `license` field must be an allowlisted SPDX expression.
 - `*.test.mjs`: plain-node self-checks, one per script; `zero-deps.test.mjs` is the dependency gate, not tied to a script.
 - `web/index.html`/`style.css`/`app.js`/`diff.mjs`: the dashboard's static assets (Galley Proof world, see `DESIGN.md`; `diff.mjs` is the editor's line diff for proof marks; `manifest.webmanifest`, `sw.js`, and `icons/` make the dashboard installable as a PWA — `sw.js` is a network-first offline shell, and its precache list mirrors the static table in `server.ts`), and `web/dashboard.mjs` its inventory and file-edit logic, served by `server.ts` on the same loopback port as the provisioning API; the dashboard's self-check lives in `server.test.mjs`.
 - `server.ts` (+ `server.test.mjs`): long-running loopback provisioning server (key-authenticated provision API, server-side config, periodic data-repo update checks), built on Fastify and run via `node server.ts` type stripping — no build step; it also serves the dashboard UI, its inventory API (`GET /api/state`, `POST /api/import`) and its file editor API (`GET /api/files`, `GET`/`PUT`/`DELETE /api/file`: snapshot reads plus edits that verify a base hash, commit and push) with `--db <file>` (SQLite snapshot of source files and inventory, default `alate.db` beside the config file) and `--data <dir>` (import at startup) flags; `server.test.mjs` is its self-check.
@@ -28,7 +30,7 @@ Every script needs a data repo, passed with `--data <dir>` (`examples/data`
 works for a dry run).
 - "Verified" means this exact chain passes from the repo root (the same chain
   `.github/workflows/sync.yml` runs):
-  `npm ci && npm audit --omit=dev --audit-level=low && node zero-deps.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && npx tsc --noEmit && node server.test.mjs`
+  `npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && npx tsc --noEmit && node server.test.mjs`
   The smoke sync passes a throwaway target dir, so the chain never writes the example rule
   into the rules dir of the home that runs it.
   `npm run test:mutation` is the StrykerJS mutation gate for server logic
@@ -39,7 +41,7 @@ works for a dry run).
   quality, or uses the codebase-design or ponytail-audit skill.
   Reviews additionally run the property deep tier once, as a source of findings, never
   as a gate (the gate tier runs inside the chain above at the fixed seed 42, 200 runs):
-  `PROP_RUNS=20000 node server.test.mjs && PROP_RUNS=20000 node sync-projects.test.mjs && PROP_RUNS=20000 node sync-user.test.mjs && PROP_RUNS=20000 node clone.test.mjs`.
+  `PROP_RUNS=20000 node server.test.mjs && PROP_RUNS=20000 node sync-projects.test.mjs && PROP_RUNS=20000 node sync-user.test.mjs && PROP_RUNS=20000 node clone.test.mjs && PROP_RUNS=20000 node zero-deps.test.mjs && PROP_RUNS=20000 node license-gate.test.mjs`.
   A failure there becomes a finding with the seed and the failing input; triage decides whether the code or the property is wrong.
 
 ## Releases and versions
