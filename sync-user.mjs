@@ -181,7 +181,7 @@ const captureDir = (abs, rel, root) => {
         if (ancestors.has(real)) throw new Error(`~/${childRel}: recursion cycle through links`);
         visit(child, childRel, new Set(ancestors).add(real));
       } else if (!st.isFile()) throw new Error(`~/${childRel}: is not a regular file`);
-      else out.push([childRel, readFileSync(child), real]);
+      else out.push([childRel, readFileSync(child), `${st.dev}:${st.ino}`]);
     }
   };
   visit(abs, rel, new Set([root]));
@@ -192,11 +192,16 @@ const captureDir = (abs, rel, root) => {
 // path: a link inside an item may alias a CONFIG file (its target is an item anchor, so
 // the walk allows it), and the aliased copy must pass the same deployment-strip and
 // secret gates as the canonical capture, or the strip's credential control never runs.
-// A missing CONFIG item resolves nowhere and is reported by the ITEMS loop below.
-const configRealPaths = new Map();
+// The origin is the file identity (dev:ino), not its path: a symlink resolves to the
+// target's identity and a hard link shares it, so both alias kinds match the canonical
+// capture where a realpath key would miss a hard link. A missing CONFIG item resolves
+// nowhere and is reported by the ITEMS loop below.
+const configOrigins = new Map();
 for (const item of CONFIG) {
-  try { configRealPaths.set(realpathSync.native(join(realHome, item)), item); }
-  catch { /* missing: reported by the ITEMS loop below */ }
+  try {
+    const st = statSync(join(realHome, item));
+    configOrigins.set(`${st.dev}:${st.ino}`, item);
+  } catch { /* missing: reported by the ITEMS loop below */ }
 }
 
 const problems = [];
@@ -217,9 +222,9 @@ for (const item of ITEMS) {
     }
     const st = statSync(src);
     if (!st.isDirectory() && !st.isFile()) throw new Error(`~/${item}: is not a regular file`);
-    const found = st.isDirectory() ? captureDir(src, item, root) : [[item, readFileSync(src), root]];
-    for (let [rel, bytes, real] of found) {
-      const configItem = configRealPaths.get(real); // origin of the bytes, not the path
+    const found = st.isDirectory() ? captureDir(src, item, root) : [[item, readFileSync(src), `${st.dev}:${st.ino}`]];
+    for (let [rel, bytes, origin] of found) {
+      const configItem = configOrigins.get(origin); // origin of the bytes, not the path
       let text = bytes.toString('utf8');
       if (configItem !== undefined && configItem.endsWith('.yml')) {
         for (const p of yamlProblems(text, rel)) problems.push(p);

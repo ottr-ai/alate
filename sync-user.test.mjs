@@ -1,7 +1,7 @@
 // Self-check for sync-user.mjs: node sync-user.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -195,6 +195,23 @@ try {
     assert.ok(!readFileSync(f, 'utf8').includes(aliasCred) && !readFileSync(f, 'utf8').includes('hindsight:'),
       `deployment bytes leaked into ${f}`);
   rmSync(join(home, '.agents/skills/leaked-config.md'));
+  put('.omp/agent/config.yml', good);
+
+  // The same alias through a hard link: the copy shares the CONFIG file's identity
+  // (dev:ino) instead of resolving to its path, so the origin-keyed gates must fire on
+  // the aliased copy too, or the deployment blocks reach the repo under the link's name.
+  put('.omp/agent/config.yml',
+    `hindsight:\n  apiUrl: https://nas.internal\n  basic: ${aliasCred}\n  cookie_jar: ${aliasCred}\n` +
+    'alate:\n  url: https://provision.example\n  apiKey: local-only\nmodelRoles:\n  default: zai/glm\n');
+  linkSync(join(home, '.omp/agent/config.yml'), join(home, '.agents/skills/leaked-config-hard.md'));
+  r = run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(snap('agents/skills/leaked-config-hard.md'), snap('omp/agent/config.yml'),
+    'a hard-linked CONFIG copy is captured through the same gates as the canonical one');
+  for (const f of walk(join(data, 'user')))
+    assert.ok(!readFileSync(f, 'utf8').includes(aliasCred) && !readFileSync(f, 'utf8').includes('hindsight:'),
+      `deployment bytes leaked into ${f}`);
+  rmSync(join(home, '.agents/skills/leaked-config-hard.md'));
   put('.omp/agent/config.yml', good);
 
   rmSync(join(home, '.omp/plugins/bun.lock'));
