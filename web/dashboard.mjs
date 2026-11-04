@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { assertSourceInside, checkDestination, cloneCommand, descriptionText, gitAuthEnv, parseDataSpec, redactSecrets } from '../lib/data.mjs';
+import { assertSourceInside, checkDestination, cloneCommand, descriptionText, gitAuthEnv, parseDataSpec, redactSecrets, SNAP_AGENTS_DIR } from '../lib/data.mjs';
 
 // Test hook: point the dashboard's GitHub traffic at a local fixture remote.
 const GH_BASE = process.env.ALATE_TEST_GH_BASE ?? 'https://github.com';
@@ -57,12 +57,12 @@ const USER_OTHERS = [
   'omp/plugins/bun.lock',
   'omp/plugins/omp-plugins.lock.json',
   'omp/plugins/installed_plugins.json',
-  '.agents/.skill-lock.json',
+  `${SNAP_AGENTS_DIR}/.skill-lock.json`,
 ];
 const SKILL_DIRS = [
   ['user/omp/agent/skills', 'skills'],
   ['user/omp/agent/managed-skills', 'managed-skills'],
-  ['user/.agents/skills', 'agents-skills'],
+  [`user/${SNAP_AGENTS_DIR}/skills`, 'agents-skills'],
 ];
 
 // Read-only inventory of a data repo. Missing pieces are empty, never fatal; findings land in warnings.
@@ -92,7 +92,7 @@ function scanInventory(dir, liveRoot = null) {
       if (!entry.isDirectory()) continue;
       assertSourceInside(dir, join(base, entry.name));
       const skillMd = join(base, entry.name, 'SKILL.md');
-      skills.push({ name: entry.name, origin, description: existsSync(skillMd) ? mdDescription(skillMd) : '' });
+      skills.push({ name: entry.name, origin, path: `${rel}/${entry.name}/SKILL.md`, description: existsSync(skillMd) ? mdDescription(skillMd) : '' });
     }
   }
 

@@ -86,12 +86,8 @@ const GROUPS = [
   { key: 'projects', name: 'Projects', test: (p) => p.startsWith('projects/'), strip: (p) => p.slice(9) },
   { key: 'repo', name: 'Repository', test: () => true, strip: (p) => p },
 ];
-const SKILL_RE = /^user\/(omp\/agent\/(skills|managed-skills)|\.agents\/skills)\//;
+const SKILL_RE = /^user\/(omp\/agent\/(skills|managed-skills)|agents\/skills)\//;
 const groupOf = (path) => GROUPS.find((g) => g.test(path));
-
-// Inventory path of a skill, plugin source, or config file (the snapshot layout).
-const SKILL_ROOT = { skills: 'user/omp/agent/skills/', 'managed-skills': 'user/omp/agent/managed-skills/', 'agents-skills': 'user/.agents/skills/' };
-const skillPath = (s) => (SKILL_ROOT[s.origin] || 'user/omp/agent/skills/') + s.name + '/SKILL.md';
 
 // ---------- routing ----------
 
@@ -305,7 +301,7 @@ function overviewView() {
     userRows.length ? h('ul', { class: 'entries' }, userRows) : h('p', { class: 'note', text: 'No user layer in this data repo.' })));
 
   sheet.append(part('Skills', String(user.skills.length),
-    user.skills.length ? h('ul', { class: 'entries' }, user.skills.map((s) => entry(link(skillPath(s)), s.name, s.description || 'No description in SKILL.md.', s.origin)))
+    user.skills.length ? h('ul', { class: 'entries' }, user.skills.map((s) => entry(link(s.path), s.name, s.description || 'No description in SKILL.md.', s.origin)))
       : h('p', { class: 'note', text: 'No skills in this data repo.' })));
 
   sheet.append(part('Plugins', String(user.plugins.length),
@@ -584,7 +580,7 @@ function describe(path) {
   const inv = state.inventory || {};
   const rule = (inv.rules || []).find((r) => r.name === path);
   if (rule) return rule.description;
-  const skill = (inv.user?.skills || []).find((s) => skillPath(s) === path);
+  const skill = (inv.user?.skills || []).find((s) => s.path === path);
   return skill ? skill.description : null;
 }
 

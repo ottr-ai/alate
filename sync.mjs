@@ -8,7 +8,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { assertSourceInside, checkDestination, cleanupData, die, fingerprint, parseArgs, resolveDataDir, ruleProblems, unwrapCmd } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, cleanupData, die, fingerprint, parseArgs, resolveDataDir, ruleProblems, SNAP_AGENTS_DIR, unwrapCmd } from './lib/data.mjs';
 
 const args = parseArgs(process.argv.slice(2), ['--data', '--repo'], [], true);
 if (args.positional.length > 1) die('Usage: node sync.mjs [targetDir] [--data <dir>|--repo <owner/name[@ref]>]');
@@ -68,11 +68,11 @@ try {
           return null;
         }
       };
-      const skillLock = readJson('user/agents/.skill-lock.json');
-      const lockDir = join(data.dir, 'user', 'agents', 'skills');
+      const skillLock = readJson(`user/${SNAP_AGENTS_DIR}/.skill-lock.json`);
+      const lockDir = join(data.dir, 'user', SNAP_AGENTS_DIR, 'skills');
       if (existsSync(lockDir)) for (const d of readdirSync(lockDir, { withFileTypes: true })) {
         if (!d.isDirectory()) continue;
-        const rel = `user/agents/skills/${d.name}`;
+        const rel = `user/${SNAP_AGENTS_DIR}/skills/${d.name}`;
         if (!skillLock?.skills?.[d.name] && !covered(rel)) uncovered.push(rel);
       }
       for (const sub of ['user/omp/agent/skills', 'user/omp/agent/managed-skills']) {

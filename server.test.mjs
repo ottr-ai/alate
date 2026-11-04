@@ -71,12 +71,12 @@ writeFileSync(join(data, 'user', 'omp', 'marketplaces.json'), '{}');
 writeFileSync(join(data, 'user', 'omp', 'plugins', 'bun.lock'), '');
 writeFileSync(join(data, 'user', 'omp', 'plugins', 'omp-plugins.lock.json'), JSON.stringify({ plugins: { 'lock-plug': { version: '1.0.0', enabled: true } }, settings: {} })); // real shape: names live under "plugins"
 writeFileSync(join(data, 'user', 'omp', 'plugins', 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: { 'inst-plug': {} } })); // real shape: names live under "plugins"
-mkdirSync(join(data, 'user', '.agents'), { recursive: true });
-writeFileSync(join(data, 'user', '.agents', '.skill-lock.json'), '{}');
+mkdirSync(join(data, 'user', 'agents'), { recursive: true });
+writeFileSync(join(data, 'user', 'agents', '.skill-lock.json'), '{}');
 mkdirSync(join(data, 'user', 'omp', 'agent', 'managed-skills', 'mskill'), { recursive: true });
 writeFileSync(join(data, 'user', 'omp', 'agent', 'managed-skills', 'mskill', 'SKILL.md'), '---\ndescription: mskill skill\n---\n');
-mkdirSync(join(data, 'user', '.agents', 'skills', 'askill'), { recursive: true });
-writeFileSync(join(data, 'user', '.agents', 'skills', 'askill', 'SKILL.md'), '---\ndescription: askill skill\n---\n');
+mkdirSync(join(data, 'user', 'agents', 'skills', 'askill'), { recursive: true });
+writeFileSync(join(data, 'user', 'agents', 'skills', 'askill', 'SKILL.md'), '---\ndescription: askill skill\n---\n');
 mkdirSync(join(data, 'user', 'omp', 'agent', 'extensions', 'ext-a'), { recursive: true });
 writeFileSync(join(data, 'not-front.md'), 'leading text\n---\ndescription: sneaky\n---\n'); // frontmatter marker not at byte 0: description stays ''
 
@@ -387,7 +387,7 @@ try {
     assert.ok(body.inventory.user.configFiles.some(f => f.path === p && f.bytes > 0), `config row ${p}`);
   }
   assert.deepEqual(body.inventory.user.others.map(o => o.path), [
-    '.agents/.skill-lock.json',
+    'agents/.skill-lock.json',
     'omp/plugins/bun.lock',
     'omp/plugins/installed_plugins.json',
     'omp/plugins/omp-plugins.lock.json',
@@ -3089,12 +3089,12 @@ try {
     dig('main10/user/omp/plugins/omp-plugins.lock.json', JSON.stringify({ plugins: { lockp: {}, dup: {}, lockinst: {} } }));
     dig('main10/user/omp/plugins/installed_plugins.json', JSON.stringify({ plugins: { instp: {}, dup: {}, lockinst: {} } }));
     dig('main10/user/omp/plugins/bun.lock', '');
-    dig('main10/user/.agents/.skill-lock.json', '{}');
+    dig('main10/user/agents/.skill-lock.json', '{}');
     symlinkSync(join(tmp, 'home'), join(w10, 'main10/user/link.txt')); // symlinks are never counted
     dig('main10/user/omp/agent/skills/demo/SKILL.md', fm('demo skill'));
     dig('main10/user/omp/agent/skills/file.txt', 'a file, not a skill dir\n');
     dig('main10/user/omp/agent/managed-skills/msk/SKILL.md', fm('msk skill'));
-    ddir('main10/user/.agents/skills/ask'); // no SKILL.md: description stays ''
+    ddir('main10/user/agents/skills/ask'); // no SKILL.md: description stays ''
     ddir('main10/user/omp/agent/extensions/ext-a');
     ddir('main10/user/omp/agent/extensions/ext-b');
     dig('main10/user/omp/agent/extensions/zfile.txt', 'listed too\n');
@@ -3120,14 +3120,14 @@ try {
           { path: 'omp/agent/optimizer.json', bytes: 2 }, { path: 'omp/marketplaces.json', bytes: 2 },
         ],
         others: [
-          { path: '.agents/.skill-lock.json', bytes: 2 }, { path: 'omp/plugins/bun.lock', bytes: 0 },
+          { path: 'agents/.skill-lock.json', bytes: 2 }, { path: 'omp/plugins/bun.lock', bytes: 0 },
           { path: 'omp/plugins/installed_plugins.json', bytes: 47 }, { path: 'omp/plugins/omp-plugins.lock.json', bytes: 47 },
           { path: 'omp/plugins/package.json', bytes: 56 },
         ],
         skills: [
-          { name: 'demo', origin: 'skills', description: 'demo skill' },
-          { name: 'msk', origin: 'managed-skills', description: 'msk skill' },
-          { name: 'ask', origin: 'agents-skills', description: '' },
+          { name: 'demo', origin: 'skills', path: 'user/omp/agent/skills/demo/SKILL.md', description: 'demo skill' },
+          { name: 'msk', origin: 'managed-skills', path: 'user/omp/agent/managed-skills/msk/SKILL.md', description: 'msk skill' },
+          { name: 'ask', origin: 'agents-skills', path: 'user/agents/skills/ask/SKILL.md', description: '' },
         ],
         extensions: ['ext-a', 'ext-b', 'zfile.txt'],
         plugins: [
@@ -3245,7 +3245,7 @@ try {
     symlinkSync(join(w10, 'sx-agent/out'), join(w10, 'sx-agent/data/user/omp/agent'));
     assert.throws(() => scan10('sx-agent/data'), /Source .* is outside/); // configFiles guard
     ddir('sx-agents/data/user'); dig('sx-agents/out/.skill-lock.json', '{}');
-    symlinkSync(join(w10, 'sx-agents/out'), join(w10, 'sx-agents/data/user/.agents'));
+    symlinkSync(join(w10, 'sx-agents/out'), join(w10, 'sx-agents/data/user/agents'));
     assert.throws(() => scan10('sx-agents/data'), /Source .* is outside/); // others guard
     ddir('sx-skills/data/user/omp/agent'); ddir('sx-skills/out/sd');
     symlinkSync(join(w10, 'sx-skills/out'), join(w10, 'sx-skills/data/user/omp/agent/skills'));
