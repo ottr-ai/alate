@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { assertSourceInside, checkDestination, cleanupData, die, fingerprint, parseArgs, resolveDataDir, ruleProblems, SNAP_AGENTS_DIR, unwrapCmd } from './lib/data.mjs';
 
 const args = parseArgs(process.argv.slice(2), ['--data', '--repo'], [], true);
@@ -15,6 +16,13 @@ if (args.positional.length > 1) die('Usage: node sync.mjs [targetDir] [--data <d
 const data = resolveDataDir(args, { allowClone: true });
 const target = args.positional[0] ?? join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.omp', 'agent'), 'rules');
 try {
+  // Test-only file gate (the server-side twin is ALATE_TEST_PROVISION_GATE in server.ts):
+  // lets a server test hold this script before any write and kill it, so provision's
+  // null-exit-code stop (a close code of null from a signal) is reachable in a hermetic
+  // suite. Inert unless the env var is set AND the gate file exists.
+  while (process.env.ALATE_TEST_SCRIPT_GATE && existsSync(process.env.ALATE_TEST_SCRIPT_GATE)) {
+    await delay(10);
+  }
   // A junction or symlink pointing back at the data dir would make sync overwrite its own source.
   if (existsSync(target) && realpathSync.native(target) === realpathSync.native(data.dir)) {
     throw new Error(`Target resolves to the data dir (${target}); refusing to install into itself.`);

@@ -19,7 +19,8 @@ with `--data`. `examples/data` is a neutral fixture used by tests and CI.
 - `web/index.html`/`style.css`/`app.js`/`diff.mjs`: the dashboard's static assets (Galley Proof world, see `DESIGN.md`; `diff.mjs` is the editor's line diff for proof marks; `manifest.webmanifest`, `sw.js`, and `icons/` make the dashboard installable as a PWA — `sw.js` is a network-first offline shell, and its precache list mirrors the static table in `server.ts`), and `web/dashboard.mjs` its inventory and file-edit logic, served by `server.ts` on the same loopback port as the provisioning API; the dashboard's self-check lives in `server.test.mjs`.
 - `server.ts` (+ `server.test.mjs`): long-running loopback provisioning server (key-authenticated provision API, server-side config, periodic data-repo update checks), built on Fastify and run via `node server.ts` type stripping — no build step; it also serves the dashboard UI, its inventory API (`GET /api/state`, `POST /api/import`) and its file editor API (`GET /api/files`, `GET`/`PUT`/`DELETE /api/file`: snapshot reads plus edits that verify a base hash, commit and push) with `--db <file>` (SQLite snapshot of source files and inventory, default `alate.db` beside the config file) and `--data <dir>` (import at startup) flags; `server.test.mjs` is its self-check.
 - `package.json` + `package-lock.json` + `tsconfig.json`: the only manifest, lockfile, and TS config; `dependencies` holds the server's runtime deps (`fastify`) and the two self-hosted dashboard fonts (`@fontsource-variable/source-serif-4`, `@fontsource-variable/jetbrains-mono`, served as woff2 from `/fonts/`), `devDependencies` the tooling (`typescript`, `@types/node`, `@stryker-mutator/core`). Everything else stays plain node with no third-party imports.
-- `stryker.config.mjs`: mutation testing config, run via `npm run test:mutation`.
+- `stryker.config.mjs`: mutation testing config for the server half (`server.ts`, `web/dashboard.mjs`, `lib/updates.mjs`), run via `npm run test:mutation`.
+- `stryker.cli.config.mjs`: second mutation config chained by `npm run test:mutation`; mutates `lib/data.mjs` and the four CLI scripts with the CLI test files as the runner.
 - `examples/data/`: starter data repo and CI fixture.
 - `compose.yaml`: Docker Compose for the prepared run path (service `alate`, `ghcr.io/ottr-ai/alate:latest`, `state` and `home` volumes).
 - `.github/workflows/install.yml`: installs from `examples/data` on a fresh runner; `.github/workflows/sync.yml` runs the self-checks; `.github/workflows/release.yml` pushes the Docker image to ghcr.io on each GitHub release.
@@ -33,8 +34,9 @@ works for a dry run).
   `npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && npx tsc --noEmit && node server.test.mjs`
   The smoke sync passes a throwaway target dir, so the chain never writes the example rule
   into the rules dir of the home that runs it.
-  `npm run test:mutation` is the StrykerJS mutation gate for server logic
-  changes. It is slow, so it is not part of the fast chain.
+  `npm run test:mutation` is the StrykerJS mutation gate for server and CLI
+  logic changes (it runs both mutation configs). It is slow, so it is not
+  part of the fast chain.
   Work turns skip `npm run test:mutation` and say so in their report.
   Only reviews (the Review button and every release) and explicit architecture
   work run it. Architecture work asks to review the architecture or test

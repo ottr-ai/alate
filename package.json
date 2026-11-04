@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.ts",
     "typecheck": "tsc --noEmit",
-    "test:mutation": "stryker run"
+    "test:mutation": "stryker run && stryker run stryker.cli.config.mjs"
   },
   "dependencies": {
     "@fontsource-variable/jetbrains-mono": "5.3.0",

@@ -2,6 +2,7 @@ web/state.json
 server-config.json
 node_modules/
 stryker-incremental.json
+stryker-incremental-cli.json
 alate.db*
 .impeccable/
 bun.lock

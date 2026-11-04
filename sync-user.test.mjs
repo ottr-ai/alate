@@ -202,7 +202,7 @@ try {
   // the aliased copy too, or the deployment blocks reach the repo under the link's name.
   put('.omp/agent/config.yml',
     `hindsight:\n  apiUrl: https://nas.internal\n  basic: ${aliasCred}\n  cookie_jar: ${aliasCred}\n` +
-    'alate:\n  url: https://provision.example\n  apiKey: local-only\nmodelRoles:\n  default: zai/glm\n');
+      'alate:\n  url: https://provision.example\n  apiKey: local-only\nmodelRoles:\n  default: zai/glm\n');
   linkSync(join(home, '.omp/agent/config.yml'), join(home, '.agents/skills/leaked-config-hard.md'));
   r = run();
   assert.equal(r.status, 0, r.stderr);
@@ -213,6 +213,18 @@ try {
       `deployment bytes leaked into ${f}`);
   rmSync(join(home, '.agents/skills/leaked-config-hard.md'));
   put('.omp/agent/config.yml', good);
+
+  // The JSON gate keys on the canonical origin too: an aliased mcp.json copy captured
+  // under another item's name must pass jsonProblems like the canonical file, or a
+  // link's copy escapes the credential scan under its own name.
+  put('.omp/agent/mcp.json', '{\n  "mcpServers": {\n    "s": {\n      "command": "npx",\n      "args": ["-y", "@scope/mcp"],\n      "apiKey": "placeholder"\n    }\n  }\n}\n');
+  symlinkSync(join(home, '.omp/agent/mcp.json'), join(home, '.agents/skills/leaked-mcp.json'));
+  r = run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /~\/\.agents\/skills\/leaked-mcp\.json: "apiKey" holds a literal value/,
+    'the aliased mcp.json copy is gated like the canonical one');
+  rmSync(join(home, '.agents/skills/leaked-mcp.json'));
+  put('.omp/agent/mcp.json', '{}\n');
 
   rmSync(join(home, '.omp/plugins/bun.lock'));
   r = run();

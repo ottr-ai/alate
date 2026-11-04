@@ -48,7 +48,7 @@ export default {
   // Editor (dashboard file editor) survivors, each killed or justified:
   // - killed by tests: the space-named path, the verbatim and null message, CR/LF
   //   flattening with a mid-line CR, empty-folder pruning with a surviving sibling and
-  //   root, the 404 body naming the file (server.ts:380 and dashboard.mjs:406/430/432/448).
+  //     root, the 404 body naming the file (the GET /api/file handler and dashboard.mjs:406/430/432/448).
   // - justified: safeRelPath `shown` and the trimmed stderr sites only shape error or
   //   message text; a dropped empty-string or startsWith check still rejects through the
   //   split-segment clause with the same status and message; an empty message returns the
@@ -57,10 +57,10 @@ export default {
   //   because existence is verified immediately before; identArgs cannot see `git config
   //   user.email` fail with non-empty stdout, so the boolean shapes coincide; rev-parse
   //   HEAD never fails after a successful commit; the editRepoSource rmSync runs with
-  //   recursive+force so its existsSync guard is redundant; server.ts:377 sends a
+  //   recursive+force so its existsSync guard is redundant; the GET /api/file handler sends a
   //   non-string query path to the same 400 through safeRelPath and its fallback string
-  //   only rewords the 404; server.ts:380:74 differs only past the 200-char display cut;
-  //   the concurrent-write window (server.ts:391/393) is unreachable from a sequential
+  //   only rewords the 404; the display-cut line differs only past the 200-char cut;
+  //   the concurrent-write window (fileEdit's running/writing check) is unreachable from a sequential
   //   fetch suite, which serves one origin over one connection.
   thresholds: { high: 80, low: 60, break: 91 },
 };

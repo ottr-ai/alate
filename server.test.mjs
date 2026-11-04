@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { forAll, keepTemp } from './lib/data.mjs';
 
 import { diffLines } from './web/diff.mjs';
-import { cmpVer } from './lib/updates.mjs';
+import { checkUpdates, cmpVer, initUpdates } from './lib/updates.mjs';
 
 // Proof-mark diff: change, pure addition, pure deletion, and no change.
 assert.deepEqual(diffLines(['a', 'b', 'c'], ['a', 'B', 'c']), [{ start: 1, count: 1, old: ['b'] }]);
@@ -24,6 +24,51 @@ assert.deepEqual(diffLines(['a'], ['a']), []);
 
 const repoRoot = dirname(fileURLToPath(import.meta.url)); // this test sits at the repo root
 const tmp = mkdtempSync(join(tmpdir(), 'alate-server-'));
+
+// Updates id collisions: three rows can fight for one display id. Two skill-lock rows and
+// a bun.lock dep share the name space: the skill named "plugin:" checks a release whose
+// tag is "s/p:rel-1", so its id is "plugin:" + "@" + tag = "plugin:@s/p:rel-1" — the exact
+// string the dep row (rowKey "plugin:@s/p", tail "rel-1") falls back to when its own first
+// choice "@s/p@rel-1" is taken by the skill named "@s/p". The primary-key loop must fall
+// back to the row key and then to the "#2" suffix instead of writing a duplicate id.
+{
+  const gh = createServer((req, res) => {
+    const url = new URL(req.url, 'http://x');
+    const rel = { tag_name: 'rel-1', draft: false, prerelease: false, published_at: '2020-01-01T00:00:00Z', html_url: 'https://example.com/rel' };
+    const rel2 = { tag_name: 's/p:rel-1', draft: false, prerelease: false, published_at: '2020-01-01T00:00:00Z', html_url: 'https://example.com/rel2' };
+    const tree = paths => ({ tree: paths.map(([path, sha]) => ({ path, type: 'tree', sha })) });
+    res.setHeader('content-type', 'application/json');
+    if (url.pathname === '/repos/fake/rel/releases') return res.end(JSON.stringify([rel]));
+    if (url.pathname === '/repos/fake/rel2/releases') return res.end(JSON.stringify([rel2]));
+    if (url.pathname === '/repos/fake/rel/commits/rel-1') return res.end(JSON.stringify({ sha: 'S1' }));
+    if (url.pathname === '/repos/fake/rel') return res.end(JSON.stringify({})); // repoInfo: not archived
+    if (url.pathname.startsWith('/repos/fake/rel/git/trees/')) return res.end(JSON.stringify(tree([['skills/e', 'T2']])));
+    if (url.pathname.startsWith('/repos/fake/rel2/git/trees/')) return res.end(JSON.stringify(tree([['skills/d', 'T1']])));
+    res.statusCode = 404;
+    res.end('{}');
+  });
+  await new Promise(resolve => gh.listen(0, '127.0.0.1', resolve));
+  process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${gh.address().port}`;
+  const udb = new DatabaseSync(join(tmp, 'updates-collision.db'));
+  try {
+    udb.exec('CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, content BLOB NOT NULL)');
+    initUpdates(udb);
+    const put = (path, content) => udb.prepare('INSERT INTO files (path, content) VALUES (?, ?)').run(path, content);
+    put('user/agents/.skill-lock.json', JSON.stringify({ skills: {
+      'plugin:': { sourceUrl: 'https://github.com/fake/rel2', skillPath: 'skills/d/SKILL.md', skillFolderHash: 'T1' },
+      '@s/p': { sourceUrl: 'https://github.com/fake/rel', skillPath: 'skills/e/SKILL.md', skillFolderHash: 'T2' },
+    } }));
+    put('user/omp/plugins/bun.lock', JSON.stringify({ workspaces: { '': { dependencies: { '@s/p': 'github:fake/rel' } } }, packages: { '@s/p': ['@s/p@github:fake/rel#S1'] } }));
+    await checkUpdates(udb);
+    const ids = udb.prepare('SELECT id FROM updates').all().map(r => r.id).sort();
+    assert.deepEqual(ids, ['@s/p@rel-1', 'plugin:@s/p:rel-1', 'plugin:@s/p:rel-1#2'], 'the id loop falls back to the row key, then to the "#2" suffix');
+  } finally {
+    udb.close();
+    delete process.env.ALATE_TEST_GITHUB_API_BASE;
+    gh.close();
+  }
+}
+
 const tmpHome = join(tmp, 'home');
 const origin = join(tmp, 'origin');
 const emptyDir = join(tmp, 'empty');
@@ -38,6 +83,7 @@ mkdirSync(tmpHome, { recursive: true });
 const serverTmp = join(tmp, 'server-tmp');
 mkdirSync(serverTmp);
 const provisionGate = join(serverTmp, 'provision-gate');
+const scriptGate = join(serverTmp, 'script-gate');
 mkdirSync(join(origin, 'user', 'omp', 'agent'), { recursive: true });
 mkdirSync(join(origin, 'user', 'omp', 'plugins'), { recursive: true });
 mkdirSync(join(origin, 'projects'), { recursive: true });
@@ -89,7 +135,7 @@ assert.equal(git(['-C', ghData, '-c', 'user.email=test@example.com', '-c', 'user
 const ghSha = () => git(['-C', ghData, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
 const sha1 = ghSha();
 
-const serverEnv = { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, TMPDIR: serverTmp, TEMP: serverTmp, TMP: serverTmp, ALATE_KEEP_TEMP: '', ALATE_TEST_PROVISION_GATE: provisionGate, ALATE_TEST_GH_BASE: pathToFileURL(join(tmp, 'gh')).href, GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_GLOBAL: 'nul', GIT_CONFIG_SYSTEM: 'nul' };
+const serverEnv = { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, TMPDIR: serverTmp, TEMP: serverTmp, TMP: serverTmp, ALATE_KEEP_TEMP: '', ALATE_TEST_PROVISION_GATE: provisionGate, ALATE_TEST_SCRIPT_GATE: scriptGate, ALATE_TEST_GH_BASE: pathToFileURL(join(tmp, 'gh')).href, GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_GLOBAL: 'nul', GIT_CONFIG_SYSTEM: 'nul' };
 // sync.mjs prefers PI_CODING_AGENT_DIR over HOME: an inherited value would install fixture rules into a real agent dir.
 delete serverEnv.PI_CODING_AGENT_DIR;
 // ALATE_API_KEY would seed the first-start key of every fresh-config server this suite boots.
@@ -206,6 +252,8 @@ try {
   // provisioning API (/config, /provision, /api/updates) needs the key on every bind.
   r = await fetch(new URL('/api/state', base));
   assert.equal(r.status, 200, 'the dashboard trusts a loopback bind');
+  r = await fetch(new URL('/api/state', base), { method: 'HEAD' });
+  assert.equal(r.status, 200, 'a key-free HEAD passes dashGuard on a loopback bind');
   r = await post('/provision', undefined);
   assert.equal(r.status, 401, 'provisioning needs the key on loopback too');
   r = await fetch(new URL('/api/updates', base));
@@ -227,6 +275,12 @@ try {
   r = await post('/api/key', undefined, { origin: 'not a url' });
   assert.equal(r.status, 401, 'malformed Origin is rejected');
   assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'key unchanged after malformed Origin');
+  // Browsers send Origin, but some clients only send Referer: sameOrigin falls back to it.
+  r = await post('/api/settings', JSON.stringify({ autoUpdate: false }), { 'Content-Type': 'application/json', referer: base });
+  assert.equal(r.status, 200, 'same-origin Referer fallback authorizes the key-free write');
+  // An empty Origin is a present header, not a missing one: it must not fall through to Referer.
+  r = await post('/api/settings', JSON.stringify({ autoUpdate: false }), { 'Content-Type': 'application/json', origin: '', referer: base });
+  assert.equal(r.status, 401, 'an empty Origin must not fall through to Referer');
   r = await post('/api/key', undefined, { origin: base });
   assert.equal(r.status, 200, 'same-origin write rotates the key like the dashboard UI');
   apiKey = (await r.json()).key;
@@ -418,6 +472,44 @@ try {
   assert.equal(body.ok, false); // one failing script fails the provision
   assert.ok(body.results[0].output.includes('bad.md'), 'failure reports the rule that needs a fix');
   assert.equal(readFileSync(join(tmpHome, '.omp', 'agent', 'config.yml'), 'utf8'), 'model: test\n', 'the refused source never reaches install-user, so the home keeps the last installed bytes');
+
+  // 4c. A provision child killed by a signal closes with a null code: the pipeline still
+  // stops (fail closed), so install-user.mjs never runs and the source's user/ layer
+  // stays out of the home. The script gate (ALATE_TEST_SCRIPT_GATE, read by sync.mjs)
+  // holds the child so the kill is deterministic; the /proc scan matches this suite's
+  // own snapshot dir, so concurrent mutation sandboxes are never touched.
+  if (process.platform !== 'win32') {
+    const crashDir = join(tmp, 'crash');
+    mkdirSync(join(crashDir, 'user', 'omp', 'agent'), { recursive: true });
+    mkdirSync(join(crashDir, 'projects'), { recursive: true });
+    writeFileSync(join(crashDir, 'bad.md'), 'no frontmatter\n');
+    writeFileSync(join(crashDir, 'user', 'omp', 'agent', 'config.yml'), 'model: hijacked\n');
+    writeFileSync(join(crashDir, 'projects', 'projects.json'), JSON.stringify({ contextFiles: [], projects: {} }));
+    const findSyncChild = () => {
+      for (const d of readdirSync('/proc')) {
+        if (!/^\d+$/.test(d)) continue;
+        try {
+          const cmd = readFileSync(join('/proc', d, 'cmdline'), 'utf8');
+          if (cmd.includes('sync.mjs') && cmd.includes('--data') && cmd.includes(serverTmp)) return Number(d);
+        } catch { /* the process vanished between readdir and read */ }
+      }
+      return null;
+    };
+    r = await postJson('/config', { path: crashDir }, true);
+    assert.equal(r.status, 200);
+    writeFileSync(scriptGate, '');
+    const pending = postJson('/provision', {}, true);
+    let pid = null;
+    await waitFor(async () => { pid = findSyncChild(); return pid !== null; }, 10_000);
+    process.kill(pid, 'SIGKILL');
+    rmSync(scriptGate, { force: true });
+    r = await pending;
+    assert.equal(r.status, 200);
+    body = await r.json();
+    assert.equal(body.ok, false, 'a null exit code fails the provision');
+    assert.deepEqual(body.results.map(x => [x.script, x.code]), [['sync.mjs', null]], 'the null exit code stops the pipeline');
+    assert.equal(readFileSync(join(tmpHome, '.omp', 'agent', 'config.yml'), 'utf8'), 'model: test\n', 'install-user never ran on the killed provision');
+  }
 
   // restore the repo source for later cases; a provision refreshes the update state
   await postJson('/config', { repo: origin }, true);

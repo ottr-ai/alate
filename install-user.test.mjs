@@ -645,11 +645,23 @@ try {
   assert.equal(r.status, 1, 'a snapshot rule without a description refuses like a data-root rule');
   assert.match(r.stderr, /user\/omp\/agent\/rules\/clean\.md: needs frontmatter with a description/);
   assert.equal(gotRule('.omp/agent/rules/clean.md'), '---\ndescription: clean rule\n---\n\nClean body\n', 'the refusal leaves the installed rule alone');
+  // The rule gate covers .mdc too (omp loads rules/*.mdc): the hidden-character refusal
+  // names the snapshot path like the .md case above.
+  putRule('omp/agent/rules/backdoor.mdc', '---\ndescription: mdc rule\n---\n\nFlip\u202Eit\n');
+  r = runBackdoor(['--skip-plugins']);
+  assert.equal(r.status, 1, 'a hidden character in a .mdc snapshot rule refuses the restore');
+  assert.match(r.stderr, /user\/omp\/agent\/rules\/backdoor\.mdc:5:5: hidden character U\+202E/);
+  assert.equal(gotRule('.omp/agent/rules/clean.md'), '---\ndescription: clean rule\n---\n\nClean body\n', 'the .mdc refusal leaves the installed rule alone');
 
   // The server image must carry the scanner the gate refuses to run without; the two pins
-  // must not drift (an unpinned image made every containerized provision fail).
+  // must not drift (an unpinned image made every containerized provision fail). Under the
+  // mutation gate the sandbox copy of install-user.mjs is instrumented: the pin literal
+  // sits inside a mutant switch on the declaration line, so take the last v-prefixed
+  // literal of the line (the original value) instead of matching the whole statement.
   const source = readFileSync(fileURLToPath(new URL('./install-user.mjs', import.meta.url)), 'utf8');
-  const ref = source.match(/const SKILLSPECTOR_REF = '(v[\d.]+)';/)?.[1];
+  const decl = source.match(/const SKILLSPECTOR_REF[^\n]*/)?.[0] ?? '';
+  const pins = decl.match(/v\d+(?:\.\d+)*/g) ?? [];
+  const ref = pins[pins.length - 1];
   assert.ok(ref, 'install-user.mjs pins SKILLSPECTOR_REF');
   assert.ok(
     readFileSync(fileURLToPath(new URL('./Dockerfile', import.meta.url)), 'utf8').includes(`ARG SKILLSPECTOR_REF=${ref}`),
