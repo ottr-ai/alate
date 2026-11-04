@@ -665,6 +665,13 @@ try {
       assert.ok(!existsSync(join(tmp, 'diverge-home', '.agents/skills/break-ui/SKILL.md')), 'the diverged verdict never installs');
       rmSync(join(data, 'user/agents/skills/break-ui'), { recursive: true, force: true });
     }
+
+    // The managed-skills root is a skill snapshot too: the gate must scan it like the
+    // other roots, else a poisoned managed skill would install unscanned.
+    put('omp/agent/managed-skills/garded/SKILL.md', '# garded\n');
+    r = run(['--data', data, '--skip-plugins']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(readFileSync(callsLog, 'utf8').includes(join(data, 'user/omp/agent/managed-skills/garded')), 'the managed-skills snapshot is scanned');
   } else {
     console.log('win32: the scanner-stub checks need a real skillspector on PATH; gate assertions skipped');
   }
