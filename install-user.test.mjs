@@ -481,13 +481,16 @@ try {
   assert.ok(!existsSync(join(workerHome, '.ottr/workers')), 'empty worker dirs are pruned');
   assert.ok(existsSync(join(workerHome, '.ottr')), 'the root stays');
 
-  // Worker additions: tools.json and env.txt provision beside apt.txt with the same replace and
-  // delete rules, workers/_all/ provisions like a project, and both files are validated before
-  // anything is written: an invalid file fails the provision with its path, nothing lands.
+  // Worker additions: tools.json, env.txt and requirements.txt provision beside apt.txt with the
+  // same replace and delete rules, workers/_all/ provisions like a project, and all three
+  // validated files are checked before anything is written: an invalid file fails the provision
+  // with its path, nothing lands.
   const SHA = 'cadd3204e728a35d3f13adb7fd0d7902636b79f6b95c40c265eb73b6c35329e4';
+  const PIN = 'b4'.repeat(32);
   const godot = { name: 'godot', url: 'https://example.com/godot.zip', sha256: SHA, unpack: 'zip', bin: 'Godot_v4.7.2-stable_linux.x86_64' };
   const fleet = { name: 'fleet-tool', url: 'https://example.com/fleet-tool', sha256: SHA.split('').reverse().join(''), unpack: 'none' };
   const toolsJson = entries => `${JSON.stringify(entries, null, 2)}\n`;
+  const reqs = `# pinned, hashed packages\nhypothesis==6.138.3 --hash=sha256:${PIN}\npillow==12.1.0 --hash=sha256:${PIN} --hash=sha256:${PIN.split('').reverse().join('')}\n\nruff==0.14.4 --hash=sha256:${PIN} # inline comment\n`;
   const putWorker = (project, file, text) => {
     mkdirSync(join(data, 'workers', project), { recursive: true });
     writeFileSync(join(data, 'workers', project, file), text);
@@ -495,18 +498,22 @@ try {
   putWorker('web', 'apt.txt', 'libnss3\n');
   putWorker('web', 'tools.json', toolsJson([godot]));
   putWorker('web', 'env.txt', '# names only\nPIXEL_LAB_API_KEY\n\nGODOT_BIN\n');
+  putWorker('web', 'requirements.txt', reqs);
   putWorker('_all', 'tools.json', toolsJson([fleet]));
   putWorker('_all', 'env.txt', 'SHARED_TOKEN\n');
+  putWorker('_all', 'requirements.txt', `numpy==2.4.0 --hash=sha256:${SHA}\n`);
   const toolsHome = join(tmp, 'tools-home');
   r = run(['--data', data, '--skip-plugins'], toolsHome);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(join(toolsHome, '.ottr/workers/web/apt.txt'), 'utf8'), 'libnss3\n');
   assert.equal(readFileSync(join(toolsHome, '.ottr/workers/web/tools.json'), 'utf8'), toolsJson([godot]));
   assert.equal(readFileSync(join(toolsHome, '.ottr/workers/web/env.txt'), 'utf8'), '# names only\nPIXEL_LAB_API_KEY\n\nGODOT_BIN\n');
+  assert.equal(readFileSync(join(toolsHome, '.ottr/workers/web/requirements.txt'), 'utf8'), reqs);
   assert.equal(readFileSync(join(toolsHome, '.ottr/workers/_all/tools.json'), 'utf8'), toolsJson([fleet]), '_all provisions like a project');
   assert.equal(readFileSync(join(toolsHome, '.ottr/workers/_all/env.txt'), 'utf8'), 'SHARED_TOKEN\n');
+  assert.equal(readFileSync(join(toolsHome, '.ottr/workers/_all/requirements.txt'), 'utf8'), `numpy==2.4.0 --hash=sha256:${SHA}\n`);
   r = run(['--data', data, '--skip-plugins'], toolsHome);
-  assert.match(r.stdout, /0 installed, 8 unchanged/, 'a rerun copies nothing');
+  assert.match(r.stdout, /0 installed, 10 unchanged/, 'a rerun copies nothing');
 
   // The replace rule: a changed list is no conflict, the machine copy just takes the new bytes.
   putWorker('web', 'env.txt', 'PIXEL_LAB_API_KEY\nOTHER_NAME\n');
@@ -522,6 +529,14 @@ try {
   assert.ok(!existsSync(join(toolsHome, '.ottr/workers/web/env.txt')));
   assert.ok(existsSync(join(toolsHome, '.ottr/workers/web/apt.txt')), 'sibling lists stay');
   assert.ok(existsSync(join(toolsHome, '.ottr/workers/_all/env.txt')), 'the fleet folder stays');
+
+  rmSync(join(data, 'workers/web/requirements.txt'));
+  r = run(['--data', data, '--skip-plugins'], toolsHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /deleted  \.ottr[/\\]workers[/\\]web[/\\]requirements\.txt/);
+  assert.ok(!existsSync(join(toolsHome, '.ottr/workers/web/requirements.txt')));
+  assert.ok(existsSync(join(toolsHome, '.ottr/workers/web/apt.txt')), 'sibling lists stay');
+  assert.ok(existsSync(join(toolsHome, '.ottr/workers/_all/requirements.txt')), 'the fleet folder stays');
 
   // Every rule break refuses the whole provision with the file path, and nothing is written —
   // not even the valid apt.txt beside the broken file in the same folder.
@@ -540,6 +555,15 @@ try {
     ['a non-array tools.json', 'web/tools.json', '{"name": "x"}'],
     ['a bad env name', '_all/env.txt', 'PIXEL_LAB_API_KEY\nbad-name\n'],
     ['an env value line', 'web/env.txt', 'PIXEL_LAB_API_KEY=sk-live-secret\n'],
+    ['a requirement without a hash', 'web/requirements.txt', 'hypothesis==6.138.3\n'],
+    ['a bare requirement name', 'web/requirements.txt', 'hypothesis\n'],
+    ['extras in a requirement', 'web/requirements.txt', `pillow[extra]==12.1.0 --hash=sha256:${PIN}\n`],
+    ['a pip option line', 'web/requirements.txt', '--index-url https://example.com/simple\n'],
+    ['a recursive include', 'web/requirements.txt', '-r other.txt\n'],
+    ['a URL requirement', 'web/requirements.txt', 'pillow @ https://example.com/pillow.whl\n'],
+    ['an environment marker', 'web/requirements.txt', `pillow==12.1.0; python_version < "3" --hash=sha256:${PIN}\n`],
+    ['an uppercase hash', 'web/requirements.txt', `hypothesis==6.138.3 --hash=sha256:${PIN.toUpperCase()}\n`],
+    ['a duplicate package name', 'web/requirements.txt', `Pillow==12.1.0 --hash=sha256:${PIN}\npillow==12.1.1 --hash=sha256:${PIN}\n`],
   ];
   const badHome = join(tmp, 'bad-home');
   for (const [label, rel, text] of breaks) {
@@ -553,8 +577,17 @@ try {
     rmSync(join(data, 'workers', rel));
   }
 
+  // A broken line is reported by number, so a pinned first line beside a broken second line
+  // points at the offender without printing it.
+  writeFileSync(join(data, 'workers/web/requirements.txt'), `hypothesis==6.138.3 --hash=sha256:${PIN}\nhypothesis==6.138.3 --hash=wrong\n`);
+  r = run(['--data', data, '--skip-plugins'], badHome);
+  assert.equal(r.status, 1, 'the provision fails');
+  assert.match(r.stderr, /requirements\.txt line 2/, `the error names the line: ${r.stderr}`);
+  rmSync(join(data, 'workers/web/requirements.txt'));
+
   // Restore the data repo's worker state the sections below count on.
   rmSync(join(data, 'workers/web/tools.json'), { force: true });
+  rmSync(join(data, 'workers/web/requirements.txt'), { force: true });
   rmSync(join(data, 'workers/_all/tools.json'), { force: true });
   rmSync(join(data, 'workers/_all/env.txt'), { force: true });
   rmSync(join(data, 'workers/_all'), { recursive: true, force: true });

@@ -31,7 +31,7 @@ A layer holds exactly what a provision ships today:
 - the `sync-user.mjs` ITEMS snapshot (`.omp/agent` config, skills, managed-skills,
   extensions, plugins manifests, `.omp/marketplaces.json`, `.agents`, `.pi/agent/pix.json`),
 - the data-root rules, installed by `sync.mjs` into `<layer>/.omp/agent/rules`,
-- the per-project worker lists (`workers/<project>/{apt.txt,tools.json,env.txt}` →
+- the per-project worker lists (`workers/<project>/{apt.txt,tools.json,env.txt,requirements.txt}` →
   `<layer>/.ottr/workers/<project>/`).
 
 Per-layer records: `<layer>/.alate/installed.json` (user snapshot fingerprints) and

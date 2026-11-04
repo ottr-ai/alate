@@ -17,10 +17,11 @@
 // Plugins install from the captured lockfile with `bun install --frozen-lockfile` in ~/.omp/plugins, the
 // same root omp's plugin manager installs into.
 // Also installs the per-project worker additions Ottr's turns read: workers/<project>/apt.txt
-// (Debian packages), tools.json (declarative downloads) and env.txt (env names, never values)
+// (Debian packages), tools.json (declarative downloads), env.txt (env names, never values) and
+// requirements.txt (pinned, hashed Python packages)
 // -> ~/.ottr/workers/<project>/<file>; workers/_all/ is provisioned like a project. The data
 // repo is their only source, so a changed list replaces the machine copy without --force, and a
-// list it no longer ships is deleted. tools.json and env.txt are validated before any write.
+// list it no longer ships is deleted. tools.json, env.txt and requirements.txt are validated before any write.
 import { existsSync, lstatSync, mkdirSync, readlinkSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
@@ -54,10 +55,10 @@ const SKILL_ROOT_NAMES = new Set(['skills', 'managed-skills']);
 // Worker additions Ottr's turns read, provisioned per project folder (workers/_all/ is the fleet
 // folder and is provisioned like a project). The data repo is their only source: a changed list
 // replaces the machine copy without --force, a list the repo no longer ships is deleted.
-// tools.json and env.txt are validated before the plan turns into any write: an invalid file
+// tools.json, env.txt and requirements.txt are validated before the plan turns into any write: an invalid file
 // fails the whole provision with its path and the first rule it breaks, so a valid folder is
 // never half-written. Declarative only — no shell commands of any kind.
-const WORKER_FILES = ['apt.txt', 'tools.json', 'env.txt'];
+const WORKER_FILES = ['apt.txt', 'tools.json', 'env.txt', 'requirements.txt'];
 const TOOL_NAME = /^[a-z0-9][a-z0-9._-]*$/;
 const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -177,6 +178,22 @@ const validateEnv = (bytes, path) => {
     const line = raw.trim();
     if (!line || line.startsWith('#')) return;
     if (!ENV_NAME.test(line)) throw new Error(`${path}: env.txt line ${i + 1}: a name must match ${ENV_NAME.source} (names only, never values)`);
+  });
+};
+
+const REQ_LINE = /^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)==([A-Za-z0-9][A-Za-z0-9.+_!-]*)((?: --hash=sha256:[0-9a-f]{64})+)$/;
+const validateRequirements = (bytes, path) => {
+  // Reference grammar is ottr's parseRequirements (src/python.ts); the two must stay in sync.
+  // A broken line is reported by number, its content is never printed.
+  const seen = new Set();
+  bytes.toString('utf8').split(/\r?\n/).forEach((raw, i) => {
+    const line = raw.replace(/#.*/, '').trim();
+    if (!line) return;
+    const m = REQ_LINE.exec(line);
+    if (!m) throw new Error(`${path}: requirements.txt line ${i + 1}: not a pinned, hashed line (name==version --hash=sha256:<64 hex>)`);
+    const name = m[1].toLowerCase();
+    if (seen.has(name)) throw new Error(`${path}: requirements.txt line ${i + 1}: duplicate package "${name}"`);
+    seen.add(name);
   });
 };
 
@@ -349,6 +366,7 @@ try {
         const src = readFileSync(srcPath);
         if (file === 'tools.json') validateTools(src, srcPath);
         else if (file === 'env.txt') validateEnv(src, srcPath);
+        else if (file === 'requirements.txt') validateRequirements(src, srcPath);
         shipped.add(`${project}/${file}`);
         const dest = join(writeRoot, '.ottr', 'workers', project, file);
         checkDestination(writeRoot, dest);
