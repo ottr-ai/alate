@@ -607,9 +607,11 @@ try {
 
   // Rules restored through user/ land in the live agent rules dir, so they pass the same
   // content gate sync.mjs applies to data-root rules: hidden characters that smuggle
-  // instructions past human review (the U+202E bidi override below), plus a frontmatter
-  // description. The refusal happens before any write, and Markdown outside
-  // omp/agent/rules/ stays unscanned.
+  // instructions past human review (the U+202E bidi override below). omp loads agent-context
+  // Markdown elsewhere in the snapshot as always-on instructions too (AGENTS.md, RULES.md,
+  // SYSTEM.md, CLAUDE.md), so every .md/.mdc gets the hidden-character scan; only the
+  // snapshot's own rules dir additionally needs the frontmatter description. The refusal
+  // happens before any write, and non-Markdown content stays unscanned.
   const backdoorData = join(tmp, 'data-backdoor');
   const backdoorHome = join(tmp, 'home-backdoor');
   const putRule = (rel, text) => { mkdirSync(dirname(join(backdoorData, 'user', rel)), { recursive: true }); writeFileSync(join(backdoorData, 'user', rel), text); };
@@ -617,18 +619,27 @@ try {
   const runBackdoor = extra => run(['--data', backdoorData, ...extra], backdoorHome);
   putRule('omp/agent/rules/clean.md', '---\ndescription: clean rule\n---\n\nClean body\n');
   putRule('omp/agent/rules/backdoor.md', '---\ndescription: innocent rule\n---\n\nDirection\u202E: togglE\n');
-  putRule('notes/hidden.md', 'notes\u202Efile\n'); // not a rule: the gate must not scan it
+  putRule('omp/agent/AGENTS.md', 'Context\u202Eoverride\n');
+  putRule('omp/agent/RULES.md', 'Rule\u202Eoverride\n');
+  putRule('notes/hidden.md', 'notes\u202Efile\n');
   r = runBackdoor(['--skip-plugins']);
-  assert.equal(r.status, 1, 'a hidden character in a snapshot rule refuses the restore');
+  assert.equal(r.status, 1, 'a hidden character in any snapshot Markdown refuses the restore');
   assert.match(r.stderr, /Nothing installed\. Fix:/);
   assert.match(r.stderr, /user\/omp\/agent\/rules\/backdoor\.md:5:10: hidden character U\+202E/);
+  assert.match(r.stderr, /user\/omp\/agent\/AGENTS\.md:1:8: hidden character U\+202E/);
+  assert.match(r.stderr, /user\/omp\/agent\/RULES\.md:1:5: hidden character U\+202E/);
+  assert.match(r.stderr, /user\/notes\/hidden\.md:1:6: hidden character U\+202E/);
   assert.ok(!existsSync(backdoorHome), 'the refusal happens before any write');
   rmSync(join(backdoorData, 'user/omp/agent/rules/backdoor.md'));
+  rmSync(join(backdoorData, 'user/omp/agent/AGENTS.md'));
+  rmSync(join(backdoorData, 'user/omp/agent/RULES.md'));
+  rmSync(join(backdoorData, 'user/notes/hidden.md'));
+  putRule('notes/hidden.txt', 'notes\u202Efile\n'); // not Markdown: the gate must not scan it
   r = runBackdoor(['--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /2 installed/);
   assert.equal(gotRule('.omp/agent/rules/clean.md'), '---\ndescription: clean rule\n---\n\nClean body\n', 'a clean snapshot rule installs');
-  assert.equal(gotRule('.notes/hidden.md'), 'notes\u202Efile\n', 'a non-rule file with a hidden character installs unscanned');
+  assert.equal(gotRule('.notes/hidden.txt'), 'notes\u202Efile\n', 'a non-Markdown file with a hidden character installs unscanned');
   putRule('omp/agent/rules/clean.md', 'no frontmatter\n');
   r = runBackdoor(['--skip-plugins']);
   assert.equal(r.status, 1, 'a snapshot rule without a description refuses like a data-root rule');

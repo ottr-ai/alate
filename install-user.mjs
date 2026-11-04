@@ -189,8 +189,10 @@ try {
     // Rules restored through user/ land in the live agent rules dir, so every Markdown there
     // passes the same content gate sync.mjs applies to data-root rules: hidden characters
     // that smuggle instructions past human review ("Rules File Backdoor"), plus a frontmatter
-    // description. Markdown anywhere else in the snapshot is not a rule and stays unscanned.
-    if (/^omp\/agent\/rules\/[^/]+\.mdc?$/.test(rel)) ruleGate.push(...ruleProblems(`user/${rel}`, src.toString('utf8')));
+    // description. omp loads agent-context Markdown elsewhere in the snapshot as always-on
+    // instructions too (AGENTS.md, RULES.md, SYSTEM.md, CLAUDE.md), so every .md/.mdc gets the
+    // hidden-character scan; only the snapshot's own rules dir is a rule and needs the frontmatter.
+    if (/\.(md|mdc)$/.test(rel)) ruleGate.push(...ruleProblems(`user/${rel}`, src.toString('utf8'), { frontmatter: /^omp\/agent\/rules\/[^/]+\.mdc?$/.test(rel) }));
     // The machine text minus its deployment blocks (lib/data.mjs keeps the last kept line's
     // terminator). `dropped` holds credentials: never log it.
     const have = machineFingerprint(rel, dest);
