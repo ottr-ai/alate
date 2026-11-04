@@ -51,7 +51,7 @@ flowchart LR
 - **Snapshot store** — `alate.db` (SQLite via `node:sqlite`): `files` holds every data-repo file; `state` holds dashboard state; `updates`, `update_seen`, `osv_cache` hold update-check state.
 - **Dashboard core** — `web/dashboard.mjs` (transport-free): `importSource` (clone or local import into SQLite), `snapshotData` (materialize the snapshot to a temp dir), `applyFileEdit` (base-hash-checked writes that commit and push), inventory scan.
 - **Browser UI** — `web/index.html` shell, `web/app.js` client (overview, file index, editor with proof marks, updates, settings), `web/style.css` (Galley Proof theme), `web/diff.mjs` (line diff), `web/sw.js` (network-first offline shell), `web/manifest.webmanifest` + `web/icons/` (installable PWA), self-hosted fonts served from `node_modules` at `/fonts/`.
-- **Update checker** — `lib/updates.mjs`: one record per `upstreams.json` item; tiered age gates (7 days, or 2 days for a CVE-claiming release, or 0 days when OSV/CISA/CERT-EU corroborate); sources: GitHub releases, npm registry, nodejs.org, chrome-for-testing, OSV, CISA RSS, CERT-EU.
+- **Update checker** — `lib/updates.mjs`: one record per `upstreams.json` item; tiered age gates (7 days, or 2 days for a CVE-claiming release, or 0 days when OSV/CISA/CERT-EU corroborate); sources: GitHub releases, npm registry, nodejs.org, chrome-for-testing, OSV, CISA RSS, CERT-EU. A path or branch row counts its 7 days from the checker's first sight of the head commit, so every new commit restarts the wait.
 - **Provisioned home** — the compose `home` volume (`compose.yaml`, `Dockerfile`); the image carries the pinned SkillSpector build.
 - **CI** — `.github/workflows/install.yml` (fresh install from `examples/data`), `.github/workflows/sync.yml` (self-check chain), `.github/workflows/release.yml` (image to ghcr.io on a release).
 
@@ -85,7 +85,7 @@ sequenceDiagram
 ```
 
 - **Admin browser** — `web/app.js` (`api()` helper, login view, source form); `POST /api/login` exchanges the key for a session cookie because phones cannot set headers.
-- **Server** — `server.ts`: `provision()` materializes the snapshot, spawns each script in `SCRIPTS`, caps and redacts output; auth: Bearer key always, dashboard routes key-free on a loopback bind only (`dashGuard`).
+- **Server** — `server.ts`: `provision()` materializes the snapshot, spawns each script in `SCRIPTS` and stops at the first nonzero or null exit code, so the result list holds only the scripts that ran; caps and redacts output; auth: Bearer key always, dashboard routes key-free on a loopback bind only, and a loopback write also needs a same-origin `Origin` header or a same-host `Referer` (`dashGuard`).
 - **Snapshot store** — `web/dashboard.mjs`: `importSource`, `snapshotData`, `applyFileEdit`; SQLite tables in `server.ts` and `lib/updates.mjs`.
 - **sync.mjs / install-user.mjs** — the same CLI scripts a host runs by hand; the server passes `--data <temp snapshot dir>`.
 - **Container home** — `compose.yaml` volume `home` mounted at `/root`; `state` volume holds `server-config.json` and `alate.db`.
