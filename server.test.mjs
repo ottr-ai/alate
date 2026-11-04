@@ -1345,6 +1345,11 @@ try {
     assert.equal(on.qualifiesAt, plusDays(on.publishedAt, 2));
     await stopFast();
   } finally {
+    // A failed assertion must not leave the fast server querying fastApi while it closes:
+    // kill a still-running child first, so close() cannot wait on its sockets.
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise(resolve => { child.once('close', resolve); child.kill(); });
+    }
     await new Promise(resolve => fastApi.close(resolve));
   }
 
