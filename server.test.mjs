@@ -1266,6 +1266,88 @@ try {
     await new Promise(resolve => fakeUp.close(resolve));
   }
 
+  // 7a. The stored securityFastPath setting must drive the server's own update checks.
+  // The direct checker tests pass the switch as an option, so only a boot through
+  // server-config.json proves the pass-through. One fixture item whose newest release
+  // cites a CVE: tier A lifts the gate to 2 days with the fast path on (the default),
+  // the plain 7-day gate holds with it off.
+  const fastDaysAgo = n => new Date(Date.now() - n * 86_400_000).toISOString();
+  const fastRepo = join(tmp, 'gh', 'demo', 'fastup');
+  mkdirSync(join(fastRepo, 'user'), { recursive: true });
+  writeFileSync(join(fastRepo, 'fast-rule.md'), '---\ndescription: fast rule\n---\nbody\n');
+  writeFileSync(join(fastRepo, 'upstreams.json'), JSON.stringify({ own: [], items: [
+    { name: 'fast-demo', kind: 'rule-set', origin: 'https://github.com/fake/fastrel', check: { type: 'github-release', tagPrefix: 'v' }, version: '1.0.0', paths: ['fast-rule.md'] },
+  ] }));
+  assert.equal(git(['init', fastRepo]).status, 0);
+  assert.equal(git(['-C', fastRepo, 'add', '-A']).status, 0);
+  assert.equal(git(['-C', fastRepo, '-c', 'user.email=test@example.com', '-c', 'user.name=test', 'commit', '-m', 'fast fixture']).status, 0);
+  const fastPublished = fastDaysAgo(4); // tier A qualifies at +2d, the plain gate only at +7d
+  const fastApi = createServer((req, res) => {
+    const url = new URL(req.url, 'http://x');
+    const reply = (code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+    if (url.pathname === '/gh/repos/fake/fastrel/releases') {
+      return reply(200, [
+        { tag_name: 'v2.0.0', draft: false, prerelease: false, published_at: fastPublished, html_url: 'https://github.com/fake/fastrel/releases/v2.0.0', body: 'security fix for CVE-2026-6001' },
+        { tag_name: 'v1.5.0', draft: false, prerelease: false, published_at: fastDaysAgo(5), html_url: 'https://github.com/fake/fastrel/releases/v1.5.0' },
+      ]);
+    }
+    reply(404, { message: `no such fast fixture: ${req.url}` }); // the OSV probe fails closed to tier A
+  });
+  await new Promise(resolve => fastApi.listen(0, '127.0.0.1', resolve));
+  const fastUp = `http://127.0.0.1:${fastApi.address().port}`;
+  try {
+    const fastRow = async () => {
+      const u = (await (await get('/api/updates')).json()).updates.find(x => x.name === 'fast-demo');
+      assert.ok(u, 'the fast-demo row exists');
+      return u;
+    };
+    const bootFast = async configName => {
+      const config = join(tmp, `server-config-${configName}.json`);
+      // The stored setting is the thing under test: off writes the key, on stores a
+      // config without it so the default applies.
+      writeFileSync(config, JSON.stringify(configName === 'fast-off' ? { securityFastPath: false } : {}));
+      child = spawnServer(['--port', '0', '--config', config, '--db', join(tmp, 'state-fast.db'), '--update-interval', '1'], {
+        ...serverEnv, ALATE_TEST_GITHUB_API_BASE: `${fastUp}/gh`, ALATE_TEST_OSV_BASE: `${fastUp}/osv`,
+      });
+      base = await new Promise((resolve, reject) => {
+        let buf = '';
+        child.stdout.on('data', chunk => {
+          buf += chunk;
+          const k = /alate API key: (\S+)\n/.exec(buf);
+          const l = /alate server on (http:\/\/127\.0\.0\.1:\d+)\n/.exec(buf);
+          if (k) apiKey = k[1];
+          if (k && l) resolve(l[1]);
+        });
+        child.once('exit', code => reject(new Error(`fast-path server exited early (${code})`)));
+        setTimeout(() => reject(new Error(`fast-path server did not start; got: ${buf}`)), 10_000).unref();
+      });
+    };
+    const stopFast = () => new Promise(resolve => { child.once('close', resolve); child.kill(); });
+
+    // securityFastPath: false stored in the config: the cited CVE lifts nothing.
+    await bootFast('fast-off');
+    assert.equal((await postJson('/api/settings', { token: 'fast-gh-token-4c1' })).status, 200);
+    assert.equal((await postImport(JSON.stringify({ source: 'https://github.com/demo/fastup.git', kind: 'repo' }))).status, 200);
+    await waitFor(async () => (await (await get('/api/updates')).json()).updates.length === 1, 20_000);
+    const off = await fastRow();
+    assert.equal(off.latest, '2.0.0');
+    assert.equal(off.target, null, 'securityFastPath: false keeps the plain 7-day gate');
+    assert.equal('security' in off, false, 'no security tier is reported with the fast path off');
+    assert.equal(off.qualifiesAt, plusDays(off.publishedAt, 7));
+    await stopFast();
+
+    // Same database, fresh default config (the fast path on): the release-body CVE is a
+    // tier A signal, so the 4-day-old release qualifies at the 2-day gate.
+    await bootFast('fast-on');
+    await waitFor(async () => (await (await get('/api/updates')).json()).updates.find(x => x.name === 'fast-demo')?.target === '2.0.0', 20_000);
+    const on = await fastRow();
+    assert.equal(on.security?.tier, 'A', 'the release-body CVE is a tier A signal');
+    assert.equal(on.qualifiesAt, plusDays(on.publishedAt, 2));
+    await stopFast();
+  } finally {
+    await new Promise(resolve => fastApi.close(resolve));
+  }
+
   // 8. File editor API: snapshot reads; edits that commit and push; conflicts; path safety.
   // A dedicated server instance keeps this section off the earlier state file.
   const editSeed = join(tmp, 'edit-seed');
