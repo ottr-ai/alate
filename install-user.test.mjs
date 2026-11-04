@@ -4,11 +4,11 @@
 // The examples/data install workflow also skips plugins; neither proves Bun installation.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fingerprint, forAll, forTarget, keepTemp, sameContent } from './lib/data.mjs';
+import { fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, remapHomePaths, sameContent } from './lib/data.mjs';
 import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-install-'));
@@ -18,6 +18,8 @@ const home = join(tmp, 'home');
 mkdirSync(join(scriptDir, 'lib'), { recursive: true });
 copyFileSync(fileURLToPath(new URL('./install-user.mjs', import.meta.url)), join(scriptDir, 'install-user.mjs'));
 copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(scriptDir, 'lib', 'data.mjs'));
+// Layer mode spawns the real sync.mjs beside the script for the rules install.
+copyFileSync(fileURLToPath(new URL('./sync.mjs', import.meta.url)), join(scriptDir, 'sync.mjs'));
 const put = (rel, text) => { mkdirSync(join(data, 'user', rel, '..'), { recursive: true }); writeFileSync(join(data, 'user', rel), text); };
 const run = (extra, h = home, env) => spawnSync(process.execPath, [join(scriptDir, 'install-user.mjs'), '--home', h, ...extra], {
   encoding: 'utf8',
@@ -665,6 +667,179 @@ try {
     }
   } else {
     console.log('win32: the scanner-stub checks need a real skillspector on PATH; gate assertions skipped');
+  }
+
+  // Layer mode (POSIX only: the switch is a symlink rename): each provision installs into a
+  // fresh .alate/layers/<commit>-<n> folder and switches .alate/current with one atomic
+  // rename, so nothing a running turn reads ever changes (specs/agent-layer-switch.md). The
+  // fixture data dir carries a data-root rule (installed by sync.mjs into the layer) and a
+  // marketplaces.json whose catalogPath points into the home, to prove captured paths
+  // re-root into the layer.
+  if (process.platform === 'win32') {
+    console.log('win32: the layer-switch checks need symlink privileges; skipped');
+  } else {
+    const ldata = join(tmp, 'data-layer');
+    const putL = (rel, text) => { mkdirSync(dirname(join(ldata, 'user', rel)), { recursive: true }); writeFileSync(join(ldata, 'user', rel), text); };
+    const layerHome = join(tmp, 'layer-home');
+    const lconfig = 'modelRoles:\n  default: zai/glm\n';
+    putL('omp/agent/config.yml', lconfig);
+    putL('omp/agent/marketplaces.json', `${JSON.stringify({ marketplaces: [{ name: 'm', catalogPath: `${layerHome}/.omp/marketplaces/catalog.json` }] }, null, 2)}\n`);
+    putL('omp/agent/skills/mine/SKILL.md', '# mine\n');
+    mkdirSync(join(ldata, 'workers', 'web'), { recursive: true });
+    writeFileSync(join(ldata, 'workers', 'web', 'apt.txt'), 'libnss3\n');
+    writeFileSync(join(ldata, 'layer-rule.md'), '---\ndescription: layer test rule\n---\n\nBody\n');
+    const lbase = join(layerHome, '.alate');
+    const llayers = join(lbase, 'layers');
+    const lcurrent = join(lbase, 'current');
+    const runL = (h, extra) => run(['--data', ldata, ...extra], h);
+    const lgot = (layer, rel) => readFileSync(join(layer, rel), 'utf8');
+    // A pinned turn resolves current once and never follows a later switch: its whole tree
+    // must stay byte-identical across any number of provisions.
+    const snapshotTree = root => {
+      const out = {};
+      const walkTree = dir => {
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+          const p = join(dir, e.name);
+          if (e.isSymbolicLink()) out[p] = readlinkSync(p);
+          else if (e.isDirectory()) walkTree(p);
+          else out[p] = readFileSync(p);
+        }
+      };
+      walkTree(root);
+      return out;
+    };
+
+    // Happy path: layer created, switched by symlink, rules and worker lists and records inside.
+    let r = runL(layerHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(llayers).sort(), ['nogit-1'], 'the layer id is the data commit plus a counter');
+    assert.ok(lstatSync(lcurrent).isSymbolicLink(), 'current is a symlink');
+    const l1 = realpathSync(lcurrent);
+    assert.equal(l1, join(llayers, 'nogit-1'));
+    assert.equal(lgot(l1, '.omp/agent/config.yml'), lconfig);
+    assert.equal(lgot(l1, '.ottr/workers/web/apt.txt'), 'libnss3\n');
+    assert.equal(lgot(l1, '.omp/agent/rules/layer-rule.md'), '---\ndescription: layer test rule\n---\n\nBody\n', 'data-root rules land in the layer through sync.mjs');
+    assert.ok(JSON.parse(lgot(l1, '.alate/installed.json'))['omp/agent/config.yml'], 'the install record rides in the layer');
+    assert.equal(JSON.parse(lgot(l1, '.omp/agent/marketplaces.json')).marketplaces[0].catalogPath,
+      join(l1, '.omp/marketplaces/catalog.json'), 'captured home paths re-root into the layer');
+    assert.ok(lstatSync(join(l1, '.omp/agent/agent.db')).isSymbolicLink(), 'shared state links back to the home');
+    assert.equal(readlinkSync(join(l1, '.omp/agent/agent.db')), join(layerHome, '.omp/agent/agent.db'));
+    assert.ok(lstatSync(join(l1, '.omp/oauth')).isSymbolicLink());
+    assert.ok(lstatSync(join(l1, '.gitconfig')).isSymbolicLink());
+    assert.ok(!existsSync(join(layerHome, '.omp/agent/agent.db')), 'the shared credential store never becomes a real file');
+    assert.match(r.stdout, /switched /);
+
+    // A provision while a turn runs: the pinned layer is untouched, the new layer goes live.
+    const pinned = l1;
+    const pinnedTree = snapshotTree(pinned);
+    r = runL(layerHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(llayers).sort(), ['nogit-1', 'nogit-2']);
+    assert.equal(realpathSync(lcurrent), join(llayers, 'nogit-2'));
+    assert.deepEqual(snapshotTree(pinned), pinnedTree, 'a pinned turn keeps its layer byte for byte');
+
+    // Clean-up keeps the current layer and the one before it.
+    r = runL(layerHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(llayers).sort(), ['nogit-2', 'nogit-3'], 'cleanup keeps the current layer and the one before it');
+
+    // A layer a running turn holds (in-use.json, the runner's record) survives clean-up; an
+    // unreadable record stops deletion, safety over disk space.
+    writeFileSync(join(lbase, 'in-use.json'), JSON.stringify({ layers: ['nogit-2'] }));
+    r = runL(layerHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(llayers).sort(), ['nogit-2', 'nogit-3', 'nogit-4'], 'an in-use layer survives cleanup');
+    writeFileSync(join(lbase, 'in-use.json'), '{');
+    r = runL(layerHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /in-use\.json unreadable; keeping every layer/);
+    assert.deepEqual(readdirSync(llayers).sort(), ['nogit-2', 'nogit-3', 'nogit-4', 'nogit-5']);
+    writeFileSync(join(lbase, 'in-use.json'), '{"layers":[]}');
+    r = runL(layerHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(llayers).sort(), ['nogit-5', 'nogit-6'], 'a valid empty record lets cleanup run again');
+
+    // Machine state wins in layer mode: a machine edit beyond the deployment blocks rides
+    // into the new layer (this is how the entry script's memory-backend edit survives every
+    // switch), the blocks ride along either way, and block content never reaches the output.
+    const blocksL = 'hindsight:\n  apiUrl: http://nas:8888\n  apiToken: $HINDSIGHT_TOKEN\n';
+    const live6 = lgot(join(llayers, 'nogit-6'), '.omp/agent/config.yml');
+    writeFileSync(join(llayers, 'nogit-6', '.omp/agent/config.yml'), live6.replace('zai/glm', 'zai/glm-edited') + blocksL);
+    putL('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm-5.3\n');
+    r = runL(layerHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /machine change kept: /);
+    assert.equal(lgot(join(llayers, 'nogit-7'), '.omp/agent/config.yml'),
+      live6.replace('zai/glm', 'zai/glm-edited') + blocksL, 'machine bytes win and the blocks ride along');
+    assert.ok(!`${r.stdout}${r.stderr}`.includes('apiToken') && !`${r.stdout}${r.stderr}`.includes('nas:8888'),
+      'deployment block content is never printed');
+    r = runL(layerHome, ['--skip-plugins', '--layer', '--force']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(lgot(join(llayers, 'nogit-8'), '.omp/agent/config.yml'),
+      'modelRoles:\n  default: zai/glm-5.3\n' + blocksL, '--force takes the snapshot, the blocks still ride along');
+
+    // A failed scan deletes the failed layer folder and keeps the old current: a busy board
+    // provisions while turns run, and a bad skill must not take the live layer down.
+    const layerHome2 = join(tmp, 'layer-home-2');
+    r = runL(layerHome2, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    const base2 = join(layerHome2, '.alate');
+    putL('omp/agent/skills/mine/EVIL.md', '# evil\n');
+    writeStub(1);
+    r = runL(layerHome2, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 1, 'a failed scan refuses the run');
+    assert.match(r.stderr, /SkillSpector rejected/);
+    assert.equal(realpathSync(join(base2, 'current')), join(base2, 'layers', 'nogit-1'), 'a failed scan keeps the old current');
+    assert.deepEqual(readdirSync(join(base2, 'layers')), ['nogit-1'], 'the failed layer folder is gone');
+    assert.equal(lgot(join(base2, 'layers', 'nogit-1'), '.omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm-5.3\n');
+    writeStub(0);
+    rmSync(join(ldata, 'user/omp/agent/skills/mine/EVIL.md'));
+
+    // A failed rules install behaves the same: fail closed, old current stays, no layer left.
+    writeFileSync(join(ldata, 'bad-rule.md'), 'no frontmatter\n');
+    r = runL(layerHome2, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 1, 'a failed rules install refuses the run');
+    assert.match(r.stderr, /rules install failed/);
+    assert.match(r.stderr, /needs frontmatter with a description/);
+    assert.equal(realpathSync(join(base2, 'current')), join(base2, 'layers', 'nogit-1'));
+    assert.deepEqual(readdirSync(join(base2, 'layers')), ['nogit-1']);
+    rmSync(join(ldata, 'bad-rule.md'));
+
+    // current is a real directory: refuse before any write, migration is out of scope.
+    const layerHome3 = join(tmp, 'layer-home-3');
+    mkdirSync(join(layerHome3, '.alate', 'current'), { recursive: true });
+    r = runL(layerHome3, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 1, 'a real current directory refuses the run');
+    assert.match(r.stderr, /exists and is not a symlink/);
+    assert.ok(!existsSync(join(layerHome3, '.alate', 'layers')), 'the refusal happens before any write');
+
+    // The layer helpers are pure: the counter never collides with the names it read and the
+    // home remap is reversible and inert without a boundary occurrence.
+    const hex = rand => Array.from({ length: 12 }, () => '0123456789abcdef'[Math.floor(rand() * 16)]).join('');
+    forAll((rand, size) => {
+      const commit = rand() < 0.2 ? 'nogit' : hex(rand);
+      const used = Array.from({ length: Math.floor(rand() * (size + 1) * 4) }, () => `${commit}-${1 + Math.floor(rand() * 50)}`);
+      return { commit, used };
+    }, ({ commit, used }) => {
+      const n = nextLayerCounter(used, commit);
+      assert.ok(Number.isInteger(n) && n >= 1, `the counter is a positive integer: ${n}`);
+      assert.ok(!used.includes(`${commit}-${n}`), `the counter never collides: ${commit}-${n}`);
+      const max = used.map(u => Number(u.slice(commit.length + 1))).reduce((a, b) => Math.max(a, b), 0);
+      assert.ok(n > max, `the counter continues the highest: ${n} > ${max}`);
+    });
+    const txtChars = ['a', 'Z', '0', '-', '.', ':', ' ', '"', '\\', '/', '\n', 'x', 'y'];
+    forAll((rand, size) => {
+      const home = `/${Math.floor(rand() * 9)}${rand() < 0.5 ? `/${Math.floor(rand() * 9)}` : ''}`;
+      const layer = `${home}/.alate/layers/l-${Math.floor(rand() * 9)}`;
+      let t = '';
+      for (let i = 0, n = Math.floor(rand() * (size + 1) * 12); i < n; i++) t += txtChars[Math.floor(rand() * txtChars.length)];
+      if (rand() < 0.5) t += `:${home}/x`; // one boundary occurrence
+      return { home, layer, t };
+    }, ({ home, layer, t }) => {
+      const out = remapHomePaths(t, home, layer);
+      assert.equal(out.split(layer).join(home), t, 'the remap is reversible');
+      if (!new RegExp(`["\\s:]${home}/`).test(t)) assert.equal(out, t, 'no boundary occurrence, no change');
+    });
   }
 
   // Rules restored through user/ land in the live agent rules dir, so they pass the same

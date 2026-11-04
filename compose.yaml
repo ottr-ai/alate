@@ -8,6 +8,10 @@ services:
     command: ["node", "server.ts", "--config", "/state/server-config.json"]
     environment:
       - ALATE_API_KEY
+      # Each provision installs into .alate/layers/<id> and switches .alate/current with one
+      # atomic rename, so a provision never changes files a running turn reads. Unset for the
+      # in-place install.
+      - ALATE_LAYER=1
     volumes:
       - state:/state
       - home:/root

@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // Restores the data repo's captured user/ layer onto a machine: the inverse of sync-user.mjs.
-// Usage: node install-user.mjs [--home <dir>] [--force] [--skip-plugins] [--data <dir>|--repo <owner/name[@ref]>]
+// Usage: node install-user.mjs [--home <dir>] [--force] [--skip-plugins] [--layer] [--data <dir>|--repo <owner/name[@ref]>]
+// --layer (or ALATE_LAYER=1) installs into a fresh <home>/.alate/layers/<commit>-<n> and atomically
+// switches the <home>/.alate/current symlink to it, so a provision never rewrites files a running
+// turn reads; see specs/agent-layer-switch.md for the layout, link set, and cleanup rules.
 //   data dir: --data <dir>, else --repo (shallow clone), else $ALATE_DATA, else ../agent-data beside this checkout
 // Paths mirror the home directory minus the leading dot (user/omp/agent/config.yml -> ~/.omp/agent/config.yml).
 // On a live machine omp's own state is the source of truth, so an existing file that differs is refused,
@@ -18,16 +21,18 @@
 // -> ~/.ottr/workers/<project>/<file>; workers/_all/ is provisioned like a project. The data
 // repo is their only source, so a changed list replaces the machine copy without --force, and a
 // list it no longer ships is deleted. tools.json and env.txt are validated before any write.
-import { existsSync, mkdirSync, rmdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readlinkSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { assertSourceInside, checkDestination, cleanupData, fingerprint, forTarget, parseArgs, resolveDataDir, ruleProblems, sameContent, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, cleanupData, fingerprint, forTarget, nextLayerCounter, parseArgs, remapHomePaths, resolveDataDir, ruleProblems, sameContent, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
 
-const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home'], ['--force', '--skip-plugins']);
+const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home'], ['--force', '--skip-plugins', '--layer']);
 const home = args.values['--home'] ?? homedir();
 const force = args.flags.has('--force');
 const skipPlugins = args.flags.has('--skip-plugins');
+const layerMode = args.flags.has('--layer') || process.env.ALATE_LAYER === '1';
 const data = resolveDataDir(args, { allowClone: true });
 const userRoot = join(data.dir, 'user');
 const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
@@ -60,6 +65,76 @@ const UNPACK = new Set(['zip', 'tar.gz', 'none']);
 // A bin path is an archive-relative path: safe segments only, so "..", absolute paths and
 // anything shell-like never reach the container.
 const BIN_SEGMENT = /^[A-Za-z0-9._-]+$/;
+
+// Every directory named skills/ or managed-skills/ anywhere under a root holds executable
+// agent content; each skill inside it goes to the scanner.
+const collectSkillDirs = dir => {
+  const found = [];
+  const visit = path => {
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      if (!entry.isDirectory() || SKIP_DIRS.has(entry.name)) continue;
+      const child = join(path, entry.name);
+      if (SKILL_ROOT_NAMES.has(entry.name)) {
+        for (const skill of readdirSync(child, { withFileTypes: true })) {
+          if (skill.isDirectory() && !SKIP_DIRS.has(skill.name)) found.push(join(child, skill.name));
+        }
+      } else visit(child);
+    }
+  };
+  visit(dir);
+  return found;
+};
+
+// Fail-closed gate: every skill snapshot is scanned before anything lands on disk (or, in
+// layer mode, before the layer goes live). The scanner's own report goes straight to this
+// run's output (stdio: 'inherit'); any non-zero exit — findings (1) or a scanner error (2) —
+// refuses the whole run with a non-zero exit.
+const runScan = skillDirs => {
+  // The pin is enforced, not just documented: v2 baseline fingerprints bind to scanner_version,
+  // so a scanner that is not the pinned build silently suppresses nothing and every accepted
+  // finding resurfaces as a fresh rejection (the 2026-10-31 Windows host failure). Prefer the
+  // pinned venv (same layout and SKILLSPECTOR_VENV override as the data repo's
+  // .githooks/skillspector-scan.sh), fall back to PATH only when its version matches the pin.
+  const venvBin = join(
+    process.env.SKILLSPECTOR_VENV ?? join(homedir(), '.cache', 'skillspector-venv'),
+    process.platform === 'win32' ? join('Scripts', 'skillspector.exe') : join('bin', 'skillspector'),
+  );
+  const pinnedVersion = `SkillSpector v${SKILLSPECTOR_REF.slice(1)}`;
+  let scanner = null;
+  for (const candidate of [venvBin, 'skillspector']) {
+    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
+    if (probe.error?.code === 'ENOENT') continue;
+    if (probe.error) {
+      throw new Error(`skillspector could not run (${probe.error.code ?? probe.error.message}); refusing to install ${skillDirs.length} skill snapshot(s).`);
+    }
+    const reported = String(probe.stdout ?? '').trim();
+    // A candidate that cannot answer the probe is broken, not wrong: a Python upgrade leaves
+    // the venv's packages in lib/python3.x while bin/python3 points at the new interpreter,
+    // so its entry point dies before printing a version (the 2026-11-01 ottr-alate-1 failure
+    // that stopped every provision). Skip it and let the next candidate serve. A candidate
+    // that runs and reports a version is held to the pin.
+    if (probe.status !== 0 || !reported) continue;
+    if (reported !== pinnedVersion) {
+      throw new Error(`skillspector is ${reported}, not the pinned ${pinnedVersion}; baseline fingerprints bind to the scanner version, so this build would suppress nothing and every accepted finding would resurface. Install the pinned build, then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
+    }
+    scanner = candidate;
+    break;
+  }
+  if (!scanner) {
+    const venvRoot = join(venvBin, '..', '..');
+    throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s). The venv at ${venvRoot} is broken (a Python upgrade makes an old venv unusable) or missing: rebuild it with rm -rf "${venvRoot}" && python3 -m venv "${venvRoot}" && "${join(venvRoot, 'bin', 'pip')}" install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}", or install the pinned build (Python 3.12+), then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
+  }
+  console.log(`Scanning ${skillDirs.length} skill snapshot(s) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied)...`);
+  for (const dir of skillDirs) {
+    const scan = spawnSync(scanner, ['scan', dir, '--no-llm', '--fail-on-findings', '--use-shipped-baseline'], { stdio: 'inherit' });
+    if (scan.error) {
+      throw new Error(`skillspector could not run (${scan.error.code ?? scan.error.message}); refusing to install ${skillDirs.length} skill snapshot(s).`);
+    }
+    if (scan.status !== 0) {
+      throw new Error(`SkillSpector rejected ${dir} (exit ${scan.status ?? `signal ${scan.signal}`}); nothing was installed. Review the report above, then fix or drop the skill in the data repo.`);
+    }
+  }
+};
 
 const validateTools = (bytes, path) => {
   let list;
@@ -119,20 +194,44 @@ try {
 
   // Top-level snapshot dirs are dot-dirs in the home (user/omp -> ~/.omp): the layer's own paths.
   const roots = new Set(readdirSync(userRoot).map(name => '.' + name));
+
+  const base = join(home, '.alate');
+  const currentLink = join(base, 'current');
+  const layersDir = join(base, 'layers');
+  let writeRoot = home, readRoot = home, newLayerDir = null;
+  if (layerMode) {
+    // Preflight before any write: current is absent or a symlink, never anything else —
+    // an in-place migration of a real directory is out of scope.
+    const st = lstatSync(currentLink, { throwIfNoEntry: false });
+    if (st && !st.isSymbolicLink()) throw new Error(`refusing: ${currentLink} exists and is not a symlink; remove or migrate it by hand`);
+    const gitHead = spawnSync('git', ['-C', data.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+    const commit = gitHead.status === 0 && /^[0-9a-f]{40,64}$/.test((gitHead.stdout ?? '').trim()) ? gitHead.stdout.trim().slice(0, 12) : 'nogit';
+    newLayerDir = join(layersDir, `${commit}-${nextLayerCounter(existsSync(layersDir) ? readdirSync(layersDir) : [], commit)}`);
+    writeRoot = newLayerDir;
+    // Machine state lives in the live layer when there is one: the new layer reads it there,
+    // a first layer (no resolvable current) reads the snapshot as a fresh home does.
+    let live = null;
+    try { live = realpathSync(currentLink); } catch { /* absent or dangling */ }
+    readRoot = live !== null && live.startsWith(layersDir + sep) ? live : newLayerDir;
+  }
+
   const plan = [];
   const conflicts = [];
   const notes = [];
   // Content-gate problems for the snapshot's rules, collected during the walk and refused before any write.
   const ruleGate = [];
   // Snapshot path -> fingerprint of the content alate last installed (or found already in place).
-  const manifest = join(home, '.alate', 'installed.json');
-  checkDestination(home, manifest);
+  // The record rides in the layer it describes; the previous install's record is read through
+  // the live layer.
+  const manifest = join(writeRoot, '.alate', 'installed.json');
+  checkDestination(writeRoot, manifest);
+  const lastManifest = join(readRoot, '.alate', 'installed.json');
   let last = {};
-  if (existsSync(manifest)) {
+  if (existsSync(lastManifest)) {
     try {
-      last = JSON.parse(readFileSync(manifest, 'utf8'));
+      last = JSON.parse(readFileSync(lastManifest, 'utf8'));
     } catch (err) {
-      console.error(`Ignoring unreadable ${manifest} (${err.message}): every file that differs from the snapshot counts as changed here.`);
+      console.error(`Ignoring unreadable ${lastManifest} (${err.message}): every file that differs from the snapshot counts as changed here.`);
     }
   }
   // The machine file's fingerprint, the same comparison the install plan uses: config.yml's
@@ -163,25 +262,31 @@ try {
     } catch (err) {
       throw new Error(`user/${rel}: ${err.message}`);
     }
-    const dest = join(home, '.' + rel);
+    const dest = join(writeRoot, '.' + rel);
     // Every destination is preflighted before any content is read or written, so a
     // symlink, hardlink, or directory at dest refuses the whole restore up front —
     // --force overrides the conflict refusal, never this alias guard.
-    checkDestination(home, dest);
-    const target = forTarget(rel, readFileSync(srcPath), { home, platform: process.platform, roots });
+    checkDestination(writeRoot, dest);
+    const readDest = join(readRoot, '.' + rel);
+    const target = forTarget(rel, readFileSync(srcPath), { home: writeRoot, platform: process.platform, roots });
     notes.push(...target.notes);
+    // Captured config can point at absolute paths in the capture home; a layer re-roots them
+    // so a turn pinned to the layer resolves files under its own path.
+    let snapshot = target.bytes;
+    if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) snapshot = Buffer.from(remapHomePaths(snapshot.toString('utf8'), home, newLayerDir), 'utf8');
     // config.yml's top-level hindsight:/alate: blocks are deployment settings that stay on the
     // target: the snapshot never carries them (capture strips them), and the machine's own ride
-    // along on every install. Compare deployment-free content, so a target that differs only in
+    // along on every install. In layer mode they come from the live layer's config, the fresh
+    // one has none yet. Compare deployment-free content, so a target that differs only in
     // those blocks is unchanged and a real conflict cannot hide behind them. `dropped` holds
     // credentials: never log it.
-    const machineYaml = rel === 'omp/agent/config.yml' && existsSync(dest)
-      ? readFileSync(dest).toString('utf8') : null;
+    const machineYaml = rel === 'omp/agent/config.yml' && existsSync(readDest)
+      ? readFileSync(readDest).toString('utf8') : null;
     const deployed = machineYaml === null ? null : splitDeploymentBlocks(machineYaml);
-    const want = fingerprint(rel, target.bytes);
-    let src = target.bytes;
+    const want = fingerprint(rel, snapshot);
+    let src = snapshot;
     if (deployed?.dropped.length) {
-      const base = splitDeploymentBlocks(target.bytes.toString('utf8'));
+      const base = splitDeploymentBlocks(snapshot.toString('utf8'));
       // The snapshot's own terminator already separates it from the appended blocks; a
       // snapshot that does not end in a newline still gets the blocks on a new line.
       const kept = base.kept[base.kept.length - 1] === '' ? base.kept.slice(0, -1) : base.kept;
@@ -196,8 +301,21 @@ try {
     if (/\.(md|mdc)$/.test(rel)) ruleGate.push(...ruleProblems(`user/${rel}`, src.toString('utf8'), { frontmatter: /^omp\/agent\/rules\/[^/]+\.mdc?$/.test(rel) }));
     // The machine text minus its deployment blocks (lib/data.mjs keeps the last kept line's
     // terminator). `dropped` holds credentials: never log it.
-    const have = machineFingerprint(rel, dest);
-    if (have === want) plan.push(['unchanged', dest, null]);
+    const have = machineFingerprint(rel, readDest);
+    if (have === want && !layerMode) plan.push(['unchanged', dest, null]);
+    else if (layerMode && have === want) plan.push(['installed', dest, src]);
+    else if (layerMode && have !== null && have !== last[rel]) {
+      // A machine change beyond the deployment blocks is never a refusal in layer mode:
+      // machine state wins and rides into the new layer, --force takes the snapshot instead.
+      // have !== want is implied by the branch above; layer mode never reaches conflicts.
+      if (force) {
+        plan.push(['installed', dest, src]);
+        notes.push(`machine change overridden by --force: ${readDest}`);
+      } else {
+        plan.push(['installed', dest, readFileSync(readDest)]);
+        notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
+      }
+    }
     else if (have === null || have === last[rel] || force) plan.push(['installed', dest, src]);
     else conflicts.push(dest);
     current[rel] = want;
@@ -218,8 +336,8 @@ try {
         if (file === 'tools.json') validateTools(src, srcPath);
         else if (file === 'env.txt') validateEnv(src, srcPath);
         shipped.add(`${project}/${file}`);
-        const dest = join(home, '.ottr', 'workers', project, file);
-        checkDestination(home, dest);
+        const dest = join(writeRoot, '.ottr', 'workers', project, file);
+        checkDestination(writeRoot, dest);
         plan.push(existsSync(dest) && sameContent('', readFileSync(dest), src) ? ['unchanged', dest, null] : ['installed', dest, src]);
       }
     }
@@ -227,9 +345,10 @@ try {
   // A path the snapshot dropped: delete the machine copy when it still holds what alate last
   // installed (nobody changed it since), keep it with a note when it changed here, and drop
   // the record either way — alate no longer vouches for a path the snapshot lacks. --force
-  // never deletes: a file that does not match its record is never deleted.
+  // never deletes: a file that does not match its record is never deleted. A fresh layer
+  // never carries dropped paths, so layer mode collects nothing here.
   const deletions = [];
-  for (const [rel, fp] of Object.entries(last)) {
+  if (!layerMode) for (const [rel, fp] of Object.entries(last)) {
     if (Object.hasOwn(current, rel) || typeof fp !== 'string') continue;
     const dest = join(home, '.' + rel);
     // Same guard as installs: never delete through a symlink, a hardlink alias or a
@@ -241,7 +360,7 @@ try {
   }
   // Worker lists come only from the data repo, so a list it no longer ships is deleted too.
   const homeWorkers = join(home, '.ottr');
-  if (existsSync(join(homeWorkers, 'workers'))) {
+  if (!layerMode && existsSync(join(homeWorkers, 'workers'))) {
     for (const project of readdirSync(join(homeWorkers, 'workers'), { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name)) {
       for (const file of WORKER_FILES) {
         if (shipped.has(`${project}/${file}`)) continue;
@@ -257,99 +376,116 @@ try {
 
   // Fail-closed gate: every directory named skills/ or managed-skills/ in the snapshot
   // holds executable agent content, so each skill in it is scanned before any write, deletion,
-  // or record update below. Skills already recorded as unchanged are scanned again too: a copy
-  // a pre-gate alate installed was never scanned, and the manifest cannot prove it was. The
-  // scanner's own report goes straight to this run's output (stdio: 'inherit'); any non-zero
-  // exit — findings (1) or a scanner error (2) — refuses the whole run with a non-zero exit.
-  const skillDirs = [];
-  const collectSkillDirs = dir => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (!entry.isDirectory() || SKIP_DIRS.has(entry.name)) continue;
-      const path = join(dir, entry.name);
-      if (SKILL_ROOT_NAMES.has(entry.name)) {
-        for (const skill of readdirSync(path, { withFileTypes: true })) {
-          if (skill.isDirectory() && !SKIP_DIRS.has(skill.name)) skillDirs.push(join(path, skill.name));
+  // or record update below (layer mode scans the installed layer after the writes, before the
+  // switch). Skills already recorded as unchanged are scanned again too: a copy a pre-gate
+  // alate installed was never scanned, and the manifest cannot prove it was.
+  const skillDirs = collectSkillDirs(userRoot);
+  if (!layerMode && skillDirs.length) runScan(skillDirs);
+
+  // Layer mode: everything from here to the switch is disposable. Any failure before the
+  // rename deletes the fresh layer and leaves current — and with it every running turn —
+  // untouched; the switch itself is one atomic rename.
+  let switched = false;
+  let tmpLink = null;
+  try {
+    if (layerMode) {
+      // The layer dir exists only after every content gate passed (rule gate, worker validation).
+      mkdirSync(newLayerDir, { recursive: true });
+      // The data-root rules install straight into the layer, through the same sync.mjs and its
+      // fail-closed gates the server-side provision uses.
+      const toolDir = dirname(fileURLToPath(import.meta.url));
+      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), join(newLayerDir, '.omp', 'agent', 'rules'), '--data', data.dir], { encoding: 'utf8' });
+      if (rules.error || rules.status !== 0) throw new Error(`rules install failed:\n${rules.stderr || rules.stdout}`);
+      if (rules.stdout) console.log(rules.stdout);
+    }
+    let installed = 0, unchanged = 0;
+    for (const [kind, dest, bytes] of plan) {
+      if (kind === 'unchanged') { unchanged++; continue; }
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, bytes);
+      installed++;
+    }
+    let deleted = 0;
+    for (const [dest, root] of deletions) {
+      unlinkSync(dest);
+      console.log(`deleted  ${relative(home, dest)}`);
+      pruneEmptyDirs(dest, root);
+      deleted++;
+    }
+    // The record the snapshot dropped is written as gone: if the path returns, an untouched
+    // copy is freshly installed, and a changed copy wins as a plain conflict.
+    mkdirSync(dirname(manifest), { recursive: true });
+    writeFileSync(manifest, `${JSON.stringify(current, null, 2)}\n`);
+    console.log(`${installed} installed, ${unchanged} unchanged, ${deleted} deleted in ${writeRoot}`);
+    for (const note of notes) console.log(note);
+
+    if (layerMode) {
+      const layerSkillDirs = collectSkillDirs(newLayerDir);
+      if (layerSkillDirs.length) runScan(layerSkillDirs);
+    }
+
+    if (!skipPlugins && existsSync(join(userRoot, 'omp', 'plugins', 'package.json'))) {
+      const pluginsDir = join(writeRoot, '.omp', 'plugins');
+      const bun = spawnSync('bun', ['install', '--frozen-lockfile'], { cwd: pluginsDir, stdio: 'inherit' });
+      if (bun.error || bun.status !== 0) {
+        throw new Error(bun.error?.code === 'ENOENT' ? 'bun not found; cannot install plugins.' : `bun install failed in ${pluginsDir}`);
+      }
+    } else if (skipPlugins) {
+      console.log('plugins skipped');
+    }
+
+    if (layerMode) {
+      // Shared state stays in the home: each new layer links back to it, so a turn that runs
+      // with HOME=<layer> reads and writes the same state as an in-place install. A path the
+      // snapshot itself ships is left as snapshot content, so an allowlist change cannot
+      // silently drop shared state.
+      const fileLinks = ['.omp/agent/agent.db', '.gitconfig', '.pi/agent/optimizer.json'];
+      const dirLinks = ['.omp/oauth', '.omp/sessions', '.omp/agent/sessions', '.omp/agent/memories', '.omp/memories', '.config', '.cache', '.bun'];
+      for (const rel of [...fileLinks, ...dirLinks]) {
+        if (lstatSync(join(newLayerDir, rel), { throwIfNoEntry: false })) {
+          console.log('layer keeps snapshot content: ' + rel);
+          continue;
         }
-      } else collectSkillDirs(path);
-    }
-  };
-  collectSkillDirs(userRoot);
-  if (skillDirs.length) {
-    // The pin is enforced, not just documented: v2 baseline fingerprints bind to scanner_version,
-    // so a scanner that is not the pinned build silently suppresses nothing and every accepted
-    // finding resurfaces as a fresh rejection (the 2026-10-31 Windows host failure). Prefer the
-    // pinned venv (same layout and SKILLSPECTOR_VENV override as the data repo's
-    // .githooks/skillspector-scan.sh), fall back to PATH only when its version matches the pin.
-    const venvBin = join(
-      process.env.SKILLSPECTOR_VENV ?? join(homedir(), '.cache', 'skillspector-venv'),
-      process.platform === 'win32' ? join('Scripts', 'skillspector.exe') : join('bin', 'skillspector'),
-    );
-    const pinnedVersion = `SkillSpector v${SKILLSPECTOR_REF.slice(1)}`;
-    let scanner = null;
-    for (const candidate of [venvBin, 'skillspector']) {
-      const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
-      if (probe.error?.code === 'ENOENT') continue;
-      if (probe.error) {
-        throw new Error(`skillspector could not run (${probe.error.code ?? probe.error.message}); refusing to install ${skillDirs.length} skill snapshot(s).`);
+        const target = join(home, rel);
+        mkdirSync(dirname(target), { recursive: true });
+        if (dirLinks.includes(rel)) mkdirSync(target, { recursive: true });
+        mkdirSync(dirname(join(newLayerDir, rel)), { recursive: true });
+        symlinkSync(target, join(newLayerDir, rel));
       }
-      const reported = String(probe.stdout ?? '').trim();
-      // A candidate that cannot answer the probe is broken, not wrong: a Python upgrade leaves
-      // the venv's packages in lib/python3.x while bin/python3 points at the new interpreter,
-      // so its entry point dies before printing a version (the 2026-11-01 ottr-alate-1 failure
-      // that stopped every provision). Skip it and let the next candidate serve. A candidate
-      // that runs and reports a version is held to the pin.
-      if (probe.status !== 0 || !reported) continue;
-      if (reported !== pinnedVersion) {
-        throw new Error(`skillspector is ${reported}, not the pinned ${pinnedVersion}; baseline fingerprints bind to the scanner version, so this build would suppress nothing and every accepted finding would resurface. Install the pinned build, then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
+      // A reader of current sees the old or the new target, never a gap: rename() over the
+      // symlink is atomic.
+      let previousTarget = null;
+      try { previousTarget = realpathSync(currentLink); } catch { /* first layer: nothing before it */ }
+      tmpLink = join(base, `.current-${process.pid}-${Date.now()}.tmp`);
+      symlinkSync(newLayerDir, tmpLink);
+      renameSync(tmpLink, currentLink);
+      switched = true;
+      console.log(`switched ${currentLink} -> ${newLayerDir}`);
+      // Clean-up keeps the live layer, the one before it, the new one, and anything a pinned
+      // turn holds (in-use.json; absent means no runner has pinned a layer yet). An unreadable
+      // record stops deletion: safety over disk space.
+      const keep = new Set([newLayerDir]);
+      try { keep.add(realpathSync(currentLink)); } catch { /* dangling: kept via newLayerDir */ }
+      if (previousTarget) keep.add(previousTarget);
+      const inUsePath = join(base, 'in-use.json');
+      let inUse = null;
+      let stopCleanup = false;
+      if (existsSync(inUsePath)) {
+        try { inUse = JSON.parse(readFileSync(inUsePath, 'utf8')); }
+        catch { console.log('in-use.json unreadable; keeping every layer'); stopCleanup = true; }
       }
-      scanner = candidate;
-      break;
-    }
-    if (!scanner) {
-      const venvRoot = join(venvBin, '..', '..');
-      throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s). The venv at ${venvRoot} is broken (a Python upgrade makes an old venv unusable) or missing: rebuild it with rm -rf "${venvRoot}" && python3 -m venv "${venvRoot}" && "${join(venvRoot, 'bin', 'pip')}" install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}", or install the pinned build (Python 3.12+), then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
-    }
-    console.log(`Scanning ${skillDirs.length} skill snapshot(s) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied)...`);
-    for (const dir of skillDirs) {
-      const scan = spawnSync(scanner, ['scan', dir, '--no-llm', '--fail-on-findings', '--use-shipped-baseline'], { stdio: 'inherit' });
-      if (scan.error) {
-        throw new Error(`skillspector could not run (${scan.error.code ?? scan.error.message}); refusing to install ${skillDirs.length} skill snapshot(s).`);
-      }
-      if (scan.status !== 0) {
-        throw new Error(`SkillSpector rejected ${dir} (exit ${scan.status ?? `signal ${scan.signal}`}); nothing was installed. Review the report above, then fix or drop the skill in the data repo.`);
+      if (inUse) for (const id of inUse.layers ?? []) keep.add(join(layersDir, id));
+      if (!stopCleanup) for (const name of readdirSync(layersDir)) {
+        if (!/^(?:[0-9a-f]{12}|nogit)-\d+$/.test(name) || keep.has(join(layersDir, name))) continue;
+        rmSync(join(layersDir, name), { recursive: true });
+        console.log(`deleted layer ${name}`);
       }
     }
-  }
-
-  let installed = 0, unchanged = 0;
-  for (const [kind, dest, bytes] of plan) {
-    if (kind === 'unchanged') { unchanged++; continue; }
-    mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, bytes);
-    installed++;
-  }
-  let deleted = 0;
-  for (const [dest, root] of deletions) {
-    unlinkSync(dest);
-    console.log(`deleted  ${relative(home, dest)}`);
-    pruneEmptyDirs(dest, root);
-    deleted++;
-  }
-  // The record the snapshot dropped is written as gone: if the path returns, an untouched
-  // copy is freshly installed, and a changed copy wins as a plain conflict.
-  mkdirSync(dirname(manifest), { recursive: true });
-  writeFileSync(manifest, `${JSON.stringify(current, null, 2)}\n`);
-  console.log(`${installed} installed, ${unchanged} unchanged, ${deleted} deleted in ${home}`);
-  for (const note of notes) console.log(note);
-
-  if (!skipPlugins && existsSync(join(userRoot, 'omp', 'plugins', 'package.json'))) {
-    const pluginsDir = join(home, '.omp', 'plugins');
-    const bun = spawnSync('bun', ['install', '--frozen-lockfile'], { cwd: pluginsDir, stdio: 'inherit' });
-    if (bun.error || bun.status !== 0) {
-      throw new Error(bun.error?.code === 'ENOENT' ? 'bun not found; cannot install plugins.' : `bun install failed in ${pluginsDir}`);
-    }
-  } else if (skipPlugins) {
-    console.log('plugins skipped');
+  } catch (err) {
+    // A layer that never went live must not survive its own failed install.
+    if (layerMode && !switched) rmSync(newLayerDir, { recursive: true, force: true });
+    if (tmpLink) rmSync(tmpLink, { force: true });
+    throw err;
   }
 } catch (err) {
   console.error(err.message);
