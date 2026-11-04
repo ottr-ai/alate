@@ -6,6 +6,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { setTimeout as delay } from 'node:timers/promises'
+import type { AddressInfo } from 'node:net'
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
 import { cleanupData, parseDataSpec, redactSecrets } from './lib/data.mjs'
@@ -162,7 +163,9 @@ async function dashGuard(req: FastifyRequest, reply: FastifyReply): Promise<void
   // sameOrigin check, any web page could ride this shortcut with a bodyless no-cors
   // POST (no preflight; POST /api/key reads no body) and rotate the provisioning key.
   // Browsers send Origin on every non-GET request, and the dashboard's own requests
-  // are same-origin; scripts keep using the Bearer path above.
+  // are same-origin; scripts keep using the Bearer path above. DNS rebinding makes a
+  // hostile page's Origin equal its Host, so that check alone passes; the loopback
+  // Host gate registered near listen() covers that case.
   if (req.method !== 'GET' && req.method !== 'HEAD' && !sameOrigin(req)) return reply.code(401).send({ error: 'unauthorized' })
 }
 
@@ -484,6 +487,25 @@ const port = +(flagValue('--port') ?? process.env.PORT ?? 4570)
 const host = flagValue('--host') ?? process.env.ALATE_HOST ?? '127.0.0.1'
 // Loopback binds keep the dashboard key-free; anything else (0.0.0.0, ::, a LAN IP) arms dashGuard.
 const loopbackBind = host === 'localhost' || host.startsWith('127.') || host === '::1'
+
+// A rebound page resolves its own hostname to 127.0.0.1, so its Origin equals the
+// request Host and sameOrigin passes; on a key-free loopback bind only the Host
+// header itself proves the request names this server.
+const boundPort = (): string => String(port || (app.server.address() as AddressInfo).port)
+function hostIsLoopback(host: string | undefined): boolean {
+  if (!host) return false
+  let u: URL
+  try { u = new URL(`http://${host}`) } catch { return false }
+  const name = u.hostname
+  const okName = name === 'localhost' || name === '[::1]' ||
+    /^127\.(25[0-5]|2[0-4]\d|1?\d?\d)\.(25[0-5]|2[0-4]\d|1?\d?\d)\.(25[0-5]|2[0-4]\d|1?\d?\d)$/.test(name)
+  return okName && (u.port === '' || u.port === boundPort())
+}
+if (loopbackBind) {
+  app.addHook('onRequest', async (req, reply) => {
+    if (!hostIsLoopback(req.headers.host)) return reply.code(421).send({ error: 'misdirected host' })
+  })
+}
 
 const intervalSec = +(flagValue('--interval') ?? 900)
 // A locked database (an import's write transaction) must not kill the timer: skip the

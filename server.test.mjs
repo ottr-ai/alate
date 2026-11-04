@@ -236,6 +236,64 @@ try {
   assert.equal(r.status, 200, 'fresh bearer key accepted after same-origin rotation');
   assert.equal((await fetch(new URL('/api/state', base))).status, 200, 'GETs stay key-free on loopback');
 
+  // 2e. A rebound page resolves its own hostname to 127.0.0.1, so its Origin equals the
+  // request Host and the same-origin gate above passes. The loopback bind therefore
+  // refuses any Host header that does not name this server.
+  const boundPort = new URL(base).port;
+  const rawReq = (path, headers = {}, method = 'GET') => new Promise((resolve, reject) => {
+    const u = new URL(path, base);
+    const rq = request({ host: u.hostname, port: u.port, path: u.pathname + u.search, method, headers }, res => {
+      let b = '';
+      res.on('data', c => { b += c; });
+      res.on('end', () => resolve({ status: res.statusCode, body: b }));
+    });
+    rq.on('error', reject);
+    rq.end();
+  });
+  {
+    const evil = { host: `evil.test:${boundPort}`, origin: `http://evil.test:${boundPort}` };
+    let res = await rawReq('/api/state', evil);
+    assert.equal(res.status, 421, 'rebinding Host is refused');
+    assert.equal(JSON.parse(res.body).error, 'misdirected host', 'misdirected host error body');
+    res = await rawReq('/api/key', evil, 'POST');
+    assert.equal(res.status, 421, 'rebinding write is refused');
+    assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'key unchanged after rebinding write');
+    res = await rawReq('/health', evil);
+    assert.equal(res.status, 421, 'gate covers routes outside dashGuard');
+    res = await rawReq('/api/state', { host: `127.0.0.1.evil.test:${boundPort}` });
+    assert.equal(res.status, 421, 'loopback-suffix hostname is refused');
+    res = await rawReq('/api/state', { host: `localhost:${boundPort}` });
+    assert.equal(res.status, 200, 'localhost Host with the bound port is accepted');
+    res = await rawReq('/api/state', { host: `127.0.0.1:${boundPort}` });
+    assert.equal(res.status, 200, '127.0.0.1 Host with the bound port is accepted');
+    res = await rawReq('/api/state', { host: `[::1]:${boundPort}` });
+    assert.equal(res.status, 200, '[::1] Host with the bound port is accepted');
+    res = await rawReq('/api/key', { host: `localhost:${boundPort}`, origin: `http://localhost:${boundPort}` }, 'POST');
+    assert.equal(res.status, 200, 'allowed-host same-origin write rotates the key');
+    apiKey = JSON.parse(res.body).key;
+    assert.equal(typeof apiKey, 'string');
+    assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'rotated key persisted to config file');
+    res = await rawReq('/api/state', { host: `localhost:${Number(boundPort) + 1}` });
+    assert.equal(res.status, 421, 'Host port mismatch is refused');
+    // No Host header at all: node's HTTP parser refuses an HTTP/1.1 request without
+    // Host (400) before the app sees it; either refusal is fail-closed.
+    const rawNoHost = (headers) => new Promise((resolve, reject) => {
+      const rq = request({ host: '127.0.0.1', port: boundPort, path: '/api/state', setHost: false, headers }, resp => {
+        let b = '';
+        resp.on('data', c => { b += c; });
+        resp.on('end', () => resolve({ status: resp.statusCode, body: b }));
+      });
+      rq.on('error', reject);
+      rq.end();
+    });
+    res = await rawNoHost({});
+    assert.ok([400, 421].includes(res.status), 'missing Host header is refused');
+    res = await rawNoHost({ host: '' });
+    assert.equal(res.status, 421, 'empty Host header is refused');
+    res = await rawReq('/api/state', { host: 'not a host' });
+    assert.equal(res.status, 421, 'malformed Host header is refused');
+  }
+
   // 5. Update loop: poll lastChecked, then provision refreshes shas, then a new origin commit flips behind.
   await waitFor(async () => {
     body = await (await get('/health')).json();

@@ -85,7 +85,7 @@ sequenceDiagram
 ```
 
 - **Admin browser** — `web/app.js` (`api()` helper, login view, source form); `POST /api/login` exchanges the key for a session cookie because phones cannot set headers.
-- **Server** — `server.ts`: `provision()` materializes the snapshot, spawns each script in `SCRIPTS` and stops at the first nonzero or null exit code, so the result list holds only the scripts that ran; caps and redacts output; auth: Bearer key always, dashboard routes key-free on a loopback bind only, and a loopback write also needs a same-origin `Origin` header or a same-host `Referer` (`dashGuard`).
+- **Server** — `server.ts`: `provision()` materializes the snapshot, spawns each script in `SCRIPTS` and stops at the first nonzero or null exit code, so the result list holds only the scripts that ran; caps and redacts output; auth: Bearer key always, dashboard routes key-free on a loopback bind only, and a loopback write also needs a same-origin `Origin` header or a same-host `Referer` (`dashGuard`). A loopback bind also refuses non-loopback `Host` headers (DNS rebinding).
 - **Snapshot store** — `web/dashboard.mjs`: `importSource`, `snapshotData`, `applyFileEdit`; SQLite tables in `server.ts` and `lib/updates.mjs`.
 - **sync.mjs / install-user.mjs** — the same CLI scripts a host runs by hand; the server passes `--data <temp snapshot dir>`.
 - **Container home** — `compose.yaml` volume `home` mounted at `/root`; `state` volume holds `server-config.json` and `alate.db`.

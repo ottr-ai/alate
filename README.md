@@ -90,7 +90,7 @@ All install scripts take `--data <dir>` or `--repo <owner/name[@ref]>` (set `GH_
 | `POST /provision` | Bearer | Run `sync.mjs` and `install-user.mjs` from the stored snapshot. The run stops at the first failed script, and `results` lists only the scripts that ran. |
 | `GET /api/updates` | Bearer | One record per tracked upstream. |
 
-Dashboard routes under `/api` need no key on a loopback bind. On a loopback bind, dashboard writes also need a same-origin `Origin` header or a same-host `Referer` header (the dashboard sends them; scripts use the Bearer token). On any other bind they need the key or a login session.
+Dashboard routes under `/api` need no key on a loopback bind. On a loopback bind, dashboard writes also need a same-origin `Origin` header or a same-host `Referer` header (the dashboard sends them; scripts use the Bearer token). On a loopback bind, the server also refuses any request whose `Host` header does not name the server (`localhost`, `127.x.x.x`, `[::1]`). On any other bind they need the key or a login session.
 
 ## Security
 
@@ -99,6 +99,7 @@ Dashboard routes under `/api` need no key on a loopback bind. On a loopback bind
 - A non-loopback bind serves plain HTTP, and the session cookie carries no `Secure` flag. Put a TLS reverse proxy in front for remote access.
 - The compose file publishes the port on host loopback only (`127.0.0.1:4570:4570`).
 - The dashboard refuses to be framed (`frame-ancestors 'none'`, `X-Frame-Options: DENY`). On a loopback bind the dashboard is key-free, so a framed page could otherwise change its state with one click.
+- On a loopback bind the server refuses requests whose `Host` header does not name the server. A page at a DNS-rebound hostname sends an `Origin` that matches the request `Host`; the `Host` check stops that page from reaching the key-free dashboard.
 - Keep `/state` (server key and SQLite db) out of the image.
 
 ## Run without Docker
