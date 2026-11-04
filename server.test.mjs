@@ -1228,7 +1228,14 @@ try {
     }
     r = await postImport(JSON.stringify({ source: 'https://github.com/demo/updates.git' }));
     assert.equal(r.status, 200);
-    await waitFor(async () => (await (await authed('/api/updates')).json()).updates.find(u => u.name === 'cft-demo')?.target === '154.0.8037.92', 20_000);
+    // Both rows are recomputed by the same checker tick, but a tick can abort mid-run on a
+    // transient database lock (the import's own state write), so one row can land while the
+    // other still carries its pre-backdate values. Wait for both preconditions, then assert.
+    await waitFor(async () => {
+      const us = (await (await authed('/api/updates')).json()).updates;
+      return us.find(u => u.name === 'cft-demo')?.target === '154.0.8037.92'
+        && us.find(u => u.name === 'stale-skill')?.target === SHA.staleHead;
+    }, 20_000);
     const cft2 = (await (await authed('/api/updates')).json()).updates.find(u => u.name === 'cft-demo');
     assert.equal(cft2.publishedAt, T.seen8);
     assert.equal(cft2.qualifiesAt, plusDays(T.seen8, 7));
