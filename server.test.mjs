@@ -925,6 +925,8 @@ try {
   const b64 = s => Buffer.from(s).toString('base64');
   let relFails = false;
   let slowRel = false; // stretch the rel-demo releases request: two overlapping POSTs join one run
+  let holdNpm = false; // stall the running check at the context-mode npm request
+  let releaseNpm = null; // set once the held request arrived; call it to let the check finish
   let child2 = null; // the trigger-check server, spawned and killed inside the try
   // Resolves for an already-exited child too: a `close` listener on a dead child never fires.
   const stopServer = p => new Promise(resolve => {
@@ -985,8 +987,11 @@ try {
     }
     if (url.pathname === '/npm/fake-demo-pkg')
       return reply(200, { time: { created: T.npm90, modified: T.npm1, '2.3.3': T.npm90, '3.0.0': T.npm20, '3.1.0-beta': T.npm20, '2.9.0': T.npm1 }, versions: {} });
-    if (url.pathname === '/npm/context-mode')
-      return reply(200, { time: { '1.0.9': T.ctx60, '1.1.0': T.ctx10, '2.0.0-alpha': T.ctx3 }, versions: {} });
+    if (url.pathname === '/npm/context-mode') {
+      const body = { time: { '1.0.9': T.ctx60, '1.1.0': T.ctx10, '2.0.0-alpha': T.ctx3 }, versions: {} };
+      if (holdNpm && releaseNpm === null) { releaseNpm = () => reply(200, body); return; }
+      return reply(200, body);
+    }
     if (url.pathname === '/npm/@xynogen/pix-optimizer')
       return reply(200, { time: { '1.2.0': T.ctx60, '1.3.0': T.ctx10 }, versions: {} });
     if (url.pathname === '/npm/@xynogen/pix-skills')
@@ -1428,6 +1433,24 @@ try {
     assert.ok(checkBody.checkedAt > checkedAtRefresh, 'the route ran a check now');
     assert.equal(relHits() - hitsBefore, 1, 'overlapping checks joined one run');
     slowRel = false;
+
+    // A snapshot change during a running check is not lost: the check held at the
+    // fake read the older snapshot, and exactly one more check follows it.
+    holdNpm = true;
+    const heldCheck = fetch(new URL('/api/updates/check', base), { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` } });
+    await waitFor(async () => releaseNpm !== null, 10_000); // the check is stalled at the held npm request
+    const hitsAtHold = relHits();
+    const pinFile2 = await (await get('/api/file?path=Dockerfile')).json();
+    const moved2 = pinFile2.content.replace('ghcr.io/fake/other:2.3.3-alpine', 'ghcr.io/fake/other:3.0.0-alpine');
+    r = await putFile({ path: 'Dockerfile', content: moved2, base: pinFile2.hash, message: 'test: move the pin during a running check' });
+    assert.equal(r.status, 200, JSON.stringify(await r.json()));
+    holdNpm = false;
+    releaseNpm();
+    releaseNpm = null;
+    await heldCheck;
+    assert.equal(relHits() - hitsAtHold, 2, 'the edit during a running check queues exactly one more check');
+    await waitFor(async () => (await updatesBody()).updates.find(u => u.name === 'from-demo')?.current === '3.0.0', 20_000);
+    assert.ok(!boardNames((await updatesBody()).updates).includes('from-demo'), 'the late pin move still left the board list at once');
   } finally {
     await stopServer(child);
     if (child2) await stopServer(child2);
@@ -4163,7 +4186,8 @@ try {
         const G = mut10Spawn(['--port', '0', '--config', cfgG, '--db', join(tmp, 'state-mutG.db'), '--interval', '100000', '--update-interval', '100000'], { ALATE_TEST_NPM_BASE: npmBase });
         const { base, key } = await G.up;
         const rowsG = async () => (await (await fetch(new URL('/api/state', base), { headers: { Authorization: `Bearer ${key}` } })).json()).updates.updates;
-        // Check #1 is held open at the fake: a rapid second import must not start a second checker.
+        // Check #1 is held open at the fake: a rapid second import must not start a second
+        // checker concurrently, and the changed snapshot gets exactly one more check after it.
         // Loopback write without a key: carries the dashboard's Origin header (dashGuard).
         let [st, body] = await mut10Post(base, '/api/import', { source: fdir }, null, { origin: base });
         assert.equal(st, 200, JSON.stringify(body).slice(0, 200));
@@ -4171,7 +4195,10 @@ try {
         assert.equal(st, 200);
         await new Promise(r => setTimeout(r, 2500));
         assert.equal(npmHits, 1, 'an overlapping update check is skipped by the re-entrancy guard');
-        releaseNpm(); // let the first check finish and write its row
+        releaseNpm(); // the first check ends; the second import's snapshot queues one more
+        await waitFor(async () => npmHits === 2, 20_000);
+        await new Promise(r => setTimeout(r, 1000));
+        assert.equal(npmHits, 2, 'the queued rerun runs once, still one check at a time');
         await waitFor(async () => (await rowsG()).length === 1, 20_000);
         [st, body] = await mut10Json(base, '/api/state', { headers: { Authorization: `Bearer ${key}` } });
         assert.equal(body.updates.updates[0].repo, fdir, 'a path source reports its spec as the pin repo');

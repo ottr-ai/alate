@@ -229,14 +229,15 @@ app.post<{ Body: ConfigBody | undefined }>('/config', {
   if (path != null && (typeof path !== 'string' || !isDir(path))) return reply.code(400).send({ error: 'invalid path' })
   if (token !== undefined && typeof token !== 'string') return reply.code(400).send({ error: 'invalid token' })
   const nextToken = token === undefined ? config.token : token || null
+  let queuedCheck = false
   try {
-    selectSource((repo ?? path) as string, repo != null ? 'repo' : 'path', nextToken ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN)
+    queuedCheck = selectSource((repo ?? path) as string, repo != null ? 'repo' : 'path', nextToken ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN)
   } catch (err) {
     return clientError(reply, err)
   }
   config.token = nextToken
   saveConfig(config)
-  void updateCheck()
+  if (!queuedCheck) void updateCheckAfterChange()
   return { repo: config.repo, path: config.path, tokenSet: !!config.token }
 })
 
@@ -258,7 +259,7 @@ app.post('/provision', {
       saveConfig(config)
     }
     // An applied update leaves the list at once, not at the next timer tick.
-    if (ok) void updateCheck()
+    if (ok) void updateCheckAfterChange()
     return { ok, results }
   } finally {
     running = false
@@ -333,7 +334,7 @@ function persistDash(): void {
 // Dashboard git calls trust the stored key first, then the process environment.
 const dashToken = (): string | undefined => config.token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
 
-function selectSource(spec: string, kind?: string, token = dashToken()): void {
+function selectSource(spec: string, kind?: string, token = dashToken()): boolean {
   const next = importSource(dashState, spec, kind, token, db)
   const changed = dashState.source?.spec !== next.source.spec || dashState.source?.kind !== next.source.kind
   const newCommit = next.source.kind === 'repo' && !!next.source.importedSha && next.source.importedSha !== dashState.source?.importedSha
@@ -350,7 +351,13 @@ function selectSource(spec: string, kind?: string, token = dashToken()): void {
   persistDash()
   saveConfig(config)
   // A fresh snapshot invalidates the stored update rows at once, not at the next timer tick.
-  if (newCommit) void updateCheck()
+  // The return value tells route callers whether the check is already queued, so one
+  // snapshot change queues exactly one trigger.
+  if (newCommit) {
+    void updateCheckAfterChange()
+    return true
+  }
+  return false
 }
 
 // Periodic remote check for a repo source: refresh update state, optionally auto re-import.
@@ -374,20 +381,35 @@ function dashCheck(): void {
 
 let updateRunning = false
 let updatePromise: Promise<void> = Promise.resolve()
-// Single-flight: one checkUpdates at a time; a caller that arrives during a run
-// awaits the running one instead of starting a second. Never rejects, so the
-// fire-and-forget callers (timer, snapshot triggers) stay safe.
+let rerunNeeded = false
+// Single-flight: one checkUpdates at a time. A plain caller that arrives during a
+// run joins it; a snapshot-change caller marks the run stale (it read an older
+// snapshot), and exactly one more check follows when it ends, so a snapshot change
+// never waits for the next timer tick. The promise never rejects, so the
+// fire-and-forget callers stay safe.
 function updateCheck(): Promise<void> {
   if (updateRunning) return updatePromise
   updateRunning = true
   updatePromise = (async () => {
-    try {
-      await checkUpdates(db, { token: dashToken(), securityFastPath: config.securityFastPath, dataRepo: dashState.source ? (dashState.source.kind === 'repo' ? dashState.source.name : dashState.source.spec) : null })
-    } catch (err) {
-      console.error(`update check failed: ${redactSecrets((err as Error).message, dashToken())}`)
-    } finally { updateRunning = false }
+    for (;;) {
+      rerunNeeded = false
+      try {
+        await checkUpdates(db, { token: dashToken(), securityFastPath: config.securityFastPath, dataRepo: dashState.source ? (dashState.source.kind === 'repo' ? dashState.source.name : dashState.source.spec) : null })
+      } catch (err) {
+        console.error(`update check failed: ${redactSecrets((err as Error).message, dashToken())}`)
+      }
+      if (!rerunNeeded) break
+    }
+    updateRunning = false
   })()
   return updatePromise
+}
+
+// For the sites that just changed the snapshot (imports, edits, provisions): a
+// check that is already running read the older snapshot, so queue one more.
+function updateCheckAfterChange(): Promise<void> {
+  if (updateRunning) rerunNeeded = true
+  return updateCheck()
 }
 
 app.get('/api/state', { preHandler: dashGuard }, async () => ({ ...dashState, updates: loadUpdates(db) }))
@@ -438,12 +460,13 @@ app.post<{ Body: ImportBody | undefined }>('/api/import', { bodyLimit: 64 * 1024
   if (running) return reply.code(409).send({ error: 'provision already running' })
   if (typeof body.source !== 'string' || body.source === '') return reply.code(400).send({ error: 'source required' })
   if (body.kind !== undefined && body.kind !== 'path' && body.kind !== 'repo') return reply.code(400).send({ error: 'kind must be "path" or "repo"' })
+  let queuedCheck = false
   try {
-    selectSource(body.source, body.kind as string | undefined)
+    queuedCheck = selectSource(body.source, body.kind as string | undefined)
   } catch (err) {
     return clientError(reply, err)
   }
-  void updateCheck()
+  if (!queuedCheck) void updateCheckAfterChange()
   return { ok: true, state: dashState }
 })
 
@@ -479,7 +502,7 @@ async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) 
       : null
     persistDash()
     // A pushed edit changed the snapshot; the stored update rows follow at once.
-    if (dashState.source.kind === 'repo') void updateCheck()
+    if (dashState.source.kind === 'repo') void updateCheckAfterChange()
     return {
       ok: true,
       commit: res.commit,

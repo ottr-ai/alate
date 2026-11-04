@@ -17,10 +17,17 @@ once.
   the same `{checkedAt, updates}` shape as GET `/api/updates`. Same Bearer-key
   auth as GET `/api/updates`: a missing or wrong key is 401, another method on
   the route is 405.
-- One check runs at a time (`updateRunning`). A caller that arrives during a
-  run waits for the running check and never starts a second one. A failed
-  check logs its error and keeps the previous rows; the returned promise never
-  rejects, so fire-and-forget callers (the timer, the triggers) stay safe.
+- One snapshot change queues one trigger: `selectSource` reports whether it
+  queued the check for a new repo commit, and `/config` plus `/api/import` fire
+  their own trigger only when it did not (path sources have no commit). Two
+  triggers for one change never queue a second rerun.
+- One check runs at a time (`updateRunning`). A snapshot-change caller that
+  arrives during a run marks the run stale: the running check read an older
+  snapshot, so exactly one more check follows when it ends. Plain callers (the
+  timer, POST `/api/updates/check`) join the running check without queueing a
+  rerun. A failed check logs its error and keeps the previous rows; the returned
+  promise never rejects, so fire-and-forget callers (the timer, the triggers)
+  stay safe.
 - The 24 h timer stays the release-refresh trigger. The new triggers only
   rewrite rows for the snapshot the server already stores.
 
@@ -32,6 +39,9 @@ once.
   path, the auto-update refresh path, and provision.
 - `POST /api/updates/check`: 401 without or with a wrong key; 200 with the
   key; two overlapping POSTs run one check.
+- A snapshot change that lands while a check runs queues exactly one more
+  check: a pushed edit during a held check reruns once, and a rapid second
+  import stays one-at-a-time and reruns once.
 - GET on the route is 405.
 
 ## Provider payload
