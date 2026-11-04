@@ -140,6 +140,13 @@ async function keyGuard(req: FastifyRequest, reply: FastifyReply): Promise<void 
   if (!authorized(req)) return reply.code(401).send({ error: 'unauthorized' })
 }
 
+// Dashboard handlers map a thrown Error to its client-safe message and optional status,
+// so the response shape cannot drift between them.
+function clientError(reply: FastifyReply, err: unknown): FastifyReply {
+  const e = err as { status?: number; message?: string } // dashboard.mjs throws Error with a client-safe message and .status
+  return reply.code(e.status ?? 500).send({ error: e.message })
+}
+
 // Dashboard session cookie: a hash of the provisioning key, so the key never
 // reaches the browser and a rotation (POST /api/key) ends every session at once.
 const sessionToken = (): string => createHash('sha256').update(`alate-session:${config.apiKey ?? ''}`).digest('hex')
@@ -225,8 +232,7 @@ app.post<{ Body: ConfigBody | undefined }>('/config', {
   try {
     selectSource((repo ?? path) as string, repo != null ? 'repo' : 'path', nextToken ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN)
   } catch (err) {
-    const e = err as { status?: number; message: string }
-    return reply.code(e.status ?? 500).send({ error: e.message })
+    return clientError(reply, err)
   }
   config.token = nextToken
   saveConfig(config)
@@ -408,8 +414,7 @@ app.post<{ Body: ImportBody | undefined }>('/api/import', { bodyLimit: 64 * 1024
   try {
     selectSource(body.source, body.kind as string | undefined)
   } catch (err) {
-    const e = err as { status?: number; message?: string } // dashboard.mjs throws Error with a client-safe message and .status
-    return reply.code(e.status ?? 500).send({ error: e.message })
+    return clientError(reply, err)
   }
   void updateCheck()
   return { ok: true, state: dashState }
@@ -428,8 +433,7 @@ app.get('/api/file', { preHandler: dashGuard }, async (req, reply) => {
     if (!file) return reply.code(404).send({ error: `no stored file at ${rel.slice(0, 200)}` })
     return file
   } catch (err) {
-    const e = err as { status?: number; message?: string } // dashboard.mjs throws Error with a client-safe message and .status
-    return reply.code(e.status ?? 500).send({ error: e.message })
+    return clientError(reply, err)
   }
 })
 
@@ -455,8 +459,7 @@ async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) 
       state: { ...dashState, updates: loadUpdates(db) },
     }
   } catch (err) {
-    const e = err as { status?: number; message?: string }
-    return reply.code(e.status ?? 500).send({ error: e.message })
+    return clientError(reply, err)
   } finally { writing = false }
 }
 
