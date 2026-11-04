@@ -7,7 +7,7 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
-import { assertSourceInside, checkDestination, parseArgs, resolveDataDir, withoutDeploymentBlocks, yamlProblems } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, normText, parseArgs, resolveDataDir, withoutDeploymentBlocks, yamlProblems } from './lib/data.mjs';
 
 // --repo is a valued option so resolveDataDir can refuse cloning with the capture-specific
 // message; capture takes no flags and no positional arguments.
@@ -266,8 +266,7 @@ if (problems.length) {
   process.exit(1);
 }
 
-// Repos use autocrlf; compare modulo CRLF so checkouts and machine copies never churn each other.
-const norm = b => b.toString('latin1').replaceAll('\r\n', '\n');
+// Repos use autocrlf: the comparison shares the CRLF normalize rule with the fingerprints.
 try {
   // Stale names are collected and the output tree validated BEFORE any write, so a
   // stale-tree error refuses the whole capture and leaves the prior snapshot untouched.
@@ -282,7 +281,7 @@ try {
     const to = join(data.dir, 'user', rel);
     checkDestination(data.dir, to);
     const old = existsSync(to) ? readFileSync(to) : null;
-    if (old && (old.equals(bytes) || norm(old) === norm(bytes))) { unchanged++; continue; }
+    if (old && (old.equals(bytes) || normText(old) === normText(bytes))) { unchanged++; continue; }
     staged.push([rel, to, bytes, old]);
   }
   for (const [rel, to, bytes, old] of staged) {

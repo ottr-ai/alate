@@ -5,7 +5,7 @@
 // need to know about this repo; the snapshots here are refreshed copies, never hand-edited.
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
-import { parseArgs, resolveDataDir, checkDestination, assertSourceInside, safeRel } from './lib/data.mjs';
+import { parseArgs, resolveDataDir, checkDestination, assertSourceInside, safeRel, normText } from './lib/data.mjs';
 
 const args = parseArgs(process.argv.slice(2), ['--root', '--data', '--repo']);
 const data = resolveDataDir(args, { allowClone: false });
@@ -40,9 +40,6 @@ const snapFiles = dir => {
   if (existsSync(dir)) walk(dir);
   return out;
 };
-// Repos use autocrlf; compare modulo CRLF so checkouts and project copies never churn each other.
-const norm = b => b.toString('latin1').replaceAll('\r\n', '\n');
-
 const problems = [];
 const plan = [];
 const notes = [];
@@ -90,7 +87,7 @@ if (problems.length) {
 // write fails; rerun after fixing the cause. Upgrade to staging+rename if atomicity matters.
 let added = 0, updated = 0, unchanged = 0;
 for (const { to, bytes, old } of plan) {
-  if (old && (old.equals(bytes) || norm(old) === norm(bytes))) { unchanged++; continue; }
+  if (old && (old.equals(bytes) || normText(old) === normText(bytes))) { unchanged++; continue; }
   mkdirSync(dirname(to), { recursive: true });
   writeFileSync(to, bytes);
   if (old) { updated++; console.log(`updated  ${relative(data.dir, to)}`); }
