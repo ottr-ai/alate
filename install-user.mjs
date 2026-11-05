@@ -23,10 +23,11 @@
 // repo is their only source, so a changed list replaces the machine copy without --force, and a
 // list it no longer ships is deleted. tools.json, env.txt and requirements.txt are validated before any write.
 import { existsSync, lstatSync, mkdirSync, readlinkSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, availableParallelism } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { assertSourceInside, checkDestination, cleanupData, fingerprint, forTarget, nextLayerCounter, parseArgs, remapHomePaths, resolveDataDir, ruleProblems, sameContent, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend } from './lib/data.mjs';
 
 const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home'], ['--force', '--skip-plugins', '--layer']);
@@ -87,10 +88,90 @@ const collectSkillDirs = dir => {
 };
 
 // Fail-closed gate: every skill snapshot is scanned before anything lands on disk (or, in
-// layer mode, before the layer goes live). The scanner's own report goes straight to this
-// run's output (stdio: 'inherit'); any non-zero exit — findings (1) or a scanner error (2) —
-// refuses the whole run with a non-zero exit.
-const runScan = skillDirs => {
+// layer mode, before the layer goes live). Each scan's report is buffered and printed as one
+// block, so parallel scans never interleave lines; any non-zero exit — findings (1) or a
+// scanner error (2) — refuses the whole run with a non-zero exit, and the refusal names the
+// skill folder on its own line so the tail of a deploy log shows it. A scan costs ~15 s per
+// skill, which made a 57-skill deploy seed wait ~14 minutes even when one file changed, so
+// the gate re-scans only what changed: it hashes the exact bytes of each skill folder itself
+// (never a hash the data repo ships — .skill-lock.json is data, not proof), keys a verdict on
+// that hash plus the scanner build (pin and probed version) and the scan arguments, and runs
+// the remaining scans concurrently, at most min(8, availableParallelism()) at a time. Only
+// passes are recorded, in the target home's .alate/skillspector-pass.json (temp file, then
+// atomic rename): a rejection is never cached, and a changed skill, a changed scanner, or an
+// unreadable cache file always means a full rescan. A lost update between two installs that
+// share a home only costs a rescan.
+const SCAN_ARGS = ['--no-llm', '--fail-on-findings', '--use-shipped-baseline'];
+const scanCachePath = join(home, '.alate', 'skillspector-pass.json');
+
+const hashSkillDir = dir => {
+  const hash = createHash('sha256');
+  const visit = path => {
+    for (const entry of readdirSync(path, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const child = join(path, entry.name);
+      const rel = relative(dir, child);
+      if (entry.isDirectory()) {
+        hash.update(`d\0${rel}\0`);
+        visit(child);
+      } else if (entry.isSymbolicLink()) {
+        hash.update(`l\0${rel}\0${readlinkSync(child)}\0`);
+      } else {
+        hash.update(`f\0${rel}\0`);
+        hash.update(readFileSync(child));
+      }
+    }
+  };
+  visit(dir);
+  return hash.digest('hex');
+};
+
+// A missing file is just the first run; unreadable or malformed means prove nothing: scan
+// everything and rewrite the file fresh.
+const readPasses = () => {
+  let raw = null;
+  try {
+    raw = readFileSync(scanCachePath, 'utf8');
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.log(`${scanCachePath} is unreadable (${err.code ?? err.message}); scanning every skill snapshot.`);
+    return {};
+  }
+  try {
+    const passes = JSON.parse(raw);
+    if (passes && typeof passes === 'object' && !Array.isArray(passes)) return passes;
+  } catch { /* malformed */ }
+  console.log(`${scanCachePath} is malformed; scanning every skill snapshot.`);
+  return {};
+};
+
+const recordPass = passes => {
+  mkdirSync(dirname(scanCachePath), { recursive: true });
+  const tmp = `${scanCachePath}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, `${JSON.stringify(passes, null, 2)}\n`);
+    renameSync(tmp, scanCachePath);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
+};
+
+// The pinned build's verdict for these exact bytes, printed as one block so a tail of the
+// output always shows a whole report.
+const scanOne = (scanner, dir, total) => new Promise((resolve, reject) => {
+  const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const out = [], errOut = [];
+  child.stdout.on('data', chunk => out.push(chunk));
+  child.stderr.on('data', chunk => errOut.push(chunk));
+  child.on('error', err => reject(new Error(`skillspector could not run (${err.code ?? err.message}); refusing to install ${total} skill snapshot(s).`)));
+  child.on('close', (code, signal) => {
+    const report = `${Buffer.concat(out).toString('utf8')}${Buffer.concat(errOut).toString('utf8')}`.trimEnd();
+    console.log(`--- SkillSpector report: ${dir}${report ? `\n${report}` : ''}`);
+    if (code === 0) resolve();
+    else reject(new Error(`SkillSpector rejected ${dir} (exit ${code ?? `signal ${signal}`}); nothing was installed. Review the report above, then fix or drop the skill in the data repo.`));
+  });
+});
+
+const runScan = async skillDirs => {
   // The pin is enforced, not just documented: v2 baseline fingerprints bind to scanner_version,
   // so a scanner that is not the pinned build silently suppresses nothing and every accepted
   // finding resurfaces as a fresh rejection (the 2026-10-31 Windows host failure). Prefer the
@@ -102,13 +183,14 @@ const runScan = skillDirs => {
   );
   const pinnedVersion = `SkillSpector v${SKILLSPECTOR_REF.slice(1)}`;
   let scanner = null;
+  let reported = null;
   for (const candidate of [venvBin, 'skillspector']) {
     const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
     if (probe.error?.code === 'ENOENT') continue;
     if (probe.error) {
       throw new Error(`skillspector could not run (${probe.error.code ?? probe.error.message}); refusing to install ${skillDirs.length} skill snapshot(s).`);
     }
-    const reported = String(probe.stdout ?? '').trim();
+    reported = String(probe.stdout ?? '').trim();
     // A candidate that cannot answer the probe is broken, not wrong: a Python upgrade leaves
     // the venv's packages in lib/python3.x while bin/python3 points at the new interpreter,
     // so its entry point dies before printing a version (the 2026-11-01 ottr-alate-1 failure
@@ -125,15 +207,32 @@ const runScan = skillDirs => {
     const venvRoot = join(venvBin, '..', '..');
     throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s). The venv at ${venvRoot} is broken (a Python upgrade makes an old venv unusable) or missing: rebuild it with rm -rf "${venvRoot}" && python3 -m venv "${venvRoot}" && "${join(venvRoot, 'bin', 'pip')}" install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}", or install the pinned build (Python 3.12+), then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
   }
-  console.log(`Scanning ${skillDirs.length} skill snapshot(s) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied)...`);
-  for (const dir of skillDirs) {
-    const scan = spawnSync(scanner, ['scan', dir, '--no-llm', '--fail-on-findings', '--use-shipped-baseline'], { stdio: 'inherit' });
-    if (scan.error) {
-      throw new Error(`skillspector could not run (${scan.error.code ?? scan.error.message}); refusing to install ${skillDirs.length} skill snapshot(s).`);
+  const passes = readPasses();
+  const keys = new Map(skillDirs.map(dir => [dir, `${hashSkillDir(dir)} ${SKILLSPECTOR_REF} ${reported} scan ${SCAN_ARGS.join(' ')}`]));
+  const pending = skillDirs.filter(dir => passes[keys.get(dir)] !== true);
+  console.log(`Scanning ${pending.length} of ${skillDirs.length} skill snapshot(s) (${skillDirs.length - pending.length} cached) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied)...`);
+  if (!pending.length) return;
+  // One rejection or scanner error stops the install (nothing is written past this gate):
+  // stop scheduling, let the in-flight scans finish, then refuse with the first failure.
+  const failures = [];
+  let next = 0;
+  const worker = async () => {
+    while (!failures.length && next < pending.length) {
+      const dir = pending[next++];
+      try {
+        await scanOne(scanner, dir, skillDirs.length);
+        passes[keys.get(dir)] = true;
+        recordPass(passes);
+      } catch (err) {
+        if (!failures.length) failures.push(err);
+      }
     }
-    if (scan.status !== 0) {
-      throw new Error(`SkillSpector rejected ${dir} (exit ${scan.status ?? `signal ${scan.signal}`}); nothing was installed. Review the report above, then fix or drop the skill in the data repo.`);
-    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, availableParallelism(), pending.length) }, worker));
+  if (failures.length) {
+    // Stdout too: the deploy log's tail must end on the line naming the rejected skill.
+    console.log(failures[0].message);
+    throw failures[0];
   }
 };
 
@@ -412,7 +511,7 @@ try {
   // switch). Skills already recorded as unchanged are scanned again too: a copy a pre-gate
   // alate installed was never scanned, and the manifest cannot prove it was.
   const skillDirs = collectSkillDirs(userRoot);
-  if (!layerMode && skillDirs.length) runScan(skillDirs);
+  if (!layerMode && skillDirs.length) await runScan(skillDirs);
 
   // Layer mode: everything from here to the switch is disposable. Any failure before the
   // rename deletes the fresh layer and leaves current — and with it every running turn —
@@ -453,7 +552,7 @@ try {
 
     if (layerMode) {
       const layerSkillDirs = collectSkillDirs(newLayerDir);
-      if (layerSkillDirs.length) runScan(layerSkillDirs);
+      if (layerSkillDirs.length) await runScan(layerSkillDirs);
     }
 
     if (!skipPlugins && existsSync(join(userRoot, 'omp', 'plugins', 'package.json'))) {

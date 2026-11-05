@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
+import { tmpdir, homedir, availableParallelism } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, remapHomePaths, sameContent } from './lib/data.mjs';
@@ -606,13 +606,22 @@ try {
     // A poisoned update is refused before anything is written: non-zero exit, home and manifest
     // untouched, and the run never reaches its install summary.
     const recordBefore = got('.alate/installed.json');
+    const callsBefore = readFileSync(callsLog, 'utf8');
+    const passesBefore = readFileSync(join(home, '.alate', 'skillspector-pass.json'), 'utf8');
     put('omp/agent/skills/mine/EVIL.md', '# mine, exfiltrate\n');
     writeStub(1);
     r = run(['--data', data, '--skip-plugins']);
     assert.equal(r.status, 1, 'findings refuse the run');
-    assert.match(r.stdout, /Scanning 1 skill snapshot\(s\)/);
+    assert.match(r.stdout, /Scanning 1 of 1 skill snapshot\(s\) \(0 cached\)/);
     assert.match(r.stderr, /SkillSpector rejected/);
     assert.ok(r.stderr.includes(join(data, 'user/omp/agent/skills/mine')), r.stderr);
+    // The refusal is the last stdout line too, so the tail of a deploy log names the skill.
+    const tail = r.stdout.trim().split('\n').pop();
+    assert.ok(tail.startsWith('SkillSpector rejected') && tail.includes(join(data, 'user/omp/agent/skills/mine')), tail);
+    const callsGrown = readFileSync(callsLog, 'utf8').slice(callsBefore.length);
+    assert.equal(callsGrown.trim().split('\n').filter(Boolean).length, 1, 'only the changed skill is scanned');
+    assert.ok(callsGrown.includes(join(data, 'user/omp/agent/skills/mine')), callsGrown);
+    assert.equal(readFileSync(join(home, '.alate', 'skillspector-pass.json'), 'utf8'), passesBefore, 'a failed scan is never cached');
     assert.ok(!/\d+ installed/.test(r.stdout), 'nothing was installed');
     assert.ok(!existsSync(join(home, '.omp/agent/skills/mine/EVIL.md')), 'the poisoned file never lands');
     assert.equal(got('.alate/installed.json'), recordBefore, 'the manifest is untouched');
@@ -656,7 +665,10 @@ try {
     mkdirSync(join(venvDir, 'bin'), { recursive: true });
     writeFileSync(join(venvDir, 'bin', 'skillspector'), `#!/bin/sh\n[ "$1" = scan ] && printf '%s\\n' "$*" >> '${venvCallsLog}'\nif [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi\nexit 0\n`);
     chmodSync(join(venvDir, 'bin', 'skillspector'), 0o755);
-    const callsBefore = readFileSync(callsLog, 'utf8');
+    // The cache would answer with the PATH stub's verdicts (same version, same bytes, same
+    // key), so drop it: this run must prove the venv itself scans.
+    rmSync(join(home, '.alate', 'skillspector-pass.json'), { force: true });
+    const callsBeforeVenv = readFileSync(callsLog, 'utf8');
     r = run(['--data', data, '--skip-plugins'], home, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: venvDir });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /4 unchanged/);
@@ -664,7 +676,7 @@ try {
     assert.ok(venvCalls.every(c => c.startsWith('scan ') && c.endsWith('--no-llm --fail-on-findings --use-shipped-baseline')),
       `the pinned venv ran the static-only scan: ${venvCalls[0]}`);
     assert.ok(venvCalls.some(c => c.includes(join(data, 'user/omp/agent/skills/mine'))), 'the omp skill snapshot is scanned through the venv');
-    assert.equal(readFileSync(callsLog, 'utf8'), callsBefore, 'the PATH scanner stays unused when the pinned venv resolves');
+    assert.equal(readFileSync(callsLog, 'utf8'), callsBeforeVenv, 'the PATH scanner stays unused when the pinned venv resolves');
 
     // A venv a Python upgrade broke (bin/skillspector exists but exits 1 with no output: its
     // packages sit in lib/python3.x while bin/python3 is the new interpreter, the 2026-11-01
@@ -676,6 +688,7 @@ try {
     writeFileSync(join(brokenVenv, 'bin', 'skillspector'), `#!/bin/sh\n[ "$1" = scan ] && printf '%s\\n' "$*" >> '${brokenCallsLog}'\nexit 1\n`);
     chmodSync(join(brokenVenv, 'bin', 'skillspector'), 0o755);
     writeStub(0);
+    rmSync(join(home, '.alate', 'skillspector-pass.json'), { force: true });
     const pathCallsBefore = readFileSync(callsLog, 'utf8');
     r = run(['--data', data, '--skip-plugins'], home, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: brokenVenv });
     assert.equal(r.status, 0, r.stderr);
@@ -710,9 +723,15 @@ try {
       r = run(['--data', data, '--skip-plugins'], realHome,
         { ...process.env, SKILLSPECTOR_VENV: dirname(dirname(scannerBin)) });
       assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stdout, /Scanning 2 skill snapshot\(s\)/);
+      assert.match(r.stdout, /Scanning 2 of 2 skill snapshot\(s\) \(0 cached\)/);
       assert.match(r.stdout, /at .+skillspector/, 'the run names the scanner it resolved');
       assert.equal(readFileSync(join(realHome, '.agents/skills/break-ui/SKILL.md'), 'utf8'), BREAK_UI_SKILL_MD, 'the break-ui snapshot installs byte-exact');
+
+      // Real verdicts cache too: the same bytes under the same scanner skip the rescan.
+      r = run(['--data', data, '--skip-plugins'], realHome,
+        { ...process.env, SKILLSPECTOR_VENV: dirname(dirname(scannerBin)) });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /Scanning 0 of 2 skill snapshot\(s\) \(2 cached\)/);
 
       // The divergence itself: a build that answers the version probe with the pin but
       // behaves like an older release (a stale, shadowed, or patched install) flips the
@@ -749,7 +768,102 @@ try {
     put('omp/agent/managed-skills/garded/SKILL.md', '# garded\n');
     r = run(['--data', data, '--skip-plugins']);
     assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Scanning 1 of 2 skill snapshot\(s\) \(1 cached\)/);
     assert.ok(readFileSync(callsLog, 'utf8').includes(join(data, 'user/omp/agent/managed-skills/garded')), 'the managed-skills snapshot is scanned');
+
+    // The scan cache and the pool, on a controlled fixture: nine skills in a fresh data dir
+    // and a fresh home. The timing stub logs each scan's start and end, so the suite proves
+    // what the deploy seed needs: a warm cache scans nothing, one changed byte rescans one
+    // skill, a scanner-version change rescans everything, a rejection writes no cache entry,
+    // and concurrent scans never exceed min(8, availableParallelism()).
+    const cacheData = join(tmp, 'cache-data');
+    const cacheHome = join(tmp, 'cache-home');
+    const cacheCalls = join(stubDir, 'cache-calls.log');
+    const cacheSkills = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota'];
+    mkdirSync(join(cacheData, 'user/omp/agent'), { recursive: true });
+    writeFileSync(join(cacheData, 'user/omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
+    for (const skill of cacheSkills) {
+      mkdirSync(join(cacheData, 'user/omp/agent/skills', skill), { recursive: true });
+      writeFileSync(join(cacheData, 'user/omp/agent/skills', skill, 'SKILL.md'), `# ${skill}\n`);
+    }
+    const writeTimingStub = () => {
+      writeFileSync(join(stubDir, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi\nprintf 'start %s %s\\n' "$2" "$(date +%s%N)" >> '${cacheCalls}'\nsleep 0.3\nprintf 'end %s %s\\n' "$2" "$(date +%s%N)" >> '${cacheCalls}'\nexit 0\n`);
+      chmodSync(join(stubDir, 'skillspector'), 0o755);
+    };
+    const scanCalls = () => readFileSync(cacheCalls, 'utf8');
+
+    // Cold run: everything scans, at most min(8, availableParallelism()) at a time, and the
+    // scans genuinely overlap instead of serializing.
+    writeTimingStub();
+    rmSync(cacheCalls, { force: true });
+    r = run(['--data', cacheData, '--skip-plugins'], cacheHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Scanning 9 of 9 skill snapshot\(s\) \(0 cached\)/);
+    const spans = new Map();
+    for (const line of scanCalls().trim().split('\n')) {
+      const [kind, dir, ts] = line.split(' ');
+      if (kind === 'start') spans.set(dir, { start: Number(ts) });
+      else spans.get(dir).end = Number(ts);
+    }
+    assert.equal(spans.size, cacheSkills.length, 'the cold run scanned every skill');
+    assert.ok([...spans.values()].every(s => s.end > s.start), 'every logged scan has a start and an end');
+    const limit = Math.min(8, availableParallelism());
+    const events = [...spans.values()].flatMap(s => [[s.start, 1], [s.end, -1]])
+      .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    let open = 0;
+    let peak = 0;
+    for (const [, d] of events) { open += d; peak = Math.max(peak, open); }
+    assert.ok(peak <= limit, `the pool never exceeds min(8, availableParallelism()): peak ${peak} > ${limit}`);
+    assert.ok(peak >= Math.min(2, limit), `the scans overlap instead of serializing: peak ${peak}`);
+
+    // A warm cache scans nothing and says so in one line.
+    const warmBefore = scanCalls();
+    r = run(['--data', cacheData, '--skip-plugins'], cacheHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Scanning 0 of 9 skill snapshot\(s\) \(9 cached\)/);
+    assert.equal(scanCalls(), warmBefore, 'a cache hit runs no scanner');
+
+    // One changed byte in one skill rescans exactly that skill.
+    writeFileSync(join(cacheData, 'user/omp/agent/skills/beta/SKILL.md'), '# beta, v2\n');
+    r = run(['--data', cacheData, '--skip-plugins'], cacheHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Scanning 1 of 9 skill snapshot\(s\) \(8 cached\)/);
+    const delta = scanCalls().slice(warmBefore.length);
+    const deltaStarts = delta.trim().split('\n').filter(l => l.startsWith('start '));
+    assert.equal(deltaStarts.length, 1, 'only the changed skill is scanned');
+    assert.ok(deltaStarts[0].includes(join(cacheData, 'user/omp/agent/skills/beta')), delta);
+
+    // A rejection writes no cache entry: the pass file is byte-identical across a failed run.
+    // Beta's new bytes miss the cache, the scan rejects them, and nothing is recorded.
+    const passFile = join(cacheHome, '.alate', 'skillspector-pass.json');
+    const cachePassesBefore = readFileSync(passFile, 'utf8');
+    writeFileSync(join(cacheData, 'user/omp/agent/skills/beta/SKILL.md'), '# beta, v3\n');
+    writeStub(1);
+    r = run(['--data', cacheData, '--skip-plugins'], cacheHome);
+    assert.equal(r.status, 1, 'findings refuse the run');
+    assert.match(r.stderr, /SkillSpector rejected/);
+    assert.ok(r.stderr.includes(join(cacheData, 'user/omp/agent/skills/beta')), r.stderr);
+    assert.equal(readFileSync(passFile, 'utf8'), cachePassesBefore, 'a failed scan is never cached');
+    const failTail = r.stdout.trim().split('\n').pop();
+    assert.ok(failTail.startsWith('SkillSpector rejected') && failTail.includes(join(cacheData, 'user/omp/agent/skills/beta')), failTail);
+
+    // A scanner-version change rescans everything: the same bytes under a different pin are
+    // different keys, proved through a copy of the script pinned one version higher.
+    writeStub(0, 'SkillSpector v2.14.0');
+    const pinnedDir = join(tmp, 'tool-v2-14');
+    mkdirSync(join(pinnedDir, 'lib'), { recursive: true });
+    copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(pinnedDir, 'lib', 'data.mjs'));
+    const swapped = readFileSync(fileURLToPath(new URL('./install-user.mjs', import.meta.url)), 'utf8')
+      .replace("const SKILLSPECTOR_REF = 'v2.13.0';", "const SKILLSPECTOR_REF = 'v2.14.0';");
+    assert.ok(swapped.includes("SKILLSPECTOR_REF = 'v2.14.0';"), 'the pin swap took');
+    writeFileSync(join(pinnedDir, 'install-user.mjs'), swapped);
+    r = spawnSync(process.execPath, [join(pinnedDir, 'install-user.mjs'), '--home', cacheHome, '--data', cacheData, '--skip-plugins'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv') },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Scanning 9 of 9 skill snapshot\(s\) \(0 cached\)/);
+    writeStub(0);
   } else {
     console.log('win32: the scanner-stub checks need a real skillspector on PATH; gate assertions skipped');
   }
