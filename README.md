@@ -86,7 +86,7 @@ All install scripts take `--data <dir>` or `--repo <owner/name[@ref]>` (set `GH_
 
 | Route | Auth | Behavior |
 | --- | --- | --- |
-| `GET /health` | none | Server, source, and update status. |
+| `GET /health` | none | Server, source, update, and layer-mode status. |
 | `POST /api/login` | none | `{"key": "<app key>"}` sets a session cookie for the dashboard. |
 | `POST /config` | Bearer | Import `{"repo": "owner/name"}` or `{"path": "<dir>"}`. |
 | `POST /provision` | Bearer | Run `sync.mjs` and `install-user.mjs` from the stored snapshot. The run stops at the first failed script, and `results` lists only the scripts that ran. |

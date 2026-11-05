@@ -140,6 +140,9 @@ const serverEnv = { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, TMPDIR:
 delete serverEnv.PI_CODING_AGENT_DIR;
 // ALATE_API_KEY would seed the first-start key of every fresh-config server this suite boots.
 delete serverEnv.ALATE_API_KEY;
+// ALATE_LAYER would flip the /health layers flag this suite asserts on; the true case
+// spawns its own server with the flag set.
+delete serverEnv.ALATE_LAYER;
 // Every server this suite starts dies with it. A failed assertion (a killed mutant) exits the
 // suite early; an untracked server would outlive it forever and hold the mutation runner's pipes.
 const servers = new Set();
@@ -218,7 +221,25 @@ try {
   assert.equal(r.status, 200);
   body = await r.json();
   assert.equal(body.apiKeySet, true);
+  assert.equal(body.layers, false, 'health reports layers false without ALATE_LAYER');
   assert.ok(!JSON.stringify(body).includes('alate-test-token-9f2c'), 'no token in /health');
+  // The layers flag is the provisioning contract with Ottr: the board drops its idle
+  // wait only when the health body carries layers: true (specs/agent-layer-switch.md).
+  {
+    const layerChild = spawnServer(['--port', '0', '--config', join(tmp, 'server-config-layers.json')], { ...serverEnv, ALATE_LAYER: '1' });
+    const layerBase = await new Promise((resolve, reject) => {
+      let buf = '';
+      layerChild.stdout.on('data', chunk => {
+        buf += chunk;
+        const line = /alate server on (http:\/\/127\.0\.0\.1:\d+)\n/.exec(buf);
+        if (line) resolve(line[1]);
+      });
+      layerChild.once('exit', code => reject(new Error(`layer-mode server exited early (${code})`)));
+      setTimeout(() => reject(new Error('layer-mode server did not start')), 10_000).unref();
+    });
+    const layerBody = await (await fetch(new URL('/health', layerBase))).json();
+    assert.equal(layerBody.layers, true, 'health reports layers true with ALATE_LAYER=1');
+  }
   const onDisk = readFileSync(config, 'utf8');
   assert.ok(onDisk.includes('alate-test-token-9f2c'), 'token persisted in config file');
   if (process.platform !== 'win32') assert.equal(statSync(config).mode & 0o777, 0o600, 'config file mode 0600');

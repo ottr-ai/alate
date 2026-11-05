@@ -202,6 +202,9 @@ app.setNotFoundHandler((req, reply) => {
 app.get('/health', async () => ({
   ok: true,
   running,
+  // Ottr's provisioning gate reads this flag: it skips its idle wait only when it
+  // matches the layer mode the spawned install-user.mjs inherits (ALATE_LAYER=1).
+  layers: process.env.ALATE_LAYER === '1',
   apiKeySet: !!config.apiKey,
   repo: config.repo,
   path: config.path,

@@ -146,6 +146,10 @@ them at turn end.
   passes its environment to the scripts it spawns, so compose turns layer mode on without a
   server change.
 - `compose.yaml` sets `ALATE_LAYER=1` on the `alate` service.
+- `GET /health` reports layer mode in its body: `layers` is `true` only when
+  `ALATE_LAYER=1` is set in the server environment, `false` otherwise. The field is the
+  contract with Ottr: the board provisions without its idle wait only when the health
+  body carries `layers: true` (see Ottr's `docs/specs/agent-layer-switch.md`).
 - The server's provision pipeline is unchanged: `sync.mjs` still installs the data-root
   rules into the real home (the fallback for runners that do not pin), and
   `install-user.mjs` additionally builds and switches the layer.
