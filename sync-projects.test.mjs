@@ -88,6 +88,14 @@ try {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(snap('beta', 'scripts/tool.mjs'), '// helper v2\n', 're-listing an extra resumes refreshing it');
 
+  // safeRel pins: separator normalization, and every refusal with its exact label prefix.
+  assert.equal(safeRel('a\\b.txt', 'L'), 'a/b.txt', 'backslashes normalize to /');
+  assert.equal(safeRel('a b:c/d.txt', 'L'), 'a b:c/d.txt', 'a drive-like pair past the start is plain text');
+  assert.throws(() => safeRel('', 'L'), e => e.message === 'L: empty path', 'empty paths are refused');
+  assert.throws(() => safeRel('C:\\x', 'L'), e => e.message === 'L: absolute path C:\\x', 'drive paths are refused');
+  assert.throws(() => safeRel('a//', 'L'), e => e.message === 'L: invalid segment in a//', 'a trailing double slash is a segment problem, not an absolute path');
+  assert.throws(() => safeRel('a/./b', 'L'), e => e.message === 'L: invalid segment in a/./b', 'dot segments are refused');
+
   // Property check (fuzz tier via forAll in lib/data.mjs): safeRel accepts exactly the
   // relative manifest paths, keeps every accepted result inside the root, and is
   // idempotent; every refusal names one of its three documented reasons.

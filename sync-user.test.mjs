@@ -1,6 +1,7 @@
 // Self-check for sync-user.mjs: node sync-user.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createServer } from 'node:net';
 import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -251,6 +252,98 @@ try {
     'the aliased mcp.json copy is gated like the canonical one');
   rmSync(join(home, '.agents/skills/leaked-mcp.json'));
   put('.omp/agent/mcp.json', '{}\n');
+
+  // An item root that links OUTSIDE the home refuses before the anchor check: the shared
+  // source guard reports its own refusal, and the catch prefixes the item to the message.
+  const outside = join(tmp, 'outside');
+  mkdirSync(outside);
+  const extensions = join(home, '.omp/agent/extensions');
+  rmSync(extensions, { recursive: true });
+  symlinkSync(outside, extensions);
+  r = run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(r.stderr.includes(`~/.omp/agent/extensions: Source ${extensions} is outside ${home}`), r.stderr);
+  rmSync(extensions);
+  mkdirSync(extensions, { recursive: true });
+  writeFileSync(join(extensions, 'mine.ts'), 'export default {};\n');
+
+  // A link to a path inside the home but outside every item root (~/.omp/oauth is
+  // deliberately not an item) passes the source guard and still refuses on the anchor.
+  mkdirSync(join(home, '.omp/oauth'));
+  rmSync(extensions, { recursive: true });
+  symlinkSync(join(home, '.omp/oauth'), extensions);
+  r = run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(r.stderr.includes('~/.omp/agent/extensions: resolves outside the allowlisted capture roots through a link; fix or remove the link'), r.stderr);
+  rmSync(extensions);
+  mkdirSync(extensions, { recursive: true });
+  writeFileSync(join(extensions, 'mine.ts'), 'export default {};\n');
+
+  // An item root that is neither a directory nor a regular file (a leftover unix socket;
+  // Windows named pipes do not stat as sockets) refuses instead of being read.
+  if (process.platform !== 'win32') {
+    const optimizer = join(home, '.omp/agent/optimizer.json');
+    rmSync(optimizer);
+    const srv = createServer();
+    await new Promise(resolve => srv.listen(optimizer, resolve));
+    srv.unref();
+    r = run();
+    assert.equal(r.status, 1, r.stderr);
+    assert.ok(r.stderr.includes('~/.omp/agent/optimizer.json: is not a regular file'), r.stderr);
+    srv.close();
+    rmSync(optimizer, { force: true });
+    writeFileSync(optimizer, '{"ponytail":"full"}\n');
+  }
+
+  // The hand-edited YAML config gets the per-key scan on the raw line text: a
+  // credential-named key holding a literal refuses, naming the key and the line only.
+  put('.omp/agent/config.yml', `deploy_token: plainliteral\n${good}`);
+  r = run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(r.stderr.includes('~/.omp/agent/config.yml:1: deploy_token holds a literal value; reference an env var instead'), r.stderr);
+  put('.omp/agent/config.yml', good);
+
+  // A key with no value on its line receives the literal from a deeper line below it,
+  // so the scan follows the continuation and refuses.
+  put('.omp/agent/config.yml', `credentials:\n    deploy_token:\n        plainliteral\n${good}`);
+  r = run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(r.stderr.includes('~/.omp/agent/config.yml:2: deploy_token holds an indented multiline value; reference an env var instead'), r.stderr);
+  put('.omp/agent/config.yml', good);
+
+  // A nested credential key holding a literal value is refused by the per-line scan
+  // itself; the &&-guard must not let a continuation call clear an already-bad value.
+  put('.omp/agent/config.yml', `credentials:\n  apiKey: secretliteral\n${good}`);
+  r = run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(r.stderr.includes('apiKey holds a literal value'), r.stderr);
+  put('.omp/agent/config.yml', good);
+
+  // The only exemption is a numeric value on exactly a maxTokens-style key: decimals and
+  // negatives pass, a value with a non-numeric suffix refuses, and the same number on
+  // any other key is a literal like any other.
+  put('.omp/agent/config.yml', `maxTokens: 12.5\nmax_tokens: -5\napiKey: \${ZAI_API_KEY}\n${good}`);
+  r = run();
+  assert.equal(r.status, 0, r.stderr);
+  put('.omp/agent/config.yml', `maxTokens: 128abc\n${good}`);
+  r = run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(r.stderr.includes('~/.omp/agent/config.yml:1: maxTokens holds a literal value; reference an env var instead'), r.stderr);
+  // The exemption anchors both ends: a value that merely ends in digits still refuses,
+  // and a value with two decimal digits still passes.
+  put('.omp/agent/config.yml', `max_tokens: x-5\n${good}`);
+  r = run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(r.stderr.includes('~/.omp/agent/config.yml:1: max_tokens holds a literal value; reference an env var instead'), r.stderr);
+  put('.omp/agent/config.yml', `max_tokens: 12.55\n${good}`);
+  r = run();
+  assert.equal(r.status, 0, r.stderr);
+  put('.omp/agent/config.yml', good);
+  put('.omp/agent/config.yml', `apiKey: 42\n${good}`);
+  r = run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(r.stderr.includes('~/.omp/agent/config.yml:1: apiKey holds a literal value; reference an env var instead'), r.stderr);
+  put('.omp/agent/config.yml', good);
 
   rmSync(join(home, '.omp/plugins/bun.lock'));
   r = run();

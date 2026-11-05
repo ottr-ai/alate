@@ -2,13 +2,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Mutation testing: `npm run test:mutation` runs this config.
-// ponytail: Stryker's built-in command runner re-runs the whole suite
-// (node server.test.mjs) per mutant, so there is no per-test coverage
-// (no "NoCoverage" status). Upgrade path: a real test-runner integration.
+// The command is scripts/mutant-run.mjs: stage 1 runs only the test files that reach
+// the mutated file, stage 2 runs the rest, so every mutant still faces the whole chain.
+// ponytail: coverageAnalysis stays "off". The suite exercises the mutate set through
+// spawned child processes, whose coverage no in-process hook can see, so per-test
+// analysis cannot work here (the tap-runner keys coverage per test file; the native
+// node:test runner is an unmerged PR). Upgrade path: a real test-runner integration.
 export default {
   testRunner: "command",
   commandRunner: {
-    command: "node server.test.mjs",
+    command: "node scripts/mutant-run.mjs server.test.mjs",
   },
   coverageAnalysis: "off",
   // Cache per-mutant results and only re-test mutants of changed code.
@@ -17,11 +20,19 @@ export default {
   // stryker-incremental.json after growing the suite without touching server code.
   incremental: true,
   incrementalFile: "stryker-incremental.json",
-  concurrency: 8,
+  // 20 of 24 cores: the test chains are single-core sequences, so extra workers
+  // only oversubscribe and stretch runs toward the timeout budget.
+  concurrency: 20,
   // Budget per run = timeoutMS + timeoutFactor x dry-run net time. The suite
   // spawns the server and waits on updates, so the 5 s default is too tight.
+  // The factor is 4, not 2: on a shared box a load spike can stretch a chain run
+  // several-fold, and a stretched run must fail its own assertions, not time out —
+  // a timeout verdict for a merely slow mutant is a false kill.
   timeoutMS: 20000,
-  timeoutFactor: 2,
+  timeoutFactor: 4,
+  // The dry run itself gets this ceiling (default 5 minutes): the CLI chain's net
+  // time reaches 4 minutes under load, so the default kills the initial run.
+  dryRunTimeoutMinutes: 10,
   // Sandbox outside any repo: a mutant that drops the spawn cwd must fail
   // there, not run node against this repo. The sandbox resolves fastify
   // through <tempDirName>/node_modules; a worktree run needs that symlink
@@ -29,9 +40,11 @@ export default {
   tempDirName: join(tmpdir(), "alate-stryker"),
   mutate: ["server.ts", "web/dashboard.mjs", "lib/updates.mjs"],
   reporters: ["clear-text", "progress"],
-  // Each break threshold equals the measured score of this tree, rounded down.
-  // Raise it when the score rises; never lower it or shrink the mutate set.
-  // Remaining survivors, deliberately untested:
+  // The break threshold equals the measured score of this tree, rounded down (fresh
+  // cache, quiet machine, 2026-11-05: 92.78). Raise it when the score rises; never
+  // lower it or shrink the mutate set.
+  // Remaining survivors, deliberately untested: (the list below predates this task; the
+  // fresh measurement confirmed them)
   // - exact error-string wording beyond the pinned main ones (status codes are asserted);
   // - process lifecycle/timing: port negation, interval scaling, timer.unref, argv boundary;
   // - initial CLI selectors and the boot dashCheck duplicate the POST /api/import
@@ -62,5 +75,5 @@ export default {
   //   only rewords the 404; the display-cut line differs only past the 200-char cut;
   //   the concurrent-write window (fileEdit's running/writing check) is unreachable from a sequential
   //   fetch suite, which serves one origin over one connection.
-  thresholds: { high: 80, low: 60, break: 91 },
+  thresholds: { high: 80, low: 60, break: 92 },
 };

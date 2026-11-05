@@ -13,6 +13,7 @@ with `--data`. `examples/data` is a neutral fixture used by tests and CI.
 - `install-user.mjs`: restore the data repo's `user/` snapshot onto this machine. Before any write it scans every skill snapshot (`skills/`, `managed-skills/`) with the pinned SkillSpector build (`--no-llm --fail-on-findings --use-shipped-baseline`, static only; the snapshot's shipped `.skillspector-baseline.yaml` supplies its accepted findings), findings, a missing scanner, or a crashed scan abort the run with a non-zero exit and leave the home untouched. The scans run in parallel (at most `min(8, availableParallelism())` child processes, reports buffered per scan) and re-scan only what changed: each skill folder's content hash, the scanner pin and probed version, and the scan arguments key a passed verdict in `<home>/.alate/skillspector-pass.json` (written atomically; a rejection is never cached). The scanner needs Python 3.12+ where it runs: the server image carries the pinned build (`Dockerfile`, `SKILLSPECTOR_REF` — the test suite checks that it matches the script's pin), and a host that runs the script outside the image installs it by hand (pin and bootstrap command live in the script).
 - `sync-user.mjs`: capture this machine's omp user layer into the data repo.
 - `sync-projects.mjs`: refresh project agent-context snapshots into the data repo.
+- `scripts/mutant-run.mjs` (+ `mutant-run.test.mjs`): per-file test selection for both Stryker configs' command runner: stage 1 runs the chain files that reach the mutated file, stage 2 runs the rest, so each mutant still faces the whole chain. A map miss runs the whole chain: slower, never wrong.
 - `license-gate.mjs` (+ `license-gate.test.mjs`): license gate over the npm tree; every
   `package-lock.json` entry's `license` field must be an allowlisted SPDX expression.
 - `*.test.mjs`: plain-node self-checks, one per script; `zero-deps.test.mjs` is the dependency gate, not tied to a script.
@@ -31,7 +32,7 @@ Every script needs a data repo, passed with `--data <dir>` (`examples/data`
 works for a dry run).
 - "Verified" means this exact chain passes from the repo root (the same chain
   `.github/workflows/sync.yml` runs):
-  `npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && npx tsc --noEmit && node server.test.mjs`
+  `npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && node scripts/mutant-run.test.mjs && npx tsc --noEmit && node server.test.mjs`
   The smoke sync passes a throwaway target dir, so the chain never writes the example rule
   into the rules dir of the home that runs it.
   `npm run test:mutation` is the StrykerJS mutation gate for server and CLI

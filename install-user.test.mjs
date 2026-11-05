@@ -8,7 +8,7 @@ import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { tmpdir, homedir, availableParallelism } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, remapHomePaths, sameContent } from './lib/data.mjs';
+import { fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, remapHomePaths, sameContent, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
 import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-install-'));
@@ -220,6 +220,132 @@ try {
     assert.deepEqual(JSON.parse(again.bytes), out, 'porting the ported form changes nothing');
     assert.deepEqual(again.notes, [], 'the second port moves nothing');
   });
+  // Gate pins the run above leaves open: .json scoping, unparsable JSON, nested rebase
+  // shapes, exact note wording, and the disabledServers rewrite rule.
+  {
+    // Only a .json rel is adapted: a YAML rel with parsable JSON bytes installs as captured.
+    const jsonish = Buffer.from('{"source": "C:\\\\me\\\\.omp\\\\cfg.json"}');
+    let t2 = forTarget('omp/agent/config.yml', jsonish, linux);
+    assert.equal(t2.bytes, jsonish, 'a non-JSON rel installs as captured');
+    assert.deepEqual(t2.notes, []);
+
+    // Unparsable JSON installs as captured.
+    const broken = Buffer.from('{"mcpServers":');
+    t2 = forTarget('omp/agent/mcp.json', broken, linux);
+    assert.equal(t2.bytes.toString(), broken.toString(), 'unparsable JSON installs as captured');
+    assert.deepEqual(t2.notes, []);
+
+    // The rebase walks nested objects and arrays, moves only drive-letter paths that hit a
+    // captured layer segment, and leaves every other value type alone.
+    const nested = Buffer.from(JSON.stringify({
+      a: { b: { p: 'C:\\\\me\\\\.omp\\\\deep.json' }, rel: '.omp/looks/posix', keep: [5, true, null] },
+    }));
+    t2 = forTarget('agents/x/meta.json', nested, linux);
+    assert.deepEqual(JSON.parse(t2.bytes), {
+      a: { b: { p: '/home/u/.omp/deep.json' }, rel: '.omp/looks/posix', keep: [5, true, null] },
+    });
+    assert.deepEqual(t2.notes, ['agents/x/meta.json: 1 Windows path(s) now point into /home/u']);
+
+    // Repeated separators collapse into one split point.
+    t2 = forTarget('agents/x/meta.json', Buffer.from(JSON.stringify({ p: 'C:\\\\me\\\\\\\\.omp\\\\a\\\\\\\\b.json' })), linux);
+    assert.deepEqual(JSON.parse(t2.bytes).p, '/home/u/.omp/a/b.json');
+
+    // A listed-disabled server is skipped entirely: not unwrapped, not flagged, not noted.
+    const quiet = Buffer.from(JSON.stringify({ mcpServers: { legacy: { command: 'cmd', args: ['/c', 'tool.exe'] } }, disabledServers: ['legacy'] }));
+    t2 = forTarget('omp/agent/mcp.json', quiet, linux);
+    assert.equal(t2.bytes, quiet, 'a disabled server keeps its captured bytes');
+    assert.deepEqual(t2.notes, []);
+
+    // A server without an env block scans nothing.
+    const bare = Buffer.from(JSON.stringify({ mcpServers: { p: { command: 'npx', args: ['-y', 'm'] } } }));
+    t2 = forTarget('omp/agent/mcp.json', bare, linux);
+    assert.equal(t2.bytes, bare, 'a plain server passes through unchanged');
+    assert.deepEqual(t2.notes, []);
+
+    // An env entry holding a Windows path outside the captured layer is dropped and named;
+    // disabledServers is not rewritten when nothing new was disabled.
+    const envDoc = Buffer.from(JSON.stringify({ mcpServers: { s: { command: 'node', args: ['x'], env: { WIN: 'C:\\\\tools\\\\tool.exe', OK: 'k' } } }, disabledServers: ['zz', 'aa'] }));
+    t2 = forTarget('omp/agent/mcp.json', envDoc, linux);
+    assert.deepEqual(JSON.parse(t2.bytes), { mcpServers: { s: { command: 'node', args: ['x'], env: { OK: 'k' } } }, disabledServers: ['zz', 'aa'] },
+      'only the Windows env entry goes, and the disabled list keeps its captured order');
+    assert.deepEqual(t2.notes, ['omp/agent/mcp.json: MCP server s: WIN held a Windows path, so it is dropped here']);
+
+    // A bare chrome-devtools-mcp gets exactly the three container flags.
+    t2 = forTarget('omp/agent/mcp.json', Buffer.from(JSON.stringify({ mcpServers: { cd: { command: 'chrome-devtools-mcp@latest' } } })), linux);
+    assert.deepEqual(JSON.parse(t2.bytes).mcpServers.cd, { command: 'chrome-devtools-mcp@latest', args: ['--headless', '--isolated', '--chrome-arg=--no-sandbox'] });
+    assert.deepEqual(t2.notes, ['omp/agent/mcp.json: MCP server cd runs Chrome headless and isolated, without its sandbox']);
+
+    // Disable reasons are named exactly: a wrapped cmd, and a command that is a Windows path.
+    t2 = forTarget('omp/agent/mcp.json', Buffer.from(JSON.stringify({
+      mcpServers: { sh: { command: 'cmd', args: ['/c', 'npx -y has space'] }, wp: { command: 'C:/tools/app', args: [] } },
+    })), linux);
+    assert.deepEqual(JSON.parse(t2.bytes).disabledServers, ['sh', 'wp']);
+    assert.deepEqual(t2.notes, [
+      'omp/agent/mcp.json: MCP server sh runs through cmd, so it is disabled here',
+      'omp/agent/mcp.json: MCP server wp points at a Windows path, so it is disabled here',
+    ]);
+
+    // MCP-server handling is scoped to omp/agent/mcp.json: the same shape under another rel
+    // installs as captured, and a null mcpServers key is skipped, not read.
+    const relOther = Buffer.from(JSON.stringify({ mcpServers: { s: { command: 'cmd', args: ['/c', 'x'] } } }));
+    t2 = forTarget('agents/x/meta.json', relOther, linux);
+    assert.equal(t2.bytes.toString(), relOther.toString(), 'mcp handling runs only for omp/agent/mcp.json');
+    assert.deepEqual(t2.notes, []);
+    t2 = forTarget('omp/agent/mcp.json', Buffer.from('{"mcpServers":null,"keep":1}'), linux);
+    assert.equal(JSON.parse(t2.bytes).keep, 1, 'a null mcpServers key is skipped');
+    assert.deepEqual(t2.notes, []);
+
+    // A JSON null document parses fine but is not an object: skipped, never dereferenced.
+    t2 = forTarget('omp/agent/mcp.json', Buffer.from(JSON.stringify(null)), linux);
+    assert.equal(t2.bytes.toString(), 'null', 'a JSON null document installs as captured');
+    assert.deepEqual(t2.notes, []);
+
+    // A null server entry is skipped, not dereferenced.
+    t2 = forTarget('omp/agent/mcp.json', Buffer.from('{"mcpServers":{"gone":null},"keep":1}'), linux);
+    assert.equal(JSON.parse(t2.bytes).keep, 1, 'a null server entry is skipped');
+    assert.deepEqual(t2.notes, []);
+
+    // The env walk keeps nulls and scalars, keeps an object without Windows paths, and drops
+    // an object that nests one.
+    t2 = forTarget('omp/agent/mcp.json', Buffer.from(JSON.stringify({
+      mcpServers: { s: { command: 'node', args: ['x'], env: { N: null, NUM: 5, DEEP: { OK: 1 }, WIN: { P: 'C:\\tools\\tool.exe' } } } },
+    })), linux);
+    assert.deepEqual(JSON.parse(t2.bytes).mcpServers.s.env, { N: null, NUM: 5, DEEP: { OK: 1 } },
+      'null, scalars and plain objects stay; a nested Windows path goes');
+    assert.deepEqual(t2.notes, ['omp/agent/mcp.json: MCP server s: WIN held a Windows path, so it is dropped here']);
+  }
+
+  // Fingerprint scope: only the marketplaces registry compares modulo JSON formatting and
+  // updatedAt; any other JSON rel compares by raw text, and CRLF never churns a plain file.
+  assert.notEqual(fingerprint('omp/agent/mcp.json', Buffer.from('{"a":1}')), fingerprint('omp/agent/mcp.json', Buffer.from('{\n  "a": 1\n}\n')), 'non-registry JSON compares by raw text');
+  assert.equal(fingerprint('omp/marketplaces.json', Buffer.from('{"updatedAt":1,"b":2}')), fingerprint('omp/marketplaces.json', Buffer.from('{\n  "b": 2\n}\n')), 'the registry compares modulo formatting and updatedAt');
+  assert.equal(fingerprint('f.txt', Buffer.from(['a', 'b'].join('\r\n'))), fingerprint('f.txt', Buffer.from(['a', 'b'].join('\n'))), 'CRLF and LF are the same content');
+
+  // splitDeploymentBlocks: the block rule the install workflow rides on, pinned directly.
+  {
+    const s = splitDeploymentBlocks('kept: 1\nhindsight:\n  secret: x\nalate: v\nmore: 2\n');
+    assert.deepEqual(s.kept, ['kept: 1', 'more: 2', '']);
+    assert.deepEqual(s.dropped, ['hindsight:', '  secret: x', 'alate: v']);
+    assert.equal(s.tail, false);
+    assert.equal(splitDeploymentBlocks('a: 1\nalate:\n  k: v').tail, true, 'a trailing block takes the tail');
+    assert.equal(withoutDeploymentBlocks('a: 1\nalate:\n  k: v'), 'a: 1\n');
+    assert.equal(withoutDeploymentBlocks('a: 1\nb: 2'), 'a: 1\nb: 2');
+    assert.equal(withoutDeploymentBlocks('hindsight:\n  k: v\n'), '');
+    const s2 = splitDeploymentBlocks('hindsight:\n  k: v\nmodel: x\n  indented: 1');
+    assert.deepEqual(s2.kept, ['model: x', '  indented: 1'], 'a top-level key ends a dropped block');
+    assert.deepEqual(s2.dropped, ['hindsight:', '  k: v']);
+    // A mid-text BOM is content; only a leading one is stripped, with its block.
+    assert.deepEqual(splitDeploymentBlocks('a\uFEFFb\nalate:\n  k: v\n').kept, ['a\uFEFFb']);
+    assert.deepEqual(splitDeploymentBlocks('\uFEFFalate:\n  k: v\nkept: 1').kept, ['kept: 1'], 'a leading BOM goes with the dropped block');
+    for (const head of ['hindsight:', 'alate:', '"hindsight":', "'alate':", 'hindsight :', 'alate\t:']) {
+      const t3 = splitDeploymentBlocks(`${head} v\nkeep: 1`);
+      assert.deepEqual(t3.dropped, [`${head} v`], `block header: ${head}`);
+      assert.deepEqual(t3.kept, ['keep: 1']);
+    }
+    for (const notHead of ['otherhindsight:', 'hindsightx:', '# hindsight:', '  hindsight:']) {
+      assert.deepEqual(splitDeploymentBlocks(`${notHead}\nkeep: 1`).kept, [notHead, 'keep: 1'], `content, not a header: ${notHead}`);
+    }
+  }
 
   // install-user applies it for the machine it runs on.
   put('omp/agent/mcp.json', `${JSON.stringify(mcp, null, 2)}\n`);

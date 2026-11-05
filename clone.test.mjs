@@ -5,11 +5,11 @@
 // and failure cleanup without data loss.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { delimiter, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkDestination, cleanupData, cloneCommand, forAll, keepTemp, parseDataSpec, redactSecrets, resolveDataDir } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, cleanupData, cloneCommand, descriptionText, forAll, keepTemp, parseDataSpec, redactSecrets, resolveDataDir, ruleProblems } from './lib/data.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-clone-'));
 const TOKEN = 'ghp_abc123/+=XYZ'; // fake: '/' '+' '=' stress the encoded/base64 shapes
@@ -83,6 +83,7 @@ try {
   assert.equal(cmd.env.GIT_CONFIG_KEY_0, 'http.https://github.com/.extraheader');
   assert.equal(cmd.env.GIT_CONFIG_VALUE_0, `AUTHORIZATION: basic ${basic}`);
   assert.equal(cmd.env.GIT_TERMINAL_PROMPT, '0');
+  assert.equal(cmd.env.GIT_CONFIG_COUNT, '1', 'exactly one injected config entry');
   for (const shape of [TOKEN, encoded, basic]) assert.ok(!cmd.args.join(' ').includes(shape), 'token shape in argv');
   cmd = cloneCommand('https://github.com/owner/repo', '', undefined, dir);
   assert.ok(!('GIT_CONFIG_COUNT' in cmd.env), 'no auth config without a token');
@@ -132,6 +133,100 @@ try {
   for (const shape of [TOKEN, encoded, basic]) assert.ok(!r.stderr.includes(shape), 'token shape in clone error');
   const leftover = readdirSync(tmpdir()).filter(n => n.startsWith('alate-data-') && !tempBefore.includes(n));
   assert.deepEqual(leftover, [], 'failed clone leaves no temp dir behind');
+
+  // A spec that parses as owner/name[@ref] is cloned from the github URL template, and
+  // the failure message carries git's own stderr through redactSecrets. A stub git makes
+  // the failure deterministic without a network.
+  if (process.platform !== 'win32') {
+    const stubDir = join(tmp, 'git-stub');
+    mkdirSync(stubDir, { recursive: true });
+    writeFileSync(join(stubDir, 'git'), '#!/bin/sh\necho "fatal: stub clone failure: $*" >&2\nexit 128\n');
+    chmodSync(join(stubDir, 'git'), 0o755);
+    r = runSync('no-such-owner/no-such-repo@v9', { PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}` });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /git clone failed for no-such-owner\/no-such-repo@v9:\nfatal: stub clone failure: clone .* https:\/\/github\.com\/no-such-owner\/no-such-repo/);
+  }
+
+  // --- checkDestination: every documented refusal, by its exact message.
+  const gateRoot = join(tmp, 'gate-root');
+  mkdirSync(join(gateRoot, 'dir'), { recursive: true });
+  writeFileSync(join(gateRoot, 'file.txt'), 'x');
+  const refusesDest = (dest, message) => assert.throws(() => checkDestination(gateRoot, dest), e => e.message === message, message);
+  assert.doesNotThrow(() => checkDestination(gateRoot, join(gateRoot, 'dir', 'new.txt')), 'a fresh nested path is fine');
+  assert.doesNotThrow(() => checkDestination(gateRoot, join(gateRoot, 'file.txt')), 'an existing single-link file is fine');
+  refusesDest(gateRoot, `Destination ${gateRoot} is outside ${gateRoot}`);
+  refusesDest(join(gateRoot, '..'), `Destination ${join(gateRoot, '..')} is outside ${gateRoot}`);
+  refusesDest(join(tmp, 'elsewhere.txt'), `Destination ${join(tmp, 'elsewhere.txt')} is outside ${gateRoot}`);
+  if (process.platform !== 'win32') {
+    const outsideDir = join(tmp, 'outside-dir');
+    mkdirSync(outsideDir, { recursive: true });
+    symlinkSync(outsideDir, join(gateRoot, 'link'), 'dir');
+    refusesDest(join(gateRoot, 'link', 'f.txt'), `${join(gateRoot, 'link')} is a symbolic link below the chosen root ${gateRoot}`);
+  }
+  refusesDest(join(gateRoot, 'file.txt', 'sub', 'x.txt'), `${join(gateRoot, 'file.txt')} is not a directory`);
+  refusesDest(join(gateRoot, 'dir'), `${join(gateRoot, 'dir')} exists and is not a regular file`);
+  writeFileSync(join(gateRoot, 'one.txt'), 'x');
+  linkSync(join(gateRoot, 'one.txt'), join(gateRoot, 'two.txt'));
+  refusesDest(join(gateRoot, 'two.txt'), `${join(gateRoot, 'two.txt')} has 2 hard links; refusing to write it`);
+
+  // --- assertSourceInside: realpath-based guard, the root itself allowed.
+  const srcRoot = join(tmp, 'src-root');
+  mkdirSync(srcRoot, { recursive: true });
+  writeFileSync(join(srcRoot, 'f.txt'), 'x');
+  const outsideFile = join(tmp, 'outside.txt');
+  writeFileSync(outsideFile, 'x');
+  assert.doesNotThrow(() => assertSourceInside(srcRoot, srcRoot), 'the root itself is allowed');
+  assert.doesNotThrow(() => assertSourceInside(srcRoot, join(srcRoot, 'f.txt')), 'a file inside is allowed');
+  const refusesSrc = (path, message) => assert.throws(() => assertSourceInside(srcRoot, path), e => e.message === message, message);
+  refusesSrc(outsideFile, `Source ${outsideFile} is outside ${srcRoot}`);
+  refusesSrc(join(srcRoot, '..'), `Source ${join(srcRoot, '..')} is outside ${srcRoot}`);
+
+  // --- parseDataSpec: dot segments and extra segments are refused.
+  assert.equal(parseDataSpec('x/.'), null, 'a single-dot segment is refused');
+  assert.equal(parseDataSpec('x/..'), null, 'a parent segment is refused');
+  assert.equal(parseDataSpec('owner/repo/extra'), null, 'a third path segment is refused');
+
+  // --- descriptionText: the YAML-free description reader the frontmatter gate relies on.
+  assert.equal(descriptionText('title: x'), null, 'no description key');
+  assert.equal(descriptionText('mydescription: hi'), null, 'only a line-start description key counts');
+  assert.equal(descriptionText('description:x'), 'x', 'the value needs no space');
+  assert.equal(descriptionText('description: plain # trailing'), 'plain', 'a comment needs whitespace before #');
+  assert.equal(descriptionText('description: C# tips'), 'C# tips', 'no whitespace before # keeps the value');
+  assert.equal(descriptionText('description: x#y'), 'x#y');
+  assert.equal(descriptionText('description:   # only a comment'), null, 'a comment-only value is blank');
+  assert.equal(descriptionText('description: "dq # kept"'), 'dq # kept', 'a quoted value keeps its #');
+  assert.equal(descriptionText('description: " x "'), 'x', 'a quoted value is trimmed');
+  assert.equal(descriptionText('description: "a\\b"'), 'ab', 'double-quote escapes are unwrapped');
+  assert.equal(descriptionText('description: "x" # c'), 'x', 'a comment after a quote goes');
+  assert.equal(descriptionText('description: "x" junk'), '"x" junk', 'an unterminated quote stays raw text');
+  assert.equal(descriptionText('description: "ab"'), 'ab');
+  assert.equal(descriptionText("description: 'sq'"), 'sq');
+  assert.equal(descriptionText("description: 'it''s fine'"), "it's fine", "'' escapes a quote");
+  assert.equal(descriptionText("description: 'sq' # c"), 'sq', 'a comment after a single quote goes');
+  assert.equal(descriptionText("description: junk 'x'"), "junk 'x'", 'an unterminated single quote stays raw text');
+  assert.equal(descriptionText("description: 'sq' junk"), "'sq' junk", 'a single quote must close before the value ends');
+  assert.equal(descriptionText('description: a|'), 'a|', 'a mid-value pipe is plain text');
+  assert.equal(descriptionText('description: |x'), '|x', 'a block indicator must end the value');
+  assert.equal(descriptionText('description: x'), 'x', 'a plain word is no block');
+  assert.equal(descriptionText('description: |'), null, 'an empty block is no description');
+  assert.equal(descriptionText('description: |   '), null, 'trailing spaces keep the block indicator');
+  assert.equal(descriptionText('description: |-'), null);
+  assert.equal(descriptionText('description: >'), null);
+  assert.equal(descriptionText('description: |\n  a\n  b'), 'a b', 'block lines join with spaces');
+  assert.equal(descriptionText('description: |\n  a\n\n  b'), 'a b', 'blank block lines vanish');
+  assert.equal(descriptionText('description: |\n  a\nnext: 1'), 'a', 'a dedented line ends the block');
+  assert.equal(descriptionText('description: >\n  wrapped\n  text'), 'wrapped text');
+  assert.equal(descriptionText('title: t\ndescription: |\n  a\n  b'), 'a b', 'block lines collect only after the description line, not from the frontmatter start');
+  assert.equal(descriptionText('description: |\n   \n   '), null, 'whitespace-only block lines are blank');
+  assert.equal(descriptionText('description: "x"  # c'), 'x', 'a comment may follow any whitespace run after the quote');
+
+  // --- ruleProblems: hidden characters plus the frontmatter gate.
+  assert.deepEqual(ruleProblems('r.md', 'no frontmatter here\n'), ['r.md: needs frontmatter with a description']);
+  assert.deepEqual(ruleProblems('r.md', 'intro\n---\ndescription: x\n---\nbody\n'), ['r.md: needs frontmatter with a description'], 'frontmatter must open the file');
+  assert.deepEqual(ruleProblems('r.md', '---\r\ndescription: CRLF\r\n---\nbody\n'), [], 'CRLF frontmatter is accepted');
+  assert.deepEqual(ruleProblems('r.md', '---\n\n---\ndescription: real\n---\nbody\n'), ['r.md: needs frontmatter with a description'], 'the first frontmatter block decides');
+  assert.deepEqual(ruleProblems('r.md', '---\ndescription: ok\n---\ntext \u0007 bell\n'), ['r.md:4:6: hidden character U+0007']);
+  assert.deepEqual(ruleProblems('ctx.md', 'text \u200B zwsp\n', { frontmatter: false }), ['ctx.md:1:6: hidden character U+200B'], 'agent-context files scan hidden characters only');
 
   // Property checks (fuzz tier via forAll in lib/data.mjs). Gate: 200 runs, fixed seed
   // 42; PROP_RUNS=<n> re-seeds randomly for the review deep tier.
