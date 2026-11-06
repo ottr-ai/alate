@@ -19,12 +19,13 @@ the pinned scanner binary must never see a home that turns can write as its Pyth
 
 1. Resolution order in `runScan`: `SKILLSPECTOR_BIN` (when set), the pinned venv
    (`SKILLSPECTOR_VENV`, default `<homedir>/.cache/skillspector-venv`), then `skillspector` on PATH.
-2. `SKILLSPECTOR_BIN` must be an absolute path whose realpath lies outside the target home.
-   A violation refuses the run with an error that names the rule. No fallback.
+2. `SKILLSPECTOR_BIN` must be an absolute path whose realpath lies outside the canonical
+   target home (`resolveHome(home)`; a `--home` through a symlink measures like the path it
+   resolves to). A violation refuses the run with an error that names the rule. No fallback.
 3. The venv candidate runs only when the binary exists, is owned by root on POSIX
-   (`stat.uid === 0`; Windows skips the uid rule), and its realpath lies outside the target
-   home. Otherwise install-user skips it with a logged reason and probes the next candidate.
-   A candidate is never executed before its trust check.
+   (`stat.uid === 0`; Windows skips the uid rule), and its realpath lies outside that
+   canonical home. Otherwise install-user skips it with a logged reason and probes the next
+   candidate. A candidate is never executed before its trust check.
 4. The version pin (`SKILLSPECTOR_REF`) still applies to every probed candidate. A candidate
    that runs and reports a wrong version still refuses the run.
 5. Spawned children get allowlisted environments. `server.ts` passes provision script children
@@ -49,6 +50,8 @@ the pinned scanner binary must never see a home that turns can write as its Pyth
   (`SKILLSPECTOR_BIN` or the PATH stub), never execute the planted binary, and log the refusal.
 - `SKILLSPECTOR_BIN` inside the target home or a relative path refuses the run.
 - A venv outside the home that is not owned by root is skipped (test guarded to non-root runners).
+- A `--home` given through a symlink to the real home measures containment like the path it
+  resolves to: a venv planted in the real home is refused (alias regression test).
 - The scanner child environment dump in `install-user.test.mjs` must not contain `ALATE_API_KEY`
   when install-user runs with it set, and must carry `PYTHONNOUSERSITE=1`.
 - A test plants a user-site `.pth` file under the target home that writes a marker when Python

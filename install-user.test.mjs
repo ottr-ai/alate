@@ -915,6 +915,24 @@ try {
     assert.match(r.stderr, /SKILLSPECTOR_BIN/);
     assert.ok(!existsSync(plantedMarker), 'the planted venv scanner never ran');
 
+    // A --home given through a symlink must measure containment like the path it resolves
+    // to: the default venv candidate derives from homedir(), which is the real home, so an
+    // alias-anchored gate would accept a venv planted in the real home as "outside".
+    const realHome = join(tmp, 'alias-real');
+    const aliasHome = join(tmp, 'alias-home');
+    const aliasMarker = join(realHome, 'alias-planted-marker');
+    mkdirSync(join(realHome, '.cache', 'skillspector-venv', 'bin'), { recursive: true });
+    symlinkSync(realHome, aliasHome, 'dir');
+    writeFileSync(join(realHome, '.cache', 'skillspector-venv', 'bin', 'skillspector'),
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi\n[ "$1" = scan ] && touch '${aliasMarker}'\nexit 0\n`);
+    chmodSync(join(realHome, '.cache', 'skillspector-venv', 'bin', 'skillspector'), 0o755);
+    rmSync(join(realHome, '.alate', 'skillspector-pass.json'), { force: true });
+    r = run(['--data', data, '--skip-plugins'], aliasHome, { PATH: `${stubDir}${delimiter}/usr/bin:/bin`, HOME: realHome });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /skipping venv scanner at .*skillspector-venv.*inside the home/, r.stdout);
+    assert.ok(readFileSync(callsLog, 'utf8').length > 0, 'the PATH stub served the aliased-home run');
+    assert.ok(!existsSync(aliasMarker), 'the venv planted in the real home never ran through the alias');
+
     // A planted user-site .pth under the target home must never execute: the scanner is a pip
     // console script, so a real Python interpreter starts for the probe and the scan, and
     // Python runs every .pth file and usercustomize.py in HOME's user site-packages at

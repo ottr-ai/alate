@@ -62,6 +62,10 @@ const resolveHome = given => {
   }
 };
 const layerHome = layerMode ? resolveHome(home) : home;
+// The scanner trust gate anchors on the canonical home: a --home given through a symlink
+// must measure containment like the path it resolves to (same invariant as layerHome),
+// or a venv planted in the real home passes as "outside".
+const trustHome = resolveHome(home);
 const data = resolveDataDir(args, { allowClone: true });
 const userRoot = join(data.dir, 'user');
 // Lifecycle scripts are off unless the data repo opts in: a `plugins-allow-scripts` marker
@@ -120,9 +124,9 @@ const childEnv = extra => {
 // parent.
 const scannerEnv = () => ({ ...childEnv(), PYTHONNOUSERSITE: '1' });
 
-// True when the path (realpath when it exists, else itself, resolved) lies inside the target
-// home install-user writes into. A scanner inside that home is agent-turn-writable, so it is
-// never executed — not even for a --version probe.
+// True when the path (realpath when it exists, else itself, resolved) lies inside the
+// canonical target home install-user writes into. A scanner inside that home is
+// agent-turn-writable, so it is never executed — not even for a --version probe.
 const insideHome = path => {
   const real = (() => {
     try {
@@ -131,7 +135,7 @@ const insideHome = path => {
       return path;
     }
   })();
-  const rel = relative(resolve(home), resolve(real));
+  const rel = relative(trustHome, resolve(real));
   return rel === '' || !rel.startsWith(`..${sep}`);
 };
 
@@ -284,10 +288,10 @@ const runScan = async skillDirs => {
   if (process.env.SKILLSPECTOR_BIN !== undefined && process.env.SKILLSPECTOR_BIN !== '') {
     const bin = process.env.SKILLSPECTOR_BIN;
     if (!isAbsolute(bin)) {
-      throw new Error(`SKILLSPECTOR_BIN must be an absolute path (got "${bin}"); point it at an absolute scanner outside the home install-user writes into (${home}).`);
+      throw new Error(`SKILLSPECTOR_BIN must be an absolute path (got "${bin}"); point it at an absolute scanner outside the home install-user writes into (${trustHome}).`);
     }
     if (insideHome(bin)) {
-      throw new Error(`SKILLSPECTOR_BIN points inside the home install-user writes into (${home}): "${bin}". A scanner in that home is agent-turn-writable, so it is never executed. Point SKILLSPECTOR_BIN at an absolute scanner outside that home.`);
+      throw new Error(`SKILLSPECTOR_BIN points inside the home install-user writes into (${trustHome}): "${bin}". A scanner in that home is agent-turn-writable, so it is never executed. Point SKILLSPECTOR_BIN at an absolute scanner outside that home.`);
     }
     candidates.push(bin);
   }
@@ -295,7 +299,7 @@ const runScan = async skillDirs => {
     const st = statSync(venvBin);
     const reasons = [];
     if (process.platform !== 'win32' && st.uid !== 0) reasons.push('not owned by root');
-    if (insideHome(venvBin)) reasons.push(`inside the home install-user writes into (${home})`);
+    if (insideHome(venvBin)) reasons.push(`inside the home install-user writes into (${trustHome})`);
     if (reasons.length) {
       console.log(`skipping venv scanner at ${venvBin}: ${reasons.join(', ')}`);
       refusals.push(`venv scanner at ${venvBin}: ${reasons.join(', ')}`);
@@ -330,7 +334,7 @@ const runScan = async skillDirs => {
   if (!scanner) {
     const venvRoot = join(venvBin, '..', '..');
     const refused = refusals.length ? ` No trusted candidate served the scan:\n${refusals.map(r => `- ${r}`).join('\n')}.` : '';
-    throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s).${refused} Remediation: set SKILLSPECTOR_BIN to an absolute scanner outside the home install-user writes into (${home}), point SKILLSPECTOR_VENV at a root-owned venv outside that home, or install the pinned build (Python 3.12+) on PATH. To rebuild the venv (it must be root-owned and live outside the home): rm -rf "${venvRoot}" && python3 -m venv "${venvRoot}" && "${join(venvRoot, 'bin', 'pip')}" install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}", or install the pinned build, then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
+    throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s).${refused} Remediation: set SKILLSPECTOR_BIN to an absolute scanner outside the home install-user writes into (${trustHome}), point SKILLSPECTOR_VENV at a root-owned venv outside that home, or install the pinned build (Python 3.12+) on PATH. To rebuild the venv (it must be root-owned and live outside the home): rm -rf "${venvRoot}" && python3 -m venv "${venvRoot}" && "${join(venvRoot, 'bin', 'pip')}" install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}", or install the pinned build, then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
   }
   const passes = readPasses();
   const keys = new Map(skillDirs.map(dir => [dir, `${SCAN_CACHE_FORMAT} ${hashSkillDir(dir)} ${SKILLSPECTOR_REF} ${reported} scan ${SCAN_ARGS.join(' ')}`]));
