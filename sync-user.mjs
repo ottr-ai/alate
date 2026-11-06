@@ -73,13 +73,13 @@ const MAX_TOKEN_KEY = /^max[_-]?tokens?$/i;
 // without a reference: 'true'/'null' and "Bearer null" are strings, and strings refuse.
 // Actual booleans/null are handled per syntax by the callers (typed in JSON, unquoted
 // in YAML); they never reach here as inert spellings.
-const scalarProblem = value => {
+const scalarProblem = (value, fix = 'reference an env var instead') => {
   let v = value.trim();
   const q = v.length > 1 && (v[0] === '"' || v[0] === "'") && v.endsWith(v[0]) ? v[0] : '';
   if (q) v = v.slice(1, -1).trim();
   v = v.replace(/^(?:bearer|basic)[ \t]+/i, '');
   return !v || /^\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})$/.test(v)
-    ? null : 'holds a literal value; reference an env var instead';
+    ? null : `holds a literal value; ${fix}`;
 };
 // The YAML scalar of a raw value: a " # comment" tail (or a bare "#..." comment) is
 // commentary, not value, so `key: $VAR # note` and `key: # note` stay valid.
@@ -114,7 +114,10 @@ const jsonProblems = (text, say) => {
     if (!node || typeof node !== 'object') return;
     for (const [key, value] of Object.entries(node)) {
       if (SECRET_NAME_RE.test(key)) {
-        const bad = typeof value === 'string' ? scalarProblem(value)
+        // mcp.json names the concrete fix: quote the env reference in the JSON, park the
+        // value in the project's env.txt, and set it once in Ottr's Settings -> Env.
+        const bad = typeof value === 'string'
+          ? scalarProblem(value, 'use "$VAR" in mcp.json, put the value in workers/<project>/env.txt, and set it in Ottr Settings -> Env')
           : typeof value === 'number' ? 'holds a numeric literal; reference an env var instead'
           : typeof value === 'boolean' || value === null ? null
           : 'holds a nested value; use a flat env reference';

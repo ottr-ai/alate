@@ -108,7 +108,7 @@ try {
   put('.omp/agent/mcp.json', '{\n  "mcpServers": {\n    "s": {\n      "env": {\n        "api\\u004bey": "placeholder"\n      }\n    }\n  }\n}\n');
   r = run();
   assert.equal(r.status, 1);
-  assert.ok(r.stderr.includes('~/.omp/agent/mcp.json: "apiKey" holds a literal value'), r.stderr);
+  assert.ok(r.stderr.includes('~/.omp/agent/mcp.json: "apiKey" holds a literal value; use "$VAR" in mcp.json, put the value in workers/<project>/env.txt, and set it in Ottr Settings -> Env'), r.stderr);
   put('.omp/agent/mcp.json', '{oops\n');
   r = run();
   assert.equal(r.status, 1);
@@ -306,6 +306,7 @@ try {
   r = run();
   assert.equal(r.status, 1, r.stderr);
   assert.ok(r.stderr.includes('~/.omp/agent/config.yml:1: deploy_token holds a literal value; reference an env var instead'), r.stderr);
+  assert.ok(!r.stderr.includes('use "$VAR" in mcp.json'), 'the YAML refusal keeps its own env-var advice, not the mcp.json fix');
   put('.omp/agent/config.yml', good);
 
   // A key with no value on its line receives the literal from a deeper line below it,
