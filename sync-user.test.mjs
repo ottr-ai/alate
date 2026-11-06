@@ -639,17 +639,32 @@ try {
   // worker that installs the snapshot cannot use them. Capture strips both and says so;
   // the rest of the config stays byte for byte.
   const shellhome = plainHome('home-shell-setup');
+  // The card's shape: a YAML flow list. The strip runs before the fail-closed syntax gate,
+  // so the machine-only entry leaves before the gate judges the portable text — a flow list
+  // in a portable key (the gate refuses those) must not take the capture down with it.
   writeFileSync(join(shellhome, '.omp/agent/config.yml'),
     'modelRoles:\n  default: zai/glm\nshellPath: C:\\Program Files\\PowerShell\\7\\pwsh.exe\n' +
-    // A flow list `[...]` cannot pass the capture's YAML gate at all, so the capturable
-    // shape is the block list; the flow form is covered by the withoutHostPaths unit cases.
-    'skills:\n  customDirectories:\n    - C:/Users/dev/omp-skills\n  theme: portable\n');
+    'skills:\n  customDirectories: [C:/Users/dev/omp-skills]\n  theme: portable\n');
   r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', shellhome, '--data', data], { encoding: 'utf8' });
   assert.equal(r2.status, 0, r2.stderr);
   assert.ok(r2.stdout.includes('note: user/omp/agent/config.yml: dropped the machine shell setup (shellPath, skills.customDirectories)'), r2.stdout);
   const clean = snap('omp/agent/config.yml');
   assert.ok(!/(?:shellPath|customDirectories|[A-Za-z]:[\\/])/.test(clean), `host paths survived the capture: ${clean}`);
   assert.equal(clean, 'modelRoles:\n  default: zai/glm\nskills:\n  theme: portable\n', clean);
+  // The block style captures clean the same way.
+  writeFileSync(join(shellhome, '.omp/agent/config.yml'),
+    'modelRoles:\n  default: zai/glm\nshellPath: C:\\Program Files\\PowerShell\\7\\pwsh.exe\n' +
+    'skills:\n  customDirectories:\n    - C:/Users/dev/omp-skills\n  theme: portable\n');
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', shellhome, '--data', data], { encoding: 'utf8' });
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.equal(snap('omp/agent/config.yml'), clean, 'block style strips to the same portable text');
+  // The gate still judges the portable text: syntax the strip does not remove refuses, and
+  // the machine shell entry next to it cannot smuggle the capture past the scan.
+  writeFileSync(join(shellhome, '.omp/agent/config.yml'),
+    'shellPath: C:\\x\\pwsh.exe\nnote: "pa\\u0073sword123"\n');
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', shellhome, '--data', data], { encoding: 'utf8' });
+  assert.equal(r2.status, 1);
+  assert.match(r2.stderr, /escape in a double-quoted scalar/);
 
   // Property checks (fuzz tier via forAll in lib/data.mjs). Gate: 200 runs, fixed seed
   // 42; PROP_RUNS=<n> re-seeds randomly for the review deep tier.

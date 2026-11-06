@@ -230,19 +230,20 @@ for (const item of ITEMS) {
       const configItem = configOrigins.get(origin); // origin of the bytes, not the path
       let text = bytes.toString('utf8');
       if (configItem !== undefined && configItem.endsWith('.yml')) {
-        for (const p of yamlProblems(text, rel)) problems.push(p);
-        // Deployment settings stay on the target, not in the portable user layer; the shared
-        // rule keeps the last kept line's terminator, so install-user compares like against like.
+        // Machine-only content leaves FIRST: deployment settings stay on the target, the
+        // memory backend is injected at spawn with a --config overlay, and the host shell
+        // setup (shellPath, skills.customDirectories) names absolute paths of the capture
+        // machine. omp writes customDirectories as a flow list, which the fail-closed syntax
+        // gate below cannot decode, so the gate must judge the portable text the strips
+        // produce, never the machine's raw bytes — an entry the strip removes cannot refuse
+        // the whole capture, and syntax the strips keep still refuses. The shared terminator
+        // rule keeps the last kept line's line end, so install-user compares like against like.
         text = withoutDeploymentBlocks(text);
-        // The memory backend is a deployment choice too: the board injects it at spawn with a
-        // --config overlay, so the portable layer never carries it either.
         text = withoutMemoryBackend(text);
-        // The host's own shell setup (shellPath, skills.customDirectories) names absolute paths
-        // of the capture machine — the same class of machine choice as the strips above: a
-        // worker on another platform cannot use them, so the portable layer never carries them.
         const portable = withoutHostPaths(text);
         if (portable !== text) console.log(`note: user/${rel.replace(/^\./, '')}: dropped the machine shell setup (shellPath, skills.customDirectories)`);
         text = portable;
+        for (const p of yamlProblems(text, rel)) problems.push(p);
         bytes = Buffer.from(text);
       }
       for (const [name, shape] of SHAPES) {
