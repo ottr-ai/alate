@@ -27,5 +27,7 @@ jobs:
       # Architecture gates run in order; sync.mjs needs a data repo, so it is smoked
       # against the committed fixture into a throwaway target dir (the .test.mjs
       # scripts are hermetic, and a bare run would write this job's own home).
-      - run: node zero-deps.test.mjs && node license-gate.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && node scripts/mutant-run.test.mjs
-      - run: npx tsc --noEmit && node server.test.mjs
+      # home-guard.test.mjs brackets the chain: record snapshots this runner's home,
+      # and the check in the last step fails the job when it changed mid-chain.
+      - run: node zero-deps.test.mjs && node license-gate.test.mjs && node home-guard.test.mjs && node home-guard.test.mjs record && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && node scripts/mutant-run.test.mjs
+      - run: npx tsc --noEmit && node server.test.mjs && node home-guard.test.mjs check

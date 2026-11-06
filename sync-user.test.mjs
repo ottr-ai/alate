@@ -12,6 +12,11 @@ const tmp = mkdtempSync(join(tmpdir(), 'alate-user-'));
 const repo = join(tmp, 'repo');
 const data = join(tmp, 'data');
 const home = join(tmp, 'home');
+// install-user children below get a scratch HOME distinct from their --home target: a
+// dropped --home (the mutant class behind ALAT-79) installs into the sandbox and fails
+// the assertions instead of touching the machine home.
+const childHome = join(tmp, 'child-home');
+mkdirSync(childHome);
 mkdirSync(join(repo, 'lib'), { recursive: true });
 mkdirSync(data);
 copyFileSync(fileURLToPath(new URL('./sync-user.mjs', import.meta.url)), join(repo, 'sync-user.mjs'));
@@ -555,7 +560,9 @@ try {
   mkdirSync(stub, { recursive: true });
   writeFileSync(join(stub, 'skillspector'), '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "SkillSpector v2.13.0"; exit 0; fi\nexit 0\n');
   chmodSync(join(stub, 'skillspector'), 0o755);
-  const stubEnv = process.platform === 'win32' ? undefined : { ...process.env, PATH: `${stub}${delimiter}${process.env.PATH ?? ''}` };
+  const stubEnv = { ...process.env, HOME: childHome, USERPROFILE: childHome };
+  delete stubEnv.PI_CODING_AGENT_DIR;
+  if (process.platform !== 'win32') stubEnv.PATH = `${stub}${delimiter}${stubEnv.PATH ?? ''}`;
   put('.omp/plugins/bun.lock', '{}'); // the missing-item refusal above removed it
   const blockText = 'hindsight:\n  apiUrl: http://nas\n  apiToken: $HINDSIGHT_TOKEN';
   const eol = (s, crlf) => (crlf ? s.replaceAll('\n', '\r\n') : s);

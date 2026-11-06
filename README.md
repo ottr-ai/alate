@@ -120,8 +120,10 @@ Needs Node 24.12+. Flags: `--port` or `PORT`, `--host` or `ALATE_HOST`, `--confi
 One manifest, one lockfile, no build step. The verified chain:
 
 ```sh
-npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && npx tsc --noEmit && node server.test.mjs
+npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node home-guard.test.mjs && node home-guard.test.mjs record && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && npx tsc --noEmit && node server.test.mjs && node home-guard.test.mjs check
 ```
+
+home-guard.test.mjs brackets the chain: the early record snapshots the home's `.alate`, `.agents` and `.omp`, and the final check fails the run when a path or an mtime there changed. The platform's own runtime files (the omp databases, logs, cache, run, and the two bookkeeping files under `.alate`) stay excluded: a live worker writes them during any chain.
 
 CI runs this chain on every push. `release.yml` builds a multi-arch Docker image and publishes it to `ghcr.io/ottr-ai/alate` on each GitHub release, tagged `latest`, `vX.Y.Z` and `X.Y.Z`, and `vX.Y` and `X.Y`.
 

@@ -120,7 +120,15 @@ try {
   mkdirSync(join(scriptDir, 'lib'), { recursive: true });
   copyFileSync(fileURLToPath(new URL('./sync.mjs', import.meta.url)), join(scriptDir, 'sync.mjs'));
   copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(scriptDir, 'lib', 'data.mjs'));
-  const runSync = (repoSpec, env = {}) => spawnSync(process.execPath, [join(scriptDir, 'sync.mjs'), join(tmp, 'target'), '--repo', repoSpec], { encoding: 'utf8', env: { ...process.env, ...env } });
+  // The child's HOME is a scratch dir distinct from the target: a dropped positional or
+  // default (a Stryker mutant) writes into the sandbox, never the machine home.
+  const childHome = join(tmp, 'child-home');
+  mkdirSync(childHome, { recursive: true });
+  const runSync = (repoSpec, env = {}) => {
+    const child = { ...process.env, ...env, HOME: childHome, USERPROFILE: childHome, ALATE_DATA: join(tmp, 'no-aldata') };
+    delete child.PI_CODING_AGENT_DIR; // sync.mjs prefers it over HOME; an inherited value could be a real agent dir
+    return spawnSync(process.execPath, [join(scriptDir, 'sync.mjs'), join(tmp, 'target'), '--repo', repoSpec], { encoding: 'utf8', env: child });
+  };
 
   let r = runSync('no-slash-here');
   assert.equal(r.status, 1);

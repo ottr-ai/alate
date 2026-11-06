@@ -15,6 +15,17 @@ const tmp = mkdtempSync(join(tmpdir(), 'alate-install-'));
 const scriptDir = join(tmp, 'tool'); // copy of the script + lib, so the default ../agent-data fallback misses
 const data = join(tmp, 'data');
 const home = join(tmp, 'home');
+// The child's HOME is a scratch dir distinct from the --home target: a dropped --home (a
+// Stryker mutant) installs into the sandbox and fails the assertions, never the machine
+// home. ALATE_DATA points at a missing path, so a host that exports one cannot turn the
+// missing-data refusals into surprise installs.
+const childHome = join(tmp, 'child-home');
+mkdirSync(childHome);
+const sandbox = (env = process.env) => {
+  const child = { ...env, HOME: childHome, USERPROFILE: childHome, ALATE_DATA: join(tmp, 'no-aldata') };
+  delete child.PI_CODING_AGENT_DIR; // the nested sync.mjs spawn must not see a real agent dir
+  return child;
+};
 mkdirSync(join(scriptDir, 'lib'), { recursive: true });
 copyFileSync(fileURLToPath(new URL('./install-user.mjs', import.meta.url)), join(scriptDir, 'install-user.mjs'));
 copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(scriptDir, 'lib', 'data.mjs'));
@@ -34,7 +45,7 @@ const run = (extra, h = home, env, cwd) => {
     // explicit env runs without either. Windows cannot exec an extensionless stub through
     // spawnSync, so there the suite needs a real skillspector: the gate fails closed without
     // one, by design.
-    env: resolved,
+    env: sandbox(resolved),
   });
 };
 // The stub logs its scan argv and exits with a script-set code: 0 clean, 1 findings. A
@@ -1170,7 +1181,7 @@ try {
     writeFileSync(join(pinnedDir, 'install-user.mjs'), swapped);
     r = spawnSync(process.execPath, [join(pinnedDir, 'install-user.mjs'), '--home', cacheHome, '--data', cacheData, '--skip-plugins'], {
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv') },
+      env: sandbox({ ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv') }),
     });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Scanning 9 of 9 skill snapshot\(s\) \(0 cached\)/);

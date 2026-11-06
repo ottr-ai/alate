@@ -21,7 +21,15 @@ const agents = '# data repo instructions, not a rule\n';
 const put = (name, text) => writeFileSync(join(data, name), text);
 const rmLink = p => { try { rmSync(p); } catch { spawnSync('cmd', ['/c', 'rmdir', p]); } }; // bun can't rmSync junctions
 const installed = (t, name) => readFileSync(join(t, name), 'utf8');
-const run = (t, extra = []) => spawnSync(process.execPath, [join(scriptDir, 'sync.mjs'), ...(t ? [t] : []), ...extra], { encoding: 'utf8' });
+// The child's HOME is a scratch dir distinct from every target: a dropped positional or
+// default (a Stryker mutant) writes into the sandbox, never the machine home, and the
+// target assertions fail. ALATE_DATA points at a missing path, so a host that exports one
+// cannot turn the missing-data refusals into surprise installs.
+const childHome = join(tmp, 'child-home');
+mkdirSync(childHome);
+const childEnv = { ...process.env, HOME: childHome, USERPROFILE: childHome, ALATE_DATA: join(tmp, 'no-aldata') };
+delete childEnv.PI_CODING_AGENT_DIR; // sync.mjs prefers it over HOME; an inherited value could be a real agent dir
+const run = (t, extra = []) => spawnSync(process.execPath, [join(scriptDir, 'sync.mjs'), ...(t ? [t] : []), ...extra], { encoding: 'utf8', env: childEnv });
 
 try {
   // Missing data dir: no --data, fallback ../agent-data beside scriptDir does not exist.

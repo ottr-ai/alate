@@ -17,6 +17,13 @@ with `--data`. `examples/data` is a neutral fixture used by tests and CI.
 - `license-gate.mjs` (+ `license-gate.test.mjs`): license gate over the npm tree; every
   `package-lock.json` entry's `license` field must be an allowlisted SPDX expression.
 - `*.test.mjs`: plain-node self-checks, one per script; `zero-deps.test.mjs` is the dependency gate, not tied to a script.
+- `home-guard.test.mjs`: brackets the chain. `record` snapshots the real HOME's
+  `.alate`, `.agents` and `.omp` before the tests run; the final `check` fails the
+  chain when a path or an mtime there changed. A run with no argument is the guard's
+  own self-check against fake homes. Chain runs that share one machine set
+  `ALATE_HOME_GUARD_SNAPSHOT` to separate snapshot paths. The guard ignores the
+  platform's own runtime files (the omp databases, logs, cache, run, and the two
+  bookkeeping files under `.alate`): a live worker writes them during any chain.
 - `web/index.html`/`style.css`/`app.js`/`diff.mjs`: the dashboard's static assets (Galley Proof world, see `DESIGN.md`; `diff.mjs` is the editor's line diff for proof marks; `manifest.webmanifest`, `sw.js`, and `icons/` make the dashboard installable as a PWA — `sw.js` is a network-first offline shell, and its precache list mirrors the static table in `server.ts`), and `web/dashboard.mjs` its inventory and file-edit logic, served by `server.ts` on the same loopback port as the provisioning API; the dashboard's self-check lives in `server.test.mjs`.
 - `server.ts` (+ `server.test.mjs`): long-running loopback provisioning server (key-authenticated provision API, server-side config, periodic data-repo update checks), built on Fastify and run via `node server.ts` type stripping — no build step; it also serves the dashboard UI, its inventory API (`GET /api/state`, `POST /api/import`) and its file editor API (`GET /api/files`, `GET`/`PUT`/`DELETE /api/file`: snapshot reads plus edits that verify a base hash, commit and push) with `--db <file>` (SQLite snapshot of source files and inventory, default `alate.db` beside the config file) and `--data <dir>` (import at startup) flags; `server.test.mjs` is its self-check.
 - `package.json` + `package-lock.json` + `tsconfig.json`: the only manifest, lockfile, and TS config; `dependencies` holds the server's runtime deps (`fastify`) and the two self-hosted dashboard fonts (`@fontsource-variable/source-serif-4`, `@fontsource-variable/jetbrains-mono`, served as woff2 from `/fonts/`), `devDependencies` the tooling (`typescript`, `@types/node`, `@stryker-mutator/core`). Everything else stays plain node with no third-party imports.
@@ -32,9 +39,13 @@ Every script needs a data repo, passed with `--data <dir>` (`examples/data`
 works for a dry run).
 - "Verified" means this exact chain passes from the repo root (the same chain
   `.github/workflows/sync.yml` runs):
-  `npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && node scripts/mutant-run.test.mjs && npx tsc --noEmit && node server.test.mjs`
+  `npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node home-guard.test.mjs && node home-guard.test.mjs record && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && node scripts/mutant-run.test.mjs && npx tsc --noEmit && node server.test.mjs && node home-guard.test.mjs check`
   The smoke sync passes a throwaway target dir, so the chain never writes the example rule
-  into the rules dir of the home that runs it.
+  into the rules dir of the home that runs it. Each install or sync child in the
+  self-checks gets HOME and USERPROFILE of a scratch dir beside the fixtures, and the
+  suite drops PI_CODING_AGENT_DIR from the child env. A dropped `--home` or target — the
+  mutant class of the 2026-11-06 incident — writes into the sandbox and fails a test, not
+  the machine home.
   `npm run test:mutation` is the StrykerJS mutation gate for server and CLI
   logic changes (it runs both mutation configs). It is slow, so it is not
   part of the fast chain.
