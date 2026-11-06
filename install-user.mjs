@@ -15,7 +15,10 @@
 // JSON config is adapted to the target machine first (forTarget, lib/data.mjs): a Windows capture
 // on a non-Windows machine, a POSIX-absolute capture path on Windows.
 // Plugins install from the captured lockfile with `bun install --frozen-lockfile` in ~/.omp/plugins, the
-// same root omp's plugin manager installs into.
+// same root omp's plugin manager installs into. The install runs with --ignore-scripts unless the data
+// repo opts in with a plugins-allow-scripts marker at its root, and with an allowlisted environment, so
+// server secrets never reach bun or a lifecycle script. In layer mode a machine change to the plugins
+// install files (package.json, bun.lock, patches/) never rides into the new layer: the snapshot wins.
 // Also installs the per-project worker additions Ottr's turns read: workers/<project>/apt.txt
 // (Debian packages), tools.json (declarative downloads), env.txt (env names, never values) and
 // requirements.txt (pinned, hashed Python packages)
@@ -37,7 +40,20 @@ const skipPlugins = args.flags.has('--skip-plugins');
 const layerMode = args.flags.has('--layer') || process.env.ALATE_LAYER === '1';
 const data = resolveDataDir(args, { allowClone: true });
 const userRoot = join(data.dir, 'user');
+// Lifecycle scripts are off unless the data repo opts in: a `plugins-allow-scripts` marker
+// file at the data repo root (never under user/, so it never installs into the home) turns
+// bun's --ignore-scripts off. The install environment is an allowlist either way, so the
+// server's secrets (ALATE_API_KEY, tokens) never reach bun or a script it runs.
+const allowPluginScripts = existsSync(join(data.dir, 'plugins-allow-scripts'));
+const BUN_ENV_KEYS = ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'XDG_CACHE_HOME',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'];
 const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
+// Snapshot items the provisioner itself executes or feeds to its own bun install: the
+// plugins manifest drives the install, bun.lock pins it, patches/ hold applied patches.
+// A turn-edited copy in the live layer is untrusted content, so layer mode never keeps
+// its bytes: the snapshot always wins, --force or not.
+const pluginInstallFile = rel =>
+  rel === 'omp/plugins/package.json' || rel === 'omp/plugins/bun.lock' || rel.startsWith('omp/plugins/patches/');
 // A skill snapshot is executable agent content, so install-user scans each one statically
 // (fail-closed: findings, a missing scanner, or a crashed scan refuse the whole restore before the
 // first write) before anything lands in the home. The scan applies the snapshot's own shipped
@@ -457,7 +473,14 @@ try {
       // A machine change beyond the deployment blocks is never a refusal in layer mode:
       // machine state wins and rides into the new layer, --force takes the snapshot instead.
       // have !== want is implied by the branch above; layer mode never reaches conflicts.
-      if (force) {
+      // Plugin install files are the exception: the provisioner itself runs bun install
+      // over them, so a turn-edited copy must never ride into the new layer. The snapshot
+      // wins, --force or not; a deliberate change goes through a data-repo commit.
+      if (pluginInstallFile(rel)) {
+        plan.push(['installed', dest, src]);
+        notes.push(`plugin install file takes the snapshot, machine change ignored: ${readDest}`);
+      }
+      else if (force) {
         plan.push(['installed', dest, src]);
         notes.push(`machine change overridden by --force: ${readDest}`);
       } else {
@@ -581,7 +604,12 @@ try {
 
     if (!skipPlugins && existsSync(join(userRoot, 'omp', 'plugins', 'package.json'))) {
       const pluginsDir = join(writeRoot, '.omp', 'plugins');
-      const bun = spawnSync('bun', ['install', '--frozen-lockfile'], { cwd: pluginsDir, stdio: 'inherit' });
+      const bunArgs = allowPluginScripts ? ['install', '--frozen-lockfile'] : ['install', '--frozen-lockfile', '--ignore-scripts'];
+      const bun = spawnSync('bun', bunArgs, {
+        cwd: pluginsDir,
+        stdio: 'inherit',
+        env: Object.fromEntries(BUN_ENV_KEYS.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]])),
+      });
       if (bun.error || bun.status !== 0) {
         throw new Error(bun.error?.code === 'ENOENT' ? 'bun not found; cannot install plugins.' : `bun install failed in ${pluginsDir}`);
       }

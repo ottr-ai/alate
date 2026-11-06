@@ -73,8 +73,11 @@ Rules for the links:
    (`--no-llm --fail-on-findings --use-shipped-baseline`). A failed scan deletes the layer
    folder and leaves `current` unchanged.
 7. Plugins: `bun install --frozen-lockfile` with cwd `<layer>/.omp/plugins`, so
-   `node_modules` of a running turn never change (unless `--skip-plugins`). A failure
-   deletes the layer folder and leaves `current` unchanged.
+   `node_modules` of a running turn never change (unless `--skip-plugins`). The install
+   runs with `--ignore-scripts` unless the data repo ships a `plugins-allow-scripts` marker
+   at its root, and the spawn environment is an explicit allowlist, so server secrets never
+   reach bun or a lifecycle script. A failure deletes the layer folder and leaves `current`
+   unchanged.
 8. Create the link set in the layer.
 9. Switch: create a temporary symlink in the base dir, then `rename()` it over `current`.
    POSIX rename is atomic; a reader sees either the old or the new target, never a gap.
@@ -100,6 +103,11 @@ non-zero. A failure after the switch changes nothing about the switch itself.
   deployment choice (OTTR-453): the board injects it at spawn time. Capture strips the
   `backend:` entry under the top-level `memory:` key, install drops the entry from the
   snapshot, and the entry never rides along with the machine part.
+- Plugin install files are the exception: a machine change to `omp/plugins/package.json`,
+  `omp/plugins/bun.lock`, or anything under `omp/plugins/patches/` never rides into the
+  new layer. The provisioner itself runs `bun install` over these files, so the snapshot
+  always wins and a note names each file. A deliberate change goes through a data-repo
+  commit.
 - A machine-kept JSON/YAML file can hold absolute paths that were re-rooted into the live
   layer at its install. The copy re-roots them into the new layer, so clean-up can delete
   the live layer; paths into the shared home stay shared.
@@ -182,6 +190,10 @@ them at turn end.
   the blocks; block content never reaches the output.
 - Migration: the first layer over an in-place home keeps the home's deployment blocks and
   the machine edits of `config.yml` in the new layer.
+- Plugins: a turn-edited plugins/package.json with a planted postinstall keeps the snapshot
+  bytes in the new layer, and the postinstall never runs; the run notes each ignored file.
+  The plugins install runs `--ignore-scripts` with an allowlisted environment unless the
+  data repo ships `plugins-allow-scripts`; the marker opts in, the allowlist stays.
 - A machine-kept file holding a re-rooted path lands pointing into the new layer, never
   into the live one that clean-up deletes.
 - Captured paths: a `catalogPath` under the home prefix lands re-rooted into the new layer.

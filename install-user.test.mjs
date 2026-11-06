@@ -1243,6 +1243,69 @@ try {
     assert.match(r.stdout, /machine change kept: /);
     assert.equal(lgot(l4, '.ottr/workers/web/apt.txt'), 'libnss3\n', 'everything else starts from the snapshot');
 
+    // Plugin install files drive the provisioner's own bun install, so a turn-edited copy
+    // in the live layer never rides into the new layer: the snapshot wins, and a planted
+    // postinstall never runs. The invocation itself is a boundary too: --ignore-scripts
+    // unless the data repo ships plugins-allow-scripts, and an allowlisted environment
+    // (a stub bun records argv and env keys), so server secrets never reach bun. The
+    // script-never-runs proof needs a real bun; the invocation checks run on the stub alone.
+    const hasBun = spawnSync('bun', ['--version']).status === 0;
+    if (!hasBun) console.log('bun not found: the plugin postinstall check is skipped');
+    const plugData = join(tmp, 'data-layer-plugins');
+    const putP = (rel, text) => { mkdirSync(dirname(join(plugData, 'user', rel)), { recursive: true }); writeFileSync(join(plugData, 'user', rel), text); };
+    putP('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putP('layer-rule.md', '---\ndescription: layer plugin rule\n---\n\nBody\n');
+    putP('omp/plugins/package.json', '{\n  "name": "plugins",\n  "private": true,\n  "dependencies": { "dep": "file:./dep" }\n}\n');
+    putP('omp/plugins/bun.lock', '{\n  "lockfileVersion": 2,\n  "configVersion": 1,\n  "workspaces": {\n    "": {\n      "name": "plugins",\n      "dependencies": {\n        "dep": "file:./dep",\n      },\n    },\n  },\n  "packages": {\n    "dep": ["dep@file:dep", {}],\n  }\n}\n');
+    putP('omp/plugins/dep/package.json', '{\n  "name": "dep",\n  "version": "1.0.0"\n}\n');
+    putP('omp/plugins/patches/keep.txt', 'snapshot\n');
+    const runP = (h, extra, env) => run(['--data', plugData, ...extra], h, env);
+    const plugHome = join(tmp, 'layer-home-plugins');
+    const pbase = join(plugHome, '.alate');
+    if (hasBun) {
+      let rp = runP(plugHome, ['--layer']);
+      assert.equal(rp.status, 0, rp.stderr);
+      const p1 = realpathSync(join(pbase, 'current'));
+      const snapPkg = readFileSync(join(plugData, 'user/omp/plugins/package.json'), 'utf8');
+      assert.equal(readFileSync(join(p1, '.omp/plugins/package.json'), 'utf8'), snapPkg, 'the first layer installs the snapshot');
+      // The turn edits its live layer's plugins manifest: the edit plants a postinstall
+      // that writes a marker beside the layer records, as an injected turn would.
+      const pwned = join(pbase, 'pwned');
+      const livePkg = join(realpathSync(join(pbase, 'current')), '.omp/plugins/package.json');
+      const edited = JSON.parse(readFileSync(livePkg, 'utf8'));
+      edited.scripts = { postinstall: `echo pwned > ${pwned}` };
+      writeFileSync(livePkg, `${JSON.stringify(edited, null, 2)}\n`);
+      writeFileSync(join(realpathSync(join(pbase, 'current')), '.omp/plugins/patches/keep.txt'), 'tampered\n');
+      rp = runP(plugHome, ['--layer']);
+      assert.equal(rp.status, 0, rp.stderr);
+      assert.match(rp.stdout, /plugin install file takes the snapshot, machine change ignored: .*package\.json/);
+      assert.match(rp.stdout, /plugin install file takes the snapshot, machine change ignored: .*patches[/\\]keep\.txt/);
+      const p2 = realpathSync(join(pbase, 'current'));
+      assert.equal(readFileSync(join(p2, '.omp/plugins/package.json'), 'utf8'), snapPkg, 'the new layer carries snapshot bytes, never the turn edit');
+      assert.equal(readFileSync(join(p2, '.omp/plugins/patches/keep.txt'), 'utf8'), 'snapshot\n');
+      assert.ok(!existsSync(pwned), 'the planted postinstall never ran');
+      assert.ok(!existsSync(join(p2, '.omp/plugins/pwned')), 'no marker lands in the plugins dir either');
+    }
+    const shimDir = join(tmp, 'bun-stub');
+    const bunCalls = join(shimDir, 'calls.json');
+    mkdirSync(shimDir, { recursive: true });
+    writeFileSync(join(shimDir, 'bun'), `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(bunCalls)}, JSON.stringify({ argv: process.argv.slice(2), env: Object.keys(process.env) }));\n`);
+    chmodSync(join(shimDir, 'bun'), 0o755);
+    const shimEnv = { ...process.env, PATH: `${stubDir}${delimiter}${shimDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ALATE_API_KEY: 'dummy-key', GITHUB_TOKEN: 'dummy-token' };
+    const shimHome = join(tmp, 'shim-home');
+    let rs = runP(shimHome, [], shimEnv);
+    assert.equal(rs.status, 0, rs.stderr);
+    let call = JSON.parse(readFileSync(bunCalls, 'utf8'));
+    assert.deepEqual(call.argv, ['install', '--frozen-lockfile', '--ignore-scripts']);
+    assert.ok(!call.env.includes('ALATE_API_KEY') && !call.env.includes('GITHUB_TOKEN'), 'server secrets never reach bun');
+    assert.ok(call.env.includes('PATH') && call.env.includes('HOME'));
+    writeFileSync(join(plugData, 'plugins-allow-scripts'), '\n');
+    rs = runP(shimHome, [], shimEnv);
+    assert.equal(rs.status, 0, rs.stderr);
+    call = JSON.parse(readFileSync(bunCalls, 'utf8'));
+    assert.deepEqual(call.argv, ['install', '--frozen-lockfile'], 'the data-repo marker opts in');
+    assert.ok(!call.env.includes('ALATE_API_KEY') && !call.env.includes('GITHUB_TOKEN'), 'the allowlist holds even when scripts are on');
+
     // A failed scan deletes the failed layer folder and keeps the old current: a busy board
     // provisions while turns run, and a bad skill must not take the live layer down.
     const layerHome2 = join(tmp, 'layer-home-2');
