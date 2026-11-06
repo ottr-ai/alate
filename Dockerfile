@@ -15,8 +15,9 @@ RUN apk add --no-cache python3 py3-pip \
     && cp "$(command -v skillspector)" /usr/local/bin/skillspector \
     && apk del .skillspector-build \
     && /usr/local/bin/skillspector --help > /dev/null
-# SKILLSPECTOR_BIN pins the scanner to an absolute image path so install-user.mjs never resolves it from the mounted home volume (see specs/skillspector-scanner-trust.md).
+# SKILLSPECTOR_BIN pins the scanner binary to an absolute image path, and PYTHONNOUSERSITE=1 stops Python from loading user site-packages (.pth, usercustomize.py) from the mounted home volume (see specs/skillspector-scanner-trust.md).
 ENV SKILLSPECTOR_BIN=/usr/local/bin/skillspector
+ENV PYTHONNOUSERSITE=1
 COPY --from=oven/bun:1.4.2-alpine /usr/local/bin/bun /usr/local/bin/bun
 WORKDIR /app
 COPY package.json package-lock.json ./

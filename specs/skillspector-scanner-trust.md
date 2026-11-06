@@ -10,6 +10,11 @@ it as the provisioner with the server's full environment, which carries `ALATE_A
 The planted binary also passed every skill, so the fail-closed skill gate was gone, and the
 passes were cached.
 
+The scanner is a pip console script, so it runs a system Python. That interpreter loads the
+user site-packages of its `HOME` (`<home>/.local/lib/python3.X/site-packages`) and executes
+every `.pth` file and `usercustomize.py` there at start. A turn can plant those too, so even
+the pinned scanner binary must never see a home that turns can write as its Python user site.
+
 ## Contract
 
 1. Resolution order in `runScan`: `SKILLSPECTOR_BIN` (when set), the pinned venv
@@ -26,12 +31,16 @@ passes were cached.
    only documented keys plus the `ALATE_TEST_*` family. `install-user.mjs` passes the scanner,
    bun, and sync children only their documented keys. `ALATE_API_KEY` never crosses a spawn
    boundary.
-   - scanner child: `PATH HOME USERPROFILE TEMP TMP TMPDIR LANG LC_ALL TZ SystemRoot SystemDrive ComSpec PATHEXT`
+   - scanner child: `PATH HOME USERPROFILE TEMP TMP TMPDIR LANG LC_ALL TZ SystemRoot SystemDrive ComSpec PATHEXT`, and `PYTHONNOUSERSITE=1` forced (never passed through from the parent)
    - bun and sync children: the same keys, plus proxy keys for bun (`HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy`) and `ALATE_TEST_SCRIPT_GATE` for sync
    - server to script children: those keys, plus `PI_CODING_AGENT_DIR ALATE_LAYER ALATE_DATA ALATE_KEEP_TEMP SKILLSPECTOR_BIN SKILLSPECTOR_VENV` and every `ALATE_TEST_*` key
 6. The image pins the scanner. The Dockerfile copies the pip-installed entry point to
    `/usr/local/bin/skillspector` and sets `ENV SKILLSPECTOR_BIN=/usr/local/bin/skillspector`,
-   so the image never resolves a scanner from the home volume.
+   so the image never resolves a scanner binary from the home volume.
+7. Python never loads a user site from the home: the scanner child runs with
+   `PYTHONNOUSERSITE=1` on every spawn (probe included, because a `.pth` executes at
+   interpreter start), and the image sets `ENV PYTHONNOUSERSITE=1` for every Python process
+   in the container.
 
 ## Acceptance checks
 
@@ -41,7 +50,11 @@ passes were cached.
 - `SKILLSPECTOR_BIN` inside the target home or a relative path refuses the run.
 - A venv outside the home that is not owned by root is skipped (test guarded to non-root runners).
 - The scanner child environment dump in `install-user.test.mjs` must not contain `ALATE_API_KEY`
-  when install-user runs with it set.
+  when install-user runs with it set, and must carry `PYTHONNOUSERSITE=1`.
+- A test plants a user-site `.pth` file under the target home that writes a marker when Python
+  executes it, with a positive control that proves the marker appears without the guard. The
+  guarded scan run must not execute it (test guarded to POSIX runners whose python3 supports
+  user site).
 - `server.test.mjs` captures the provision child environment through `ALATE_TEST_CHILD_ENV`.
   A server started with `ALATE_API_KEY` must not pass it to children, and documented keys
   (`PATH`, `SKILLSPECTOR_BIN`, `ALATE_TEST_*`) must pass.

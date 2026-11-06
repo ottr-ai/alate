@@ -101,6 +101,8 @@ const SKILL_ROOT_NAMES = new Set(['skills', 'managed-skills']);
 
 // Spawned children get allowlisted environments: ALATE_API_KEY and every other server
 // secret never crosses a spawn boundary (specs/skillspector-scanner-trust.md, contract 5).
+// Scanner children additionally force PYTHONNOUSERSITE=1 (scannerEnv); it is never passed
+// through from the parent, so it is not in this allowlist.
 const CHILD_ENV_KEYS = ['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'SystemDrive', 'ComSpec', 'PATHEXT'];
 const childEnv = extra => {
   const env = {};
@@ -110,6 +112,13 @@ const childEnv = extra => {
   }
   return env;
 };
+
+// Python loads user site-packages from HOME (in the container the shared home volume) and
+// executes .pth files and usercustomize.py there at interpreter start, so the scanner child
+// always forces PYTHONNOUSERSITE=1 — probe included, because a planted .pth runs at probe
+// time too (specs/skillspector-scanner-trust.md, contract 7). Never passed through from the
+// parent.
+const scannerEnv = () => ({ ...childEnv(), PYTHONNOUSERSITE: '1' });
 
 // True when the path (realpath when it exists, else itself, resolved) lies inside the target
 // home install-user writes into. A scanner inside that home is agent-turn-writable, so it is
@@ -241,7 +250,7 @@ const recordPass = passes => {
 // The pinned build's verdict for these exact bytes, printed as one block so a tail of the
 // output always shows a whole report.
 const scanOne = (scanner, dir, total) => new Promise((resolve, reject) => {
-  const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv() });
+  const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: scannerEnv() });
   const out = [], errOut = [];
   child.stdout.on('data', chunk => out.push(chunk));
   child.stderr.on('data', chunk => errOut.push(chunk));
@@ -262,7 +271,9 @@ const runScan = async skillDirs => {
   // serves only when it is root-owned on POSIX and outside the home. Then PATH. The pin is
   // enforced, not just documented: v2 baseline fingerprints bind to scanner_version, so a
   // scanner that is not the pinned build silently suppresses nothing and every accepted
-  // finding resurfaces as a fresh rejection (the 2026-10-31 Windows host failure).
+  // finding resurfaces as a fresh rejection (the 2026-10-31 Windows host failure). Both
+  // scanner spawns (probe and scan) force PYTHONNOUSERSITE=1 so Python never loads user
+  // site-packages from the home (contract 7).
   const venvBin = join(
     process.env.SKILLSPECTOR_VENV ?? join(homedir(), '.cache', 'skillspector-venv'),
     process.platform === 'win32' ? join('Scripts', 'skillspector.exe') : join('bin', 'skillspector'),
@@ -298,7 +309,7 @@ const runScan = async skillDirs => {
   let scanner = null;
   let reported = null;
   for (const candidate of candidates) {
-    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', env: childEnv() });
+    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', env: scannerEnv() });
     if (probe.error?.code === 'ENOENT') continue;
     if (probe.error) {
       throw new Error(`skillspector could not run (${probe.error.code ?? probe.error.message}); refusing to install ${skillDirs.length} skill snapshot(s).`);

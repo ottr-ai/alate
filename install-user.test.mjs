@@ -915,6 +915,51 @@ try {
     assert.match(r.stderr, /SKILLSPECTOR_BIN/);
     assert.ok(!existsSync(plantedMarker), 'the planted venv scanner never ran');
 
+    // A planted user-site .pth under the target home must never execute: the scanner is a pip
+    // console script, so a real Python interpreter starts for the probe and the scan, and
+    // Python runs every .pth file and usercustomize.py in HOME's user site-packages at
+    // interpreter start. The scanner child forces PYTHONNOUSERSITE=1 for exactly this
+    // (contract 7). POSIX-only, and gated on a python3 that actually loads user site — the
+    // positive control below proves the planted .pth really runs without the guard, so the
+    // absence check is honest.
+    if (process.platform !== 'win32') {
+      const pthMarker = join(home, 'pth-marker');
+      const pyProbe = spawnSync('python3', ['--version'], { encoding: 'utf8' });
+      const userSite = pyProbe.error || pyProbe.status !== 0 ? '' : String(spawnSync('python3', ['-c', "import sysconfig; print(sysconfig.get_path('purelib', 'posix_user'))"], { encoding: 'utf8', env: { ...process.env, HOME: home } }).stdout ?? '').trim();
+      if (!userSite || !userSite.startsWith(home + sep)) {
+        console.log('planted user-site check skipped: python3 user site does not live under the test home');
+      } else {
+        mkdirSync(userSite, { recursive: true });
+        writeFileSync(join(userSite, 'evil-user-site.pth'), `import os; os.system("touch '${pthMarker}'")\n`);
+        const control = spawnSync('python3', ['-c', 'pass'], { encoding: 'utf8', env: { ...process.env, HOME: home } });
+        if (!existsSync(pthMarker)) {
+          console.log(`planted user-site check skipped: python3 on this machine does not load user site (control exit ${control.status})`);
+        } else {
+          // Remove the control's marker so the guarded run's absence assertion below is
+          // meaningful; the planted .pth itself stays planted for it.
+          rmSync(pthMarker, { force: true });
+          const pyStubDir = join(tmp, 'py-stub');
+          mkdirSync(pyStubDir, { recursive: true });
+          const pyStub = join(pyStubDir, 'skillspector');
+          writeFileSync(pyStub, [
+            '#!/usr/bin/env python3',
+            'import sys',
+            "if sys.argv[1] == '--version':",
+            "    print('SkillSpector v2.13.0')",
+            "elif sys.argv[1] == 'scan':",
+            "    print('scan ' + ' '.join(sys.argv[2:]))",
+            '',
+          ].join('\n'));
+          chmodSync(pyStub, 0o755);
+          rmSync(join(home, '.alate', 'skillspector-pass.json'), { force: true });
+          r = run(['--data', data, '--skip-plugins'], home, { ...process.env, HOME: home, SKILLSPECTOR_BIN: pyStub, SKILLSPECTOR_VENV: join(tmp, 'no-venv') });
+          assert.equal(r.status, 0, r.stderr);
+          assert.ok(r.stdout.includes(pyStub), `the run names the SKILLSPECTOR_BIN scanner: ${r.stdout}`);
+          assert.ok(!existsSync(pthMarker), 'the planted user-site .pth never executed: the probe and the scan both ran with PYTHONNOUSERSITE=1');
+        }
+      }
+    }
+
     // SKILLSPECTOR_BIN misconfigurations refuse without a fallback: a relative path and a
     // path inside the target home are both untrusted by contract 2 of the spec.
     r = run(['--data', data, '--skip-plugins'], home, { ...venvEnv, SKILLSPECTOR_BIN: 'skillspector' });
@@ -950,6 +995,7 @@ try {
     assert.doesNotMatch(childEnvDump, /ALATE_API_KEY/, 'the scanner child never sees ALATE_API_KEY');
     assert.doesNotMatch(childEnvDump, /GH_TOKEN/, 'the scanner child never sees GH_TOKEN');
     assert.doesNotMatch(childEnvDump, /PYTHONPATH/, 'the scanner child never sees PYTHONPATH');
+    assert.match(childEnvDump, /PYTHONNOUSERSITE=1/, 'the scanner child forces user-site isolation (contract 7)');
 
     // The real verdict, on the real snapshot: the break-ui bytes the Windows host rejected on
     // 2026-10-31 (P1 at SKILL.md:36 resurfaced; the shipped baseline accepts them under the
