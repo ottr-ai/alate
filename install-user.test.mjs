@@ -21,8 +21,9 @@ copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(scr
 // Layer mode spawns the real sync.mjs beside the script for the rules install.
 copyFileSync(fileURLToPath(new URL('./sync.mjs', import.meta.url)), join(scriptDir, 'sync.mjs'));
 const put = (rel, text) => { mkdirSync(join(data, 'user', rel, '..'), { recursive: true }); writeFileSync(join(data, 'user', rel), text); };
-const run = (extra, h = home, env) => spawnSync(process.execPath, [join(scriptDir, 'install-user.mjs'), '--home', h, ...extra], {
+const run = (extra, h = home, env, cwd) => spawnSync(process.execPath, [join(scriptDir, 'install-user.mjs'), '--home', h, ...extra], {
   encoding: 'utf8',
+  cwd,
   // Default env puts the stub skillspector first on PATH (the scan gate) and points
   // SKILLSPECTOR_VENV at a path that does not exist, so the run resolves the PATH stub; an
   // explicit env runs without either. Windows cannot exec an extensionless stub through
@@ -1085,9 +1086,14 @@ try {
   if (process.platform === 'win32') {
     console.log('win32: the layer-switch checks need symlink privileges; skipped');
   } else {
-    const ldata = join(tmp, 'data-layer');
+    // install-user canonicalizes the layer home (a --home through a symlink or a relative
+    // --home must behave exactly like its resolved path), so the fixture spellings are
+    // canonical too: the captured catalogPath must hit the remap prefix, and the
+    // realpath/readlink assertions compare canonical strings on every platform.
+    const tmpReal = realpathSync(tmp);
+    const ldata = join(tmpReal, 'data-layer');
     const putL = (rel, text) => { mkdirSync(dirname(join(ldata, 'user', rel)), { recursive: true }); writeFileSync(join(ldata, 'user', rel), text); };
-    const layerHome = join(tmp, 'layer-home');
+    const layerHome = join(tmpReal, 'layer-home');
     const lconfig = 'modelRoles:\n  default: zai/glm\n';
     putL('omp/agent/config.yml', lconfig);
     putL('omp/agent/marketplaces.json', `${JSON.stringify({ marketplaces: [
@@ -1227,7 +1233,7 @@ try {
     // Migration: the first layer over an existing in-place home reads the machine part of
     // config.yml from the home, so the deployment blocks and other machine edits survive the
     // switch (compose turns ALATE_LAYER=1 on over exactly such a home).
-    const layerHome4 = join(tmp, 'layer-home-4');
+    const layerHome4 = join(tmpReal, 'layer-home-4');
     r = run(['--data', ldata, '--skip-plugins'], layerHome4);
     assert.equal(r.status, 0, r.stderr);
     writeFileSync(join(layerHome4, '.omp/agent/config.yml'),
@@ -1312,7 +1318,7 @@ try {
 
     // A failed scan deletes the failed layer folder and keeps the old current: a busy board
     // provisions while turns run, and a bad skill must not take the live layer down.
-    const layerHome2 = join(tmp, 'layer-home-2');
+    const layerHome2 = join(tmpReal, 'layer-home-2');
     r = runL(layerHome2, ['--skip-plugins', '--layer']);
     assert.equal(r.status, 0, r.stderr);
     const base2 = join(layerHome2, '.alate');
@@ -1338,12 +1344,52 @@ try {
     rmSync(join(ldata, 'bad-rule.md'));
 
     // current is a real directory: refuse before any write, migration is out of scope.
-    const layerHome3 = join(tmp, 'layer-home-3');
+    const layerHome3 = join(tmpReal, 'layer-home-3');
     mkdirSync(join(layerHome3, '.alate', 'current'), { recursive: true });
     r = runL(layerHome3, ['--skip-plugins', '--layer']);
     assert.equal(r.status, 1, 'a real current directory refuses the run');
     assert.match(r.stderr, /exists and is not a symlink/);
     assert.ok(!existsSync(join(layerHome3, '.alate', 'layers')), 'the refusal happens before any write');
+
+    // A --home through a symlink must behave exactly like the real path: preflight, live-layer
+    // detection, clean-up and the switch link all compare full paths, and a non-canonical home
+    // once made them disagree (clean-up deleted the layer current pointed at, machine state
+    // was read from the fresh layer, shared links pointed through the link).
+    const layerHome5 = join(tmpReal, 'layer-home-5');
+    mkdirSync(layerHome5, { recursive: true });
+    const linkHome5 = join(tmpReal, 'layer-home-5-link');
+    symlinkSync(layerHome5, linkHome5);
+    const base5 = join(layerHome5, '.alate');
+    const layers5 = join(base5, 'layers');
+    r = runL(linkHome5, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(layers5), ['nogit-1']);
+    assert.equal(readlinkSync(join(base5, 'current')), join(layers5, 'nogit-1'), 'the switch target is the canonical layer path, never through the link');
+    assert.equal(readlinkSync(join(layers5, 'nogit-1', '.omp/agent/agent.db')), join(layerHome5, '.omp/agent/agent.db'), 'shared-state targets live under the real home');
+    writeFileSync(join(layers5, 'nogit-1', '.omp/agent/skills/mine/SKILL.md'), '# mine, edited\n');
+    r = runL(linkHome5, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /machine change kept: /);
+    assert.equal(lgot(join(layers5, 'nogit-2'), '.omp/agent/skills/mine/SKILL.md'), '# mine, edited\n', 'machine state is read from the live layer through the link');
+    assert.deepEqual(readdirSync(layers5).sort(), ['nogit-1', 'nogit-2'], 'the previous layer survives clean-up through a link');
+    r = runL(linkHome5, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(layers5).sort(), ['nogit-2', 'nogit-3'], 'clean-up keeps the current layer and the one before it through a link');
+
+    // A relative --home resolves to the same layout: the switch link carries an absolute
+    // target (a relative one resolves against the link's own directory and dangles) and
+    // clean-up keeps the previous layer.
+    const relRoot = join(tmpReal, 'rel-home-root');
+    mkdirSync(relRoot, { recursive: true });
+    const relHome = join(relRoot, 'rel-home');
+    const relLayers = join(relHome, '.alate', 'layers');
+    const relRun = extra => run(['--data', ldata, ...extra], 'rel-home', undefined, relRoot);
+    r = relRun(['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readlinkSync(join(relHome, '.alate', 'current')), join(relLayers, 'nogit-1'), 'the switch target is absolute from a relative --home');
+    r = relRun(['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(relLayers).sort(), ['nogit-1', 'nogit-2'], 'clean-up keeps the previous layer from a relative --home');
 
     // The layer helpers are pure: the counter never collides with the names it read and the
     // home remap is reversible and inert without a boundary occurrence.

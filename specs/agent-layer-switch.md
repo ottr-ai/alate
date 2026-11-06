@@ -15,6 +15,11 @@ running turn reads: it installs into a new folder, then one atomic rename makes 
 ## Layout in the shared home
 
 - Base: `<home>/.alate`
+- Layer mode resolves the home once to its real path (through the longest existing
+  prefix, so a fresh home still resolves): a `--home` given relative or through a symlink
+  behaves exactly like the path it resolves to — the switch link and the shared-state
+  links carry absolute targets under the resolved home, and clean-up keys its keep set by
+  layer id. Non-layer mode keeps the home as given.
 - Layers: `<home>/.alate/layers/<id>`
 - Layer id: `<commit>-<n>`. `<commit>` is the first 12 hex characters of `git -C <data-dir>
   rev-parse HEAD`; a data dir without git uses `nogit`. `<n>` continues the highest counter

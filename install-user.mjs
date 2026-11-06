@@ -29,7 +29,7 @@
 // list it no longer ships is deleted. tools.json, env.txt and requirements.txt are validated before any write.
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, availableParallelism } from 'node:os';
-import { dirname, join, relative, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -40,6 +40,28 @@ const home = args.values['--home'] ?? homedir();
 const force = args.flags.has('--force');
 const skipPlugins = args.flags.has('--skip-plugins');
 const layerMode = args.flags.has('--layer') || process.env.ALATE_LAYER === '1';
+// Layer mode canonicalizes the home once, through the longest existing prefix, so a fresh
+// (not yet created) home still resolves. A --home given relative or through a symlink must
+// behave exactly like the path it resolves to: clean-up compares realpath(current) values
+// against join(layersDir, name), the switch and shared-state links must carry absolute
+// targets, and the home remap re-roots captured paths by the home prefix. A non-canonical
+// home broke all three: clean-up deleted the layer current pointed at, machine state was
+// read from the fresh layer, and a relative home left current dangling. Non-layer mode
+// keeps the home exactly as given.
+const resolveHome = given => {
+  let prefix = resolve(given);
+  const tail = [];
+  for (;;) {
+    try {
+      return join(realpathSync(prefix), ...tail);
+    } catch (err) {
+      if ((err.code !== 'ENOENT' && err.code !== 'ENOTDIR') || dirname(prefix) === prefix) throw err;
+      tail.unshift(basename(prefix));
+      prefix = dirname(prefix);
+    }
+  }
+};
+const layerHome = layerMode ? resolveHome(home) : home;
 const data = resolveDataDir(args, { allowClone: true });
 const userRoot = join(data.dir, 'user');
 // Lifecycle scripts are off unless the data repo opts in: a `plugins-allow-scripts` marker
@@ -339,7 +361,7 @@ try {
   // Top-level snapshot dirs are dot-dirs in the home (user/omp -> ~/.omp): the layer's own paths.
   const roots = new Set(readdirSync(userRoot).map(name => '.' + name));
 
-  const base = join(home, '.alate');
+  const base = join(layerHome, '.alate');
   const currentLink = join(base, 'current');
   const layersDir = join(base, 'layers');
   let writeRoot = home, readRoot = home, machineRoot = home, newLayerDir = null;
@@ -360,7 +382,7 @@ try {
     // The machine part of config.yml comes from the live layer when there is one; on a
     // first layer over an in-place home it comes from the home itself, so the deployment
     // blocks and the entry script's machine edit survive the migration.
-    machineRoot = live !== null ? live : (existsSync(join(home, '.omp', 'agent', 'config.yml')) ? home : newLayerDir);
+    machineRoot = live !== null ? live : (existsSync(join(layerHome, '.omp', 'agent', 'config.yml')) ? layerHome : newLayerDir);
   }
 
   const plan = [];
@@ -440,7 +462,7 @@ try {
     // never snapshot content: capture strips it, and a snapshot captured by an older alate
     // loses the entry here, so the provisioned config.yml never carries the choice.
     if (rel === 'omp/agent/config.yml') snapshot = Buffer.from(withoutMemoryBackend(snapshot.toString('utf8')), 'utf8');
-    if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) snapshot = Buffer.from(remapHomePaths(snapshot.toString('utf8'), home, newLayerDir), 'utf8');
+    if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) snapshot = Buffer.from(remapHomePaths(snapshot.toString('utf8'), layerHome, newLayerDir), 'utf8');
     // config.yml's top-level hindsight:/alate: blocks are deployment settings that stay on the
     // target: the snapshot never carries them (capture strips them), and the machine's own ride
     // along on every install. In layer mode they come from the live layer's config, the fresh
@@ -636,7 +658,7 @@ try {
           console.log('layer keeps snapshot content: ' + rel);
           continue;
         }
-        const target = join(home, rel);
+        const target = join(layerHome, rel);
         mkdirSync(dirname(target), { recursive: true });
         if (dirLinks.includes(rel)) mkdirSync(target, { recursive: true });
         mkdirSync(dirname(join(newLayerDir, rel)), { recursive: true });
@@ -653,10 +675,12 @@ try {
       console.log(`switched ${currentLink} -> ${newLayerDir}`);
       // Clean-up keeps the live layer, the one before it, the new one, and anything a pinned
       // turn holds (in-use.json; absent means no runner has pinned a layer yet). An unreadable
-      // record stops deletion: safety over disk space.
-      const keep = new Set([newLayerDir]);
-      try { keep.add(realpathSync(currentLink)); } catch { /* dangling: kept via newLayerDir */ }
-      if (previousTarget) keep.add(previousTarget);
+      // record stops deletion: safety over disk space. Keep entries are layer ids, never full
+      // paths: realpath values and join-built paths must never disagree about the spelling of
+      // the same layer, or clean-up deletes the layer current points at.
+      const keep = new Set([basename(newLayerDir)]);
+      try { keep.add(basename(realpathSync(currentLink))); } catch { /* dangling: kept via newLayerDir */ }
+      if (previousTarget) keep.add(basename(previousTarget));
       const inUsePath = join(base, 'in-use.json');
       let inUse = null;
       let stopCleanup = false;
@@ -664,9 +688,9 @@ try {
         try { inUse = JSON.parse(readFileSync(inUsePath, 'utf8')); }
         catch { console.log('in-use.json unreadable; keeping every layer'); stopCleanup = true; }
       }
-      if (inUse) for (const id of inUse.layers ?? []) keep.add(join(layersDir, id));
+      if (inUse) for (const id of inUse.layers ?? []) keep.add(id);
       if (!stopCleanup) for (const name of readdirSync(layersDir)) {
-        if (!/^(?:[0-9a-f]{12}|nogit)-\d+$/.test(name) || keep.has(join(layersDir, name))) continue;
+        if (!/^(?:[0-9a-f]{12}|nogit)-\d+$/.test(name) || keep.has(name)) continue;
         rmSync(join(layersDir, name), { recursive: true });
         console.log(`deleted layer ${name}`);
       }
