@@ -622,5 +622,9 @@ if (dashState.source) {
 dashCheck()
 void updateCheck()
 
-const address = await app.listen({ port, host })
-console.log(`alate server on ${address}`)
+await app.listen({ port, host })
+// Fastify's listen() return maps a wildcard bind back to 127.0.0.1 (the compose image
+// binds 0.0.0.0 so a published port can reach it); print what the socket actually holds.
+const bound = app.server.address() as AddressInfo
+const bindAddr = bound.family === 'IPv6' ? `[${bound.address}]` : bound.address
+console.log(`alate server on http://${bindAddr}:${bound.port}`)

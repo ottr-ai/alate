@@ -2277,7 +2277,9 @@ try {
 
   // 79. Non-loopback guard: with --host 0.0.0.0 every dashboard route that reads or
   // changes state needs the key (Bearer token or login cookie); loopback stays key-free
-  // (every earlier section ran unauthenticated on the default loopback bind).
+  // (every earlier section ran unauthenticated on the default loopback bind). The log line
+  // must name the bind the socket holds: fastify's listen() return maps 0.0.0.0 back to
+  // 127.0.0.1, which read like a loopback bind under compose (image env ALATE_HOST=0.0.0.0).
   {
     const lanConfig = join(tmp, 'server-config-lan.json');
     const lanDb = join(tmp, 'state-lan.db');
@@ -2289,7 +2291,7 @@ try {
         child.stdout.on('data', chunk => {
           buf += chunk;
           const k = /alate API key: (\S+)\n/.exec(buf);
-          const l = /alate server on (http:\/\/[\d.]+:\d+)\n/.exec(buf);
+          const l = /alate server on (http:\/\/0\.0\.0\.0:\d+)\n/.exec(buf);
           if (k) lanKey = k[1];
           if (k && l) resolve(l[1]);
         });
