@@ -20,9 +20,7 @@ export default {
   // stryker-incremental.json after growing the suite without touching server code.
   incremental: true,
   incrementalFile: "stryker-incremental.json",
-  // 20 of 24 cores: the test chains are single-core sequences, so extra workers
-  // only oversubscribe and stretch runs toward the timeout budget.
-  concurrency: 20,
+  concurrency: 8,
   // Budget per run = timeoutMS + timeoutFactor x dry-run net time. The suite
   // spawns the server and waits on updates, so the 5 s default is too tight.
   // The factor is 4, not 2: on a shared box a load spike can stretch a chain run
@@ -41,7 +39,7 @@ export default {
   mutate: ["server.ts", "web/dashboard.mjs", "lib/updates.mjs"],
   reporters: ["clear-text", "progress"],
   // The break threshold equals the measured score of this tree, rounded down (fresh
-  // cache, quiet machine, 2026-11-05: 92.78). Raise it when the score rises; never
+  // cache, quiet machine, 2026-11-06: 93.88). Raise it when the score rises; never
   // lower it or shrink the mutate set.
   // Remaining survivors, deliberately untested: (the list below predates this task; the
   // fresh measurement confirmed them)
@@ -75,5 +73,5 @@ export default {
   //   only rewords the 404; the display-cut line differs only past the 200-char cut;
   //   the concurrent-write window (fileEdit's running/writing check) is unreachable from a sequential
   //   fetch suite, which serves one origin over one connection.
-  thresholds: { high: 80, low: 60, break: 92 },
+  thresholds: { high: 80, low: 60, break: 93 },
 };

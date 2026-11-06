@@ -24,9 +24,7 @@ export default {
   incremental: true,
   incrementalFile: "stryker-incremental-cli.json",
   tempDirName: join(tmpdir(), "alate-stryker-cli"),
-  // 20 of 24 cores: the test chains are single-core sequences, so extra workers
-  // only oversubscribe and stretch runs toward the timeout budget.
-  concurrency: 20,
+  concurrency: 8,
   // Budget per run = timeoutMS + timeoutFactor x dry-run net time. The CLI suites spawn
   // script processes and the scanner stub, so the 5 s default is too tight.
   // The factor is 4, not 2: on a shared box a load spike can stretch a chain run
@@ -40,7 +38,7 @@ export default {
   mutate: ["lib/data.mjs", "sync.mjs", "install-user.mjs", "sync-user.mjs", "sync-projects.mjs"],
   reporters: ["clear-text", "progress"],
   // The break threshold equals the measured score of this tree, rounded down (fresh
-  // cache, quiet machine, 2026-11-05: 76.19). Raise it when the score rises; never
+  // cache, quiet machine, 2026-11-06: 76.86). Raise it when the score rises; never
   // lower it or shrink the mutate set.
   // Remaining survivors in the gates (ruleProblems, redactSecrets, safeRel,
   // checkDestination, forTarget, the CONFIG origin gate, the hidden-character scan),
