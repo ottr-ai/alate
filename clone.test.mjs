@@ -227,6 +227,20 @@ try {
   assert.deepEqual(ruleProblems('r.md', '---\n\n---\ndescription: real\n---\nbody\n'), ['r.md: needs frontmatter with a description'], 'the first frontmatter block decides');
   assert.deepEqual(ruleProblems('r.md', '---\ndescription: ok\n---\ntext \u0007 bell\n'), ['r.md:4:6: hidden character U+0007']);
   assert.deepEqual(ruleProblems('ctx.md', 'text \u200B zwsp\n', { frontmatter: false }), ['ctx.md:1:6: hidden character U+200B'], 'agent-context files scan hidden characters only');
+  // Emoji text passes: a text/emoji-style selector (U+FE0E/U+FE0F) right after an emoji or
+  // symbol code point, and a ZWJ (U+200D) joining two emoji with a skin-tone modifier
+  // between. An upstream skill bump carrying these must not stop every provision.
+  assert.deepEqual(
+    ruleProblems('r.md', '---\ndescription: ok\n---\n\u26A0\uFE0F \u2733\uFE0E \u{1F469}\u{1F3FD}\u200D\u{1F4BB}\n'),
+    [],
+    'emoji selector and ZWJ sequences are accepted'
+  );
+  // Every other hit stays fatal: zero-width space, a bidi override, a selector with no emoji
+  // or symbol before it, and a ZWJ outside an emoji run.
+  assert.deepEqual(ruleProblems('r.md', '---\ndescription: ok\n---\ntext \u200B here\n'), ['r.md:4:6: hidden character U+200B'], 'zero-width space stays fatal');
+  assert.deepEqual(ruleProblems('r.md', '---\ndescription: ok\n---\ntext \u202E here\n'), ['r.md:4:6: hidden character U+202E'], 'a bidi override stays fatal');
+  assert.deepEqual(ruleProblems('r.md', '---\ndescription: ok\n---\n\uFE0F leading\n'), ['r.md:4:1: hidden character U+FE0F'], 'a selector with no emoji or symbol before it stays fatal');
+  assert.deepEqual(ruleProblems('r.md', '---\ndescription: ok\n---\na\u200Db\n'), ['r.md:4:2: hidden character U+200D'], 'a ZWJ outside an emoji run stays fatal');
 
   // Property checks (fuzz tier via forAll in lib/data.mjs). Gate: 200 runs, fixed seed
   // 42; PROP_RUNS=<n> re-seeds randomly for the review deep tier.
