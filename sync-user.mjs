@@ -7,7 +7,7 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
-import { assertSourceInside, checkDestination, normText, parseArgs, resolveDataDir, withoutDeploymentBlocks, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, normText, parseArgs, resolveDataDir, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
 
 // --repo is a valued option so resolveDataDir can refuse cloning with the capture-specific
 // message; capture takes no flags and no positional arguments.
@@ -39,9 +39,11 @@ const ITEMS = [
 ];
 const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
 // Items a home may legitimately lack: ~/.omp/plugins/patches exists only once a patched
-// plugin is installed, and its absence must not refuse the capture. Everything else in
-// ITEMS is required.
-const OPTIONAL = new Set(['.omp/plugins/patches']);
+// plugin is installed; pix.json only once the pix plugin has run; marketplaces.json and
+// installed_plugins.json only once a marketplace/plugin is registered; and ~/.omp/agent/skills
+// only once a skill is installed. A normal fresh Windows omp home misses all of these, and
+// their absence must not refuse the capture. Everything else in ITEMS is required.
+const OPTIONAL = new Set(['.omp/plugins/patches', '.pi/agent/pix.json', '.omp/agent/skills', '.omp/marketplaces.json', '.omp/plugins/installed_plugins.json']);
 // Shapes of real credentials (codeguard-1-hardcoded-credentials), not words: docs that only mention keys still sync.
 const SHAPES = [
   ['AWS access key', /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b/],
@@ -209,7 +211,8 @@ const plan = [];
 for (const item of ITEMS) {
   const src = join(home, item);
   if (!existsSync(src)) {
-    if (!OPTIONAL.has(item)) problems.push(`~/${item} is missing (fix ITEMS in sync-user.mjs or pass --home)`);
+    if (OPTIONAL.has(item)) console.log(`note: ~/${item} is missing; skipped`);
+    else problems.push(`~/${item} is missing (fix ITEMS in sync-user.mjs or pass --home)`);
     continue;
   }
   try {
@@ -234,6 +237,12 @@ for (const item of ITEMS) {
         // The memory backend is a deployment choice too: the board injects it at spawn with a
         // --config overlay, so the portable layer never carries it either.
         text = withoutMemoryBackend(text);
+        // The host's own shell setup (shellPath, skills.customDirectories) names absolute paths
+        // of the capture machine — the same class of machine choice as the strips above: a
+        // worker on another platform cannot use them, so the portable layer never carries them.
+        const portable = withoutHostPaths(text);
+        if (portable !== text) console.log(`note: user/${rel.replace(/^\./, '')}: dropped the machine shell setup (shellPath, skills.customDirectories)`);
+        text = portable;
         bytes = Buffer.from(text);
       }
       for (const [name, shape] of SHAPES) {

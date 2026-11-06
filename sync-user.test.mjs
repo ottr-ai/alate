@@ -6,7 +6,7 @@ import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, 
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { forAll, keepTemp, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
+import { forAll, keepTemp, withoutHostPaths, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-user-'));
 const repo = join(tmp, 'repo');
@@ -604,19 +604,52 @@ try {
   assert.equal(r2.status, 0, r2.stderr);
   assert.ok(!r2.stdout.includes('patches/@xynogen'), r2.stdout); // never reported stale
   assert.equal(snap(patchPath), patch, 'the patch file is captured with the plugins layer');
-  // A home without patches/ still captures: every other item stays required.
-  const nopatch = join(tmp, 'home-nopatch');
-  for (const it of ['.omp/agent/config.yml', '.omp/agent/mcp.json', '.omp/agent/optimizer.json',
-    '.pi/agent/pix.json', '.omp/marketplaces.json', '.omp/plugins/package.json',
-    '.omp/plugins/bun.lock', '.omp/plugins/omp-plugins.lock.json',
-    '.omp/plugins/installed_plugins.json', '.agents/.skill-lock.json']) {
-    mkdirSync(join(nopatch, it, '..'), { recursive: true });
-    writeFileSync(join(nopatch, it), it.endsWith('.json') || it.endsWith('.lock') ? '{}' : 'k: ${V}\n');
-  }
-  for (const d of ['.omp/agent/extensions', '.omp/agent/skills', '.omp/agent/managed-skills', '.agents/skills'])
-    mkdirSync(join(nopatch, d), { recursive: true });
+  // A home without patches/ still captures: bun.lock and the rest of the required items
+  // stay required (the bun.lock refusal above proves one).
+  const plainHome = name => {
+    const h = join(tmp, name);
+    for (const it of ['.omp/agent/config.yml', '.omp/agent/mcp.json', '.omp/agent/optimizer.json',
+      '.pi/agent/pix.json', '.omp/marketplaces.json', '.omp/plugins/package.json',
+      '.omp/plugins/bun.lock', '.omp/plugins/omp-plugins.lock.json',
+      '.omp/plugins/installed_plugins.json', '.agents/.skill-lock.json']) {
+      mkdirSync(join(h, it, '..'), { recursive: true });
+      writeFileSync(join(h, it), it.endsWith('.json') || it.endsWith('.lock') ? '{}' : 'k: ${V}\n');
+    }
+    for (const d of ['.omp/agent/extensions', '.omp/agent/skills', '.omp/agent/managed-skills', '.agents/skills'])
+      mkdirSync(join(h, d), { recursive: true });
+    return h;
+  };
+  const nopatch = plainHome('home-nopatch');
   r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', nopatch, '--data', data], { encoding: 'utf8' });
   assert.equal(r2.status, 0, `a home without patches/ must still capture: ${r2.stderr}`);
+
+  // A normal fresh Windows omp home misses all four optional state files. Their absence
+  // must not refuse the capture: each is skipped with a note instead.
+  const winhome = plainHome('home-windows-missing');
+  const WIN_MISSING = ['.pi/agent/pix.json', '.omp/agent/skills', '.omp/marketplaces.json', '.omp/plugins/installed_plugins.json'];
+  for (const it of WIN_MISSING) rmSync(join(winhome, it), { recursive: true });
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', winhome, '--data', data], { encoding: 'utf8' });
+  assert.equal(r2.status, 0, `a fresh Windows home must capture: ${r2.stderr}`);
+  for (const it of WIN_MISSING)
+    assert.ok(r2.stdout.includes(`note: ~/${it} is missing; skipped`), `no skip note for ${it}: ${r2.stdout}`);
+  assert.ok(!r2.stderr.includes('is missing'), `an optional absence must not refuse: ${r2.stderr}`);
+
+  // The machine shell setup never rides the snapshot: a top-level shellPath: and the
+  // skills.customDirectories entries name absolute paths of the capture host, and the
+  // worker that installs the snapshot cannot use them. Capture strips both and says so;
+  // the rest of the config stays byte for byte.
+  const shellhome = plainHome('home-shell-setup');
+  writeFileSync(join(shellhome, '.omp/agent/config.yml'),
+    'modelRoles:\n  default: zai/glm\nshellPath: C:\\Program Files\\PowerShell\\7\\pwsh.exe\n' +
+    // A flow list `[...]` cannot pass the capture's YAML gate at all, so the capturable
+    // shape is the block list; the flow form is covered by the withoutHostPaths unit cases.
+    'skills:\n  customDirectories:\n    - C:/Users/dev/omp-skills\n  theme: portable\n');
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', shellhome, '--data', data], { encoding: 'utf8' });
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.ok(r2.stdout.includes('note: user/omp/agent/config.yml: dropped the machine shell setup (shellPath, skills.customDirectories)'), r2.stdout);
+  const clean = snap('omp/agent/config.yml');
+  assert.ok(!/(?:shellPath|customDirectories|[A-Za-z]:[\\/])/.test(clean), `host paths survived the capture: ${clean}`);
+  assert.equal(clean, 'modelRoles:\n  default: zai/glm\nskills:\n  theme: portable\n', clean);
 
   // Property checks (fuzz tier via forAll in lib/data.mjs). Gate: 200 runs, fixed seed
   // 42; PROP_RUNS=<n> re-seeds randomly for the review deep tier.
@@ -667,6 +700,48 @@ try {
       assert.equal(withoutMemoryBackend(out), out, `the strip is idempotent: ${JSON.stringify(text)}`);
       if (!/^(?:\uFEFF)?(?:memory|"(?:memory)"|'(?:memory)')[ \t]*:/m.test(text))
         assert.equal(out, text, `no top-level memory key, no change: ${JSON.stringify(text)}`);
+    });
+
+    // The host-path strip: exact shapes, then the same two properties as the memory
+    // backend over a line soup (flow and block customDirectories values, shellPath entries,
+    // sequence items at the parent key's indent, comments, blanks, quoted keys, a BOM).
+    const HOST_CASES = [
+      ['a: v\nskills:\n  customDirectories: [C:/u/one, C:/u/two]\n  other: keep\nb: w\n', 'a: v\nskills:\n  other: keep\nb: w\n'],
+      ['skills:\n  customDirectories:\n    - C:/a\n    - C:/b\n  other: keep\n', 'skills:\n  other: keep\n'],
+      ['skills:\n  customDirectories:\n  - C:/a\n  - C:/b\n  other: keep\n', 'skills:\n  other: keep\n'],
+      ['a: v\nskills:\n  customDirectories:\n  - C:/a\nb: w\n', 'a: v\nb: w\n'],
+      ['shellPath: C:\\Prog\\pwsh.exe\na: v\n', 'a: v\n'],
+      ['a: v\nshellPath: C:\\x', 'a: v\n'], // a dropped tail gets the terminator back
+      ['"shellPath": C:\\x\n\'skills\':\n  "customDirectories": [C:/a]\n', ''],
+      ['\uFEFFshellPath: C:\\x\na: v\n', 'a: v\n'],
+      ['skills:\n  custom:\n    customDirectories: [C:/a]\n', 'skills:\n  custom:\n    customDirectories: [C:/a]\n'], // deeper than a direct child: stays
+      ['shell: x\nshellPathX: y\nskills2:\n  customDirectoriesX: [C:/a]\n', 'shell: x\nshellPathX: y\nskills2:\n  customDirectoriesX: [C:/a]\n'],
+      ['skills:\n  customDirectories: [C:/a]\n  # about otherDirs\n  otherDirs: [D:/b]\n', 'skills:\n  # about otherDirs\n  otherDirs: [D:/b]\n'], // a flow entry ends on its key line: the comment stays
+      ['skills:\n  customDirectories:\n  - C:/a\n  # about otherDirs\n  otherDirs: [D:/b]\n', 'skills:\n  otherDirs: [D:/b]\n'], // a block entry's region ends at the next sibling: the comment between goes with it
+      ['theme:\n  dark: x\n', 'theme:\n  dark: x\n'],
+      ['a: v', 'a: v'], // no final newline, nothing dropped: byte for byte
+      ['skills:', 'skills:'],
+    ];
+    for (const [input, want] of HOST_CASES)
+      assert.equal(withoutHostPaths(input), want, `strip of ${JSON.stringify(input)}`);
+
+    const HOST_LINES = ['a: v', 'shellPath: C:\\x\\pwsh.exe', '"shellPath": C:\\x', "'shellPath': C:\\x",
+      'skills:', '"skills":', "'skills':", '  customDirectories: [C:/u]', '  customDirectories:',
+      '  - C:/a', '    - C:/d', '  other: keep', '    deeper: x', '  # note', '', 'b: w', 'theme:', '  dark: x', '- C:/top'];
+    const PLAIN_LINES = HOST_LINES.filter(l => !/shellPath|[Cc]ustomDirectories|skills/.test(l));
+    forAll((rand, size) => {
+      const lines = Array.from({ length: Math.floor(rand() * (size + 4)) }, () => HOST_LINES[Math.floor(rand() * HOST_LINES.length)]);
+      const text = lines.join('\n') + (rand() < 0.5 ? '\n' : '');
+      return rand() < 0.2 ? `\uFEFF${text}` : text;
+    }, text => {
+      const out = withoutHostPaths(text);
+      assert.equal(withoutHostPaths(out), out, `the strip is idempotent: ${JSON.stringify(text)}`);
+    });
+    forAll((rand, size) => {
+      const lines = Array.from({ length: Math.floor(rand() * (size + 4)) }, () => PLAIN_LINES[Math.floor(rand() * PLAIN_LINES.length)]);
+      return lines.join('\n') + (rand() < 0.5 ? '\n' : '');
+    }, text => {
+      assert.equal(withoutHostPaths(text), text, `no host keys, no change: ${JSON.stringify(text)}`);
     });
   }
 
