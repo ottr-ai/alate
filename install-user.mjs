@@ -365,6 +365,10 @@ try {
   const currentLink = join(base, 'current');
   const layersDir = join(base, 'layers');
   let writeRoot = home, readRoot = home, machineRoot = home, newLayerDir = null;
+  // A first layer over an in-place home: machineRoot below resolves to the home, and the
+  // home's own installed.json becomes the plan's baseline (the layer manifest does not exist
+  // yet), so a home file that still matches its record takes the snapshot, not a machine win.
+  let migratingHome = false;
   if (layerMode) {
     // Preflight before any write: current is absent or a symlink, never anything else —
     // an in-place migration of a real directory is out of scope.
@@ -383,6 +387,7 @@ try {
     // first layer over an in-place home it comes from the home itself, so the deployment
     // blocks and the entry script's machine edit survive the migration.
     machineRoot = live !== null ? live : (existsSync(join(layerHome, '.omp', 'agent', 'config.yml')) ? layerHome : newLayerDir);
+    migratingHome = machineRoot === layerHome;
   }
 
   const plan = [];
@@ -392,18 +397,22 @@ try {
   const ruleGate = [];
   // Snapshot path -> fingerprint of the content alate last installed (or found already in place).
   // The record rides in the layer it describes; the previous install's record is read through
-  // the live layer.
+  // the live layer. A first layer over an in-place home has no layer record yet, so the
+  // home's own record is the baseline: a home file that still matches it takes the snapshot
+  // instead of freezing as a machine change.
   const manifest = join(writeRoot, '.alate', 'installed.json');
   checkDestination(writeRoot, manifest);
-  const lastManifest = join(readRoot, '.alate', 'installed.json');
+  const lastManifest = migratingHome ? join(layerHome, '.alate', 'installed.json') : join(readRoot, '.alate', 'installed.json');
   // Layer mode reads machine state out of the live layer, which a turn can write: it runs
   // with HOME=<live layer> on the shared home volume, so a snapshot path or this record
   // can hold a symlink, hard link, or special file whose target only the alate container
   // can read. The same alias guard the write side gets applies to every machine-side
   // read, and a violation refuses the run before any write instead of copying the
-  // target's bytes into the new layer. In-place mode reads only paths it already guards
-  // as dest (or writes itself), so this is layer-only.
-  if (layerMode) checkDestination(readRoot, lastManifest);
+  // target's bytes into the new layer. A first layer over an in-place home reads the
+  // home's own record instead of the layer's, guarded the same way against layerHome.
+  // In-place mode reads only paths it already guards as dest (or writes itself), so this
+  // is layer-only.
+  if (layerMode) checkDestination(migratingHome ? layerHome : readRoot, lastManifest);
   let last = {};
   if (existsSync(lastManifest)) {
     try {
@@ -413,11 +422,16 @@ try {
     }
   }
   // The machine file's fingerprint, the same comparison the install plan uses: config.yml's
-  // deployment blocks stay on the target, so they never make a file look changed here.
+  // deployment blocks stay on the target, so they never make a file look changed here. Layer
+  // mode also compares modulo the memory backend entry (a deployment choice, above): a home
+  // config.yml that differs from the snapshot or its record only by the entry is not a
+  // machine change. In-place mode keeps the entry in the comparison, so a file that differs
+  // by the entry still refuses and --force still rewrites the entry away.
   const machineFingerprint = (rel, dest) => {
     if (!existsSync(dest)) return null;
     const machineYaml = rel === 'omp/agent/config.yml' ? readFileSync(dest).toString('utf8') : null;
-    const base = machineYaml === null ? null : withoutDeploymentBlocks(machineYaml);
+    let base = machineYaml === null ? null : withoutDeploymentBlocks(machineYaml);
+    if (base !== null && layerMode) base = withoutMemoryBackend(base);
     return fingerprint(rel, base === null ? readFileSync(dest) : Buffer.from(base, 'utf8'));
   };
 
@@ -514,6 +528,9 @@ try {
         // re-root into the new layer and clean-up can delete the live one; paths into the
         // shared home stay shared.
         let keptBytes = readFileSync(readDest);
+        // The entry is a deployment choice: a kept config.yml loses it here, the same way the
+        // snapshot does above, so the choice never rides along with the machine part.
+        if (rel === 'omp/agent/config.yml') keptBytes = Buffer.from(withoutMemoryBackend(keptBytes.toString('utf8')), 'utf8');
         if (/\.(?:json|ya?ml)$/.test(rel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, newLayerDir), 'utf8');
         plan.push(['installed', dest, keptBytes]);
         notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);

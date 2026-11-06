@@ -1316,6 +1316,57 @@ try {
     assert.deepEqual(call.argv, ['install', '--frozen-lockfile', '--backend', 'copyfile'], 'the data-repo marker opts in');
     assert.ok(!call.env.includes('ALATE_API_KEY') && !call.env.includes('GITHUB_TOKEN'), 'the allowlist holds even when scripts are on');
 
+    // Migration with the bytes an older alate wrote (a memory backend entry over the recorded
+    // content): the home config still matches its record once the entry is ignored, so the
+    // snapshot wins and neither the first nor a later layer carries the entry. A pure stale
+    // home config (no entry) takes the snapshot the same way. Homes live under tmpReal, so a
+    // realpath(current) comparison holds where the tmp path itself sits behind a symlink.
+    const migrated = 'modelRoles:\n  default: NEW\n'; // hoisted so the zero-deps import scan never sees a quoted Buffer.from argument
+    const migHome5 = join(tmpReal, 'layer-home-mig-5');
+    putL('omp/agent/config.yml', 'modelRoles:\n  default: old\n');
+    r = run(['--data', ldata, '--skip-plugins'], migHome5);
+    assert.equal(r.status, 0, r.stderr);
+    writeFileSync(join(migHome5, '.omp/agent/config.yml'), 'modelRoles:\n  default: old\nmemory:\n  backend: hindsight\n');
+    putL('omp/agent/config.yml', 'modelRoles:\n  default: NEW\n');
+    r = runL(migHome5, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    const l5 = join(migHome5, '.alate', 'layers', 'nogit-1');
+    assert.equal(realpathSync(join(migHome5, '.alate', 'current')), l5);
+    assert.equal(lgot(l5, '.omp/agent/config.yml'), 'modelRoles:\n  default: NEW\n',
+      'a home config that matches its record modulo the backend entry takes the snapshot');
+    assert.ok(!`${r.stdout}${r.stderr}`.includes('machine change kept'), 'a backend-only difference is not a machine change');
+    assert.equal(JSON.parse(lgot(l5, '.alate/installed.json'))['omp/agent/config.yml'],
+      fingerprint('omp/agent/config.yml', Buffer.from(migrated)),
+      'the layer record holds what actually landed, so the next layer agrees');
+    r = runL(migHome5, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(lgot(join(migHome5, '.alate', 'layers', 'nogit-2'), '.omp/agent/config.yml'), 'modelRoles:\n  default: NEW\n',
+      'the migration stays stable across layers');
+    assert.ok(!`${r.stdout}${r.stderr}`.includes('machine change kept'));
+    const migHome7 = join(tmpReal, 'layer-home-mig-7');
+    putL('omp/agent/config.yml', 'modelRoles:\n  default: old\n');
+    r = run(['--data', ldata, '--skip-plugins'], migHome7);
+    assert.equal(r.status, 0, r.stderr);
+    putL('omp/agent/config.yml', 'modelRoles:\n  default: NEW\n');
+    r = runL(migHome7, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(lgot(join(migHome7, '.alate', 'layers', 'nogit-1'), '.omp/agent/config.yml'), 'modelRoles:\n  default: NEW\n',
+      'an unedited home config takes the snapshot on migration');
+
+    // A machine-changed home config whose bytes carry the entry: the machine content wins,
+    // but the kept bytes lose the entry, so no layer ever carries the backend choice.
+    const migHome6 = join(tmpReal, 'layer-home-mig-6');
+    putL('omp/agent/config.yml', 'modelRoles:\n  default: old\n');
+    r = run(['--data', ldata, '--skip-plugins'], migHome6);
+    assert.equal(r.status, 0, r.stderr);
+    writeFileSync(join(migHome6, '.omp/agent/config.yml'), 'modelRoles:\n  default: mine\nmemory:\n  backend: hindsight\n');
+    r = runL(migHome6, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /machine change kept: /);
+    assert.equal(lgot(join(migHome6, '.alate', 'layers', 'nogit-1'), '.omp/agent/config.yml'),
+      'modelRoles:\n  default: mine\n', 'kept machine bytes lose the backend entry');
+    putL('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm-5.3\n');
+
     // A failed scan deletes the failed layer folder and keeps the old current: a busy board
     // provisions while turns run, and a bad skill must not take the live layer down.
     const layerHome2 = join(tmpReal, 'layer-home-2');

@@ -100,7 +100,11 @@ non-zero. A failure after the switch changes nothing about the switch itself.
   in-place install: the first layer over an in-place home reads the machine part of
   `config.yml` from the home itself, so the blocks and the machine edits of `config.yml`
   survive the migration to layers. Every other file starts from the snapshot in that
-  case, and the home's `installed.json` stays unconsulted.
+  case. The home's `installed.json` is the migration baseline for `config.yml`: a home
+  `config.yml` that still holds what the in-place install wrote — compared modulo the
+  deployment blocks and the memory backend entry — takes the snapshot, so a stale
+  pre-layer config never freezes. A machine edit still wins, and its kept bytes lose
+  the backend entry like any kept `config.yml`.
 - A machine change in the current layer that goes beyond the deployment blocks: machine
   state wins. The new layer keeps the machine bytes for that file, and the run reports each
   kept path. `--force` takes the snapshot instead; the deployment blocks still ride along.
@@ -108,7 +112,8 @@ non-zero. A failure after the switch changes nothing about the switch itself.
   survives every switch, wherever in the file it sits. The memory backend itself is a
   deployment choice (OTTR-453): the board injects it at spawn time. Capture strips the
   `backend:` entry under the top-level `memory:` key, install drops the entry from the
-  snapshot, and the entry never rides along with the machine part.
+  snapshot, a kept `config.yml` loses the entry the same way, and the layer comparison
+  of the machine file ignores the entry, so it never rides along with the machine part.
 - Plugin install files are the exception: a machine change to `omp/plugins/package.json`,
   `omp/plugins/bun.lock`, or anything under `omp/plugins/patches/` never rides into the
   new layer. The provisioner itself runs `bun install` over these files, so the snapshot
