@@ -22,7 +22,7 @@
 // -> ~/.ottr/workers/<project>/<file>; workers/_all/ is provisioned like a project. The data
 // repo is their only source, so a changed list replaces the machine copy without --force, and a
 // list it no longer ships is deleted. tools.json, env.txt and requirements.txt are validated before any write.
-import { existsSync, lstatSync, mkdirSync, readlinkSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, availableParallelism } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -94,8 +94,10 @@ const collectSkillDirs = dir => {
 // skill folder on its own line so the tail of a deploy log shows it. A scan costs ~15 s per
 // skill, which made a 57-skill deploy seed wait ~14 minutes even when one file changed, so
 // the gate re-scans only what changed: it hashes the exact bytes of each skill folder itself
-// (never a hash the data repo ships — .skill-lock.json is data, not proof), keys a verdict on
-// that hash plus the scanner build (pin and probed version) and the scan arguments, and runs
+// (never a hash the data repo ships — .skill-lock.json is data, not proof), one framed digest
+// per entry (rel\0size\0sha256 of the bytes; a symlink contributes its resolved target bytes,
+// the bytes the install copies), and keys a verdict on a format token, that hash, the
+// scanner build (pin and probed version) and the scan arguments; it runs
 // the remaining scans concurrently, at most min(8, availableParallelism()) at a time. Only
 // passes are recorded, in the target home's .alate/skillspector-pass.json (temp file, then
 // atomic rename): a rejection is never cached, and a changed skill, a changed scanner, or an
@@ -104,6 +106,13 @@ const collectSkillDirs = dir => {
 const SCAN_ARGS = ['--no-llm', '--fail-on-findings', '--use-shipped-baseline'];
 const scanCachePath = join(home, '.alate', 'skillspector-pass.json');
 
+// The key must bind the bytes the install copies, so each file entry is framed as
+// rel\0size\0sha256(bytes): no entry's bytes can fuse into a neighbor's stream, and a
+// re-split of one stream into two files cannot reproduce the key. A symlink hashes its
+// resolved target bytes (readFileSync follows the link) — the exact bytes the install walk
+// copies — never the link text. The format token prefixed to every key makes entries an
+// older alate wrote miss once and rescan instead of surviving a framing change.
+const SCAN_CACHE_FORMAT = 'skill-pass-fmt-2';
 const hashSkillDir = dir => {
   const hash = createHash('sha256');
   const visit = path => {
@@ -113,11 +122,12 @@ const hashSkillDir = dir => {
       if (entry.isDirectory()) {
         hash.update(`d\0${rel}\0`);
         visit(child);
-      } else if (entry.isSymbolicLink()) {
-        hash.update(`l\0${rel}\0${readlinkSync(child)}\0`);
       } else {
-        hash.update(`f\0${rel}\0`);
-        hash.update(readFileSync(child));
+        // A symlink hashes the bytes its target resolves to, exactly what the install walk
+        // copies; the link text proves nothing. An unreadable entry throws and refuses the
+        // install, fail-closed like the gate itself.
+        const bytes = readFileSync(child);
+        hash.update(`f\0${rel}\0${bytes.length}\0${createHash('sha256').update(bytes).digest('hex')}\0`);
       }
     }
   };
@@ -208,7 +218,7 @@ const runScan = async skillDirs => {
     throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s). The venv at ${venvRoot} is broken (a Python upgrade makes an old venv unusable) or missing: rebuild it with rm -rf "${venvRoot}" && python3 -m venv "${venvRoot}" && "${join(venvRoot, 'bin', 'pip')}" install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}", or install the pinned build (Python 3.12+), then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
   }
   const passes = readPasses();
-  const keys = new Map(skillDirs.map(dir => [dir, `${hashSkillDir(dir)} ${SKILLSPECTOR_REF} ${reported} scan ${SCAN_ARGS.join(' ')}`]));
+  const keys = new Map(skillDirs.map(dir => [dir, `${SCAN_CACHE_FORMAT} ${hashSkillDir(dir)} ${SKILLSPECTOR_REF} ${reported} scan ${SCAN_ARGS.join(' ')}`]));
   const pending = skillDirs.filter(dir => passes[keys.get(dir)] !== true);
   console.log(`Scanning ${pending.length} of ${skillDirs.length} skill snapshot(s) (${skillDirs.length - pending.length} cached) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied)...`);
   if (!pending.length) return;

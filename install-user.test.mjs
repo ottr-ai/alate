@@ -990,6 +990,88 @@ try {
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Scanning 9 of 9 skill snapshot\(s\) \(0 cached\)/);
     writeStub(0);
+
+    // The cache key binds the bytes the install copies, proved with the two review repros
+    // on dedicated fixtures (each: run 1 passes and caches, run 2 plants EVIL bytes the old
+    // key would have covered; the gate must rescan and refuse).
+    // Repro 1 (symlink): the skill holds run.sh -> ../../notes/run.sh, and the link target is
+    // poisoned after the pass. The link text never changes, so a key over link text stays
+    // cached and installs EVIL; a key over the resolved target bytes (what readFileSync
+    // copies) must miss, rescan, and refuse.
+    const linkData = join(tmp, 'link-data');
+    const linkHome = join(tmp, 'link-home');
+    mkdirSync(join(linkData, 'user/omp/agent/notes'), { recursive: true });
+    mkdirSync(join(linkData, 'user/omp/agent/skills/mine'), { recursive: true });
+    writeFileSync(join(linkData, 'user/omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
+    writeFileSync(join(linkData, 'user/omp/agent/skills/mine/SKILL.md'), '# mine\n');
+    writeFileSync(join(linkData, 'user/omp/agent/notes/run.sh'), 'echo ok\n');
+    symlinkSync('../../notes/run.sh', join(linkData, 'user/omp/agent/skills/mine/run.sh'));
+    writeStub(0);
+    r = run(['--data', linkData, '--skip-plugins'], linkHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Scanning 1 of 1 skill snapshot\(s\) \(0 cached\)/);
+    assert.equal(readFileSync(join(linkHome, '.omp/agent/skills/mine/run.sh'), 'utf8'), 'echo ok\n', 'the install copies the resolved target bytes');
+    const linkPasses = readFileSync(join(linkHome, '.alate', 'skillspector-pass.json'), 'utf8');
+    writeFileSync(join(linkData, 'user/omp/agent/notes/run.sh'), 'EVIL\n');
+    writeStub(1);
+    r = run(['--data', linkData, '--skip-plugins'], linkHome);
+    assert.equal(r.status, 1, 'a poisoned link target refuses the run');
+    assert.match(r.stdout, /Scanning 1 of 1 skill snapshot\(s\) \(0 cached\)/, 'the changed target bytes miss the cache');
+    assert.match(r.stderr, /SkillSpector rejected/);
+    assert.ok(r.stderr.includes(join(linkData, 'user/omp/agent/skills/mine')), r.stderr);
+    assert.equal(readFileSync(join(linkHome, '.alate', 'skillspector-pass.json'), 'utf8'), linkPasses, 'a failed scan is never cached');
+    assert.equal(readFileSync(join(linkHome, '.omp/agent/skills/mine/run.sh'), 'utf8'), 'echo ok\n', 'the poisoned bytes never land');
+
+    // Repro 2 (framing): a.bin holding "X" plus "f\0z.sh\0EVIL\n" must not key the same as a
+    // re-split {a.bin: X, z.sh: EVIL}; the rel\0size\0sha256 framing keeps every entry
+    // self-delimiting, so the new tree rescan instead of riding the old pass.
+    const frameData = join(tmp, 'frame-data');
+    const frameHome = join(tmp, 'frame-home');
+    mkdirSync(join(frameData, 'user/omp/agent/skills/mine'), { recursive: true });
+    writeFileSync(join(frameData, 'user/omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
+    writeFileSync(join(frameData, 'user/omp/agent/skills/mine/SKILL.md'), '# mine\n');
+    const fused = 'X' + 'f\0z.sh\0EVIL\n';
+    writeFileSync(join(frameData, 'user/omp/agent/skills/mine/a.bin'), fused);
+    writeStub(0);
+    r = run(['--data', frameData, '--skip-plugins'], frameHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Scanning 1 of 1 skill snapshot\(s\) \(0 cached\)/);
+    assert.equal(readFileSync(join(frameHome, '.omp/agent/skills/mine/a.bin'), 'utf8'), fused);
+    const framePasses = readFileSync(join(frameHome, '.alate', 'skillspector-pass.json'), 'utf8');
+    writeFileSync(join(frameData, 'user/omp/agent/skills/mine/a.bin'), 'X');
+    writeFileSync(join(frameData, 'user/omp/agent/skills/mine/z.sh'), 'EVIL\n');
+    writeStub(1);
+    r = run(['--data', frameData, '--skip-plugins'], frameHome);
+    assert.equal(r.status, 1, 'the re-split tree refuses the run');
+    assert.match(r.stdout, /Scanning 1 of 1 skill snapshot\(s\) \(0 cached\)/, 'the re-split bytes miss the cache');
+    assert.match(r.stderr, /SkillSpector rejected/);
+    assert.ok(r.stderr.includes(join(frameData, 'user/omp/agent/skills/mine')), r.stderr);
+    assert.equal(readFileSync(join(frameHome, '.alate', 'skillspector-pass.json'), 'utf8'), framePasses, 'a failed scan is never cached');
+    assert.ok(!existsSync(join(frameHome, '.omp/agent/skills/mine/z.sh')), 'the split-out file never lands');
+    assert.equal(readFileSync(join(frameHome, '.omp/agent/skills/mine/a.bin'), 'utf8'), fused, 'the installed bytes are untouched');
+
+    // A pre-token entry misses exactly once: stripping the key's format token (the only
+    // difference an older alate's pass file has) forces one rescan, and the rewritten pass
+    // carries the tokened key again, so the next run is warm.
+    const verData = join(tmp, 'ver-data');
+    const verHome = join(tmp, 'ver-home');
+    mkdirSync(join(verData, 'user/omp/agent/skills/solo'), { recursive: true });
+    writeFileSync(join(verData, 'user/omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
+    writeFileSync(join(verData, 'user/omp/agent/skills/solo/SKILL.md'), '# solo\n');
+    writeStub(0);
+    r = run(['--data', verData, '--skip-plugins'], verHome);
+    assert.equal(r.status, 0, r.stderr);
+    const verPass = join(verHome, '.alate', 'skillspector-pass.json');
+    const verKey = Object.keys(JSON.parse(readFileSync(verPass, 'utf8')))[0];
+    const legacy = { [verKey.replace(/^\S+\s/, '')]: true };
+    writeFileSync(verPass, `${JSON.stringify(legacy, null, 2)}\n`);
+    r = run(['--data', verData, '--skip-plugins'], verHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Scanning 1 of 1 skill snapshot\(s\) \(0 cached\)/, 'a legacy entry without the format token misses');
+    assert.equal(JSON.parse(readFileSync(verPass, 'utf8'))[verKey], true, 'the fresh pass carries the tokened key');
+    r = run(['--data', verData, '--skip-plugins'], verHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Scanning 0 of 1 skill snapshot\(s\) \(1 cached\)/);
   } else {
     console.log('win32: the scanner-stub checks need a real skillspector on PATH; gate assertions skipped');
   }
