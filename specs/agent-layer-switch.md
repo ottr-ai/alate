@@ -103,8 +103,10 @@ non-zero. A failure after the switch changes nothing about the switch itself.
   case. The home's `installed.json` is the migration baseline for `config.yml`: a home
   `config.yml` that still holds what the in-place install wrote — compared modulo the
   deployment blocks and the memory backend entry — takes the snapshot, so a stale
-  pre-layer config never freezes. A machine edit still wins, and its kept bytes lose
-  the backend entry like any kept `config.yml`.
+  pre-layer config never freezes. A record that an alate older than the strip wrote
+  hashes the entry as part of the snapshot it installed, so a home that holds exactly
+  those bytes (deployment blocks aside) matches its record too. A machine edit still
+  wins, and its kept bytes lose the backend entry like any kept `config.yml`.
 - A machine change in the current layer that goes beyond the deployment blocks: machine
   state wins. The new layer keeps the machine bytes for that file, and the run reports each
   kept path. `--force` takes the snapshot instead; the deployment blocks still ride along.

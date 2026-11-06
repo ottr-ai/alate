@@ -1365,6 +1365,45 @@ try {
     assert.match(r.stdout, /machine change kept: /);
     assert.equal(lgot(join(migHome6, '.alate', 'layers', 'nogit-1'), '.omp/agent/config.yml'),
       'modelRoles:\n  default: mine\n', 'kept machine bytes lose the backend entry');
+
+    // A home that an alate older than the strip installed: its record hashes the snapshot
+    // bytes WITH the entry (capture did not strip yet), and the home still holds exactly
+    // those bytes plus its deployment blocks. The legacy record still matches, so the
+    // migration takes the snapshot and no later layer is frozen at the old content.
+    const migHome8 = join(tmpReal, 'layer-home-mig-8');
+    const oldSnap = 'modelRoles:\n  default: old\nmemory:\n  backend: hindsight\n';
+    mkdirSync(join(migHome8, '.omp/agent'), { recursive: true });
+    mkdirSync(join(migHome8, '.alate'), { recursive: true });
+    writeFileSync(join(migHome8, '.omp/agent/config.yml'), oldSnap + blocksL);
+    writeFileSync(join(migHome8, '.alate/installed.json'),
+      `${JSON.stringify({ 'omp/agent/config.yml': fingerprint('omp/agent/config.yml', Buffer.from(oldSnap)) }, null, 2)}\n`);
+    putL('omp/agent/config.yml', 'modelRoles:\n  default: NEW\n');
+    r = runL(migHome8, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    const l8 = join(migHome8, '.alate', 'layers', 'nogit-1');
+    assert.equal(realpathSync(join(migHome8, '.alate', 'current')), l8);
+    assert.equal(lgot(l8, '.omp/agent/config.yml'), `modelRoles:\n  default: NEW\n${blocksL}`,
+      'a home that matches its pre-strip record takes the snapshot, the blocks ride along');
+    assert.ok(!`${r.stdout}${r.stderr}`.includes('machine change kept'), 'an untouched pre-strip home is not a machine change');
+    r = runL(migHome8, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(lgot(join(migHome8, '.alate', 'layers', 'nogit-2'), '.omp/agent/config.yml'), `modelRoles:\n  default: NEW\n${blocksL}`,
+      'the pre-strip migration stays stable across layers');
+    assert.ok(!`${r.stdout}${r.stderr}`.includes('machine change kept'));
+
+    // The same pre-strip record with a machine edit on top: the edit wins (kept), and the
+    // kept bytes still lose the entry.
+    const migHome9 = join(tmpReal, 'layer-home-mig-9');
+    mkdirSync(join(migHome9, '.omp/agent'), { recursive: true });
+    mkdirSync(join(migHome9, '.alate'), { recursive: true });
+    writeFileSync(join(migHome9, '.omp/agent/config.yml'), oldSnap.replace('default: old', 'default: mine') + blocksL);
+    writeFileSync(join(migHome9, '.alate/installed.json'),
+      `${JSON.stringify({ 'omp/agent/config.yml': fingerprint('omp/agent/config.yml', Buffer.from(oldSnap)) }, null, 2)}\n`);
+    r = runL(migHome9, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /machine change kept: /);
+    assert.equal(lgot(join(migHome9, '.alate', 'layers', 'nogit-1'), '.omp/agent/config.yml'),
+      `modelRoles:\n  default: mine\n${blocksL}`, 'a changed pre-strip home keeps the machine edit, the entry still goes');
     putL('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm-5.3\n');
 
     // A failed scan deletes the failed layer folder and keeps the old current: a busy board

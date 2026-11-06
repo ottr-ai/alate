@@ -434,6 +434,18 @@ try {
     if (base !== null && layerMode) base = withoutMemoryBackend(base);
     return fingerprint(rel, base === null ? readFileSync(dest) : Buffer.from(base, 'utf8'));
   };
+  // The record an alate older than the memory-backend strip wrote hashes the snapshot bytes it
+  // installed, and those still carried the entry. Layer mode accepts that legacy record too: a
+  // home config.yml that, with only the deployment blocks stripped, still holds exactly the
+  // bytes such an alate installed matches its record, so an untouched pre-strip home migrates
+  // to the snapshot instead of freezing as a machine change. For a file without the entry the
+  // legacy form equals the plain one, so later layers (whose records strip-era alate wrote)
+  // compare identically. Only config.yml can carry the entry; other files and in-place mode
+  // never use the legacy form.
+  const legacyFingerprint = (rel, dest) =>
+    rel === 'omp/agent/config.yml' && layerMode && existsSync(dest)
+      ? fingerprint(rel, Buffer.from(withoutDeploymentBlocks(readFileSync(dest).toString('utf8')), 'utf8'))
+      : null;
 
   // Deletes the directories a deletion left empty, up to the mapped root (the top-level
   // dot-dir of the snapshot path, or ~/.ottr for worker lists); never the root itself.
@@ -507,9 +519,13 @@ try {
     // The machine text minus its deployment blocks (lib/data.mjs keeps the last kept line's
     // terminator). `dropped` holds credentials: never log it.
     const have = machineFingerprint(rel, readDest);
+    // The record-match: the plain form (strip-era records, and every non-config file) or the
+    // legacy form above (records a pre-strip alate wrote, entry included). A matched file was
+    // not changed on the machine since the install, so the snapshot may replace it.
+    const record = have !== null && (have === last[rel] || legacyFingerprint(rel, readDest) === last[rel]);
     if (have === want && !layerMode) plan.push(['unchanged', dest, null]);
     else if (layerMode && have === want) plan.push(['installed', dest, src]);
-    else if (layerMode && have !== null && have !== last[rel]) {
+    else if (layerMode && have !== null && !record) {
       // A machine change beyond the deployment blocks is never a refusal in layer mode:
       // machine state wins and rides into the new layer, --force takes the snapshot instead.
       // have !== want is implied by the branch above; layer mode never reaches conflicts.
@@ -536,7 +552,7 @@ try {
         notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
       }
     }
-    else if (have === null || have === last[rel] || force) plan.push(['installed', dest, src]);
+    else if (have === null || record || force) plan.push(['installed', dest, src]);
     else conflicts.push(dest);
     current[rel] = want;
   }
