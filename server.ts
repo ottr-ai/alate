@@ -510,8 +510,9 @@ async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) 
       ? { checkedAt: new Date().toISOString(), remoteSha: dashState.source.importedSha, available: false }
       : null
     persistDash()
-    // A pushed edit changed the snapshot; the stored update rows follow at once.
-    if (dashState.source.kind === 'repo') void updateCheckAfterChange()
+    // Every committed edit changed the stored snapshot, path edits included; the
+    // stored update rows follow at once, never at the next timer tick.
+    void updateCheckAfterChange()
     return {
       ok: true,
       commit: res.commit,
@@ -520,6 +521,9 @@ async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) 
       state: { ...dashState, updates: loadUpdates(db) },
     }
   } catch (err) {
+    // editPathSource re-imports the user's tree before it throws, so a failed
+    // commit or push still changed the stored snapshot.
+    if (err && typeof err === 'object' && 'snapshotChanged' in err && err.snapshotChanged === true) void updateCheckAfterChange()
     return clientError(reply, err)
   } finally { writing = false }
 }

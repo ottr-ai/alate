@@ -11,7 +11,9 @@ once.
   - after a repo-source snapshot refresh that brings a new commit
     (`selectSource`, so `/config`, `/api/import`, and the auto-update refresh
     in `dashCheck`);
-  - after a dashboard file edit that commits and pushes (PUT/DELETE `/api/file`);
+  - after a dashboard file edit that commits (PUT/DELETE `/api/file`). A path
+    source counts even when its push fails, because `editPathSource` re-imports
+    the snapshot before it rethrows the error;
   - after a successful provision (`POST /provision`).
 - `POST /api/updates/check` starts a check now and returns the fresh list,
   the same `{checkedAt, updates}` shape as GET `/api/updates`. Same Bearer-key
@@ -36,7 +38,7 @@ once.
 - The data-repo snapshot moves a pin to its target; the next GET
   `/api/updates` (no timer tick in between) reports the pin at the target
   (`current` = `latest`), so the board drops the row. Proven for the editor
-  path, the auto-update refresh path, and provision.
+  path (repo and path sources), the auto-update refresh path, and provision.
 - `POST /api/updates/check`: 401 without or with a wrong key; 200 with the
   key; two overlapping POSTs run one check.
 - A snapshot change that lands while a check runs queues exactly one more

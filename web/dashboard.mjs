@@ -520,7 +520,14 @@ function editPathSource(state, db, src, op, token) {
     } catch (err) { failure = err; }
   }
   const next = importSource(state, src.spec, src.kind, token, db);
-  if (failure) throw failure;
+  if (failure) {
+    // The disk write and the snapshot re-import both happened, so the stored
+    // snapshot changed even though the edit fails: fileEdit re-runs the update
+    // check on this flag. Repo-source failures throw before their import and
+    // stay unflagged.
+    failure.snapshotChanged = true;
+    throw failure;
+  }
   return { commit, pushed, warning, state: next };
 }
 

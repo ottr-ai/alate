@@ -1475,6 +1475,46 @@ try {
     await waitFor(async () => (await updatesBody()).updates.find(u => u.name === 'from-demo')?.current === '3.0.0', 20_000);
     assert.ok(!boardNames((await updatesBody()).updates).includes('from-demo'), 'the late pin move still left the board list at once');
 
+    // Path source: the editor trigger needs no repo. The checker reads the stored
+    // snapshot for path sources too, so a committed edit — even one whose push
+    // fails after the re-import — re-runs the check ahead of the 24 h timer.
+    const pathRepo = join(tmp, 'path-updates');
+    cpSync(upRepo, pathRepo, { recursive: true });
+    // A path source's data repo is its directory: a pin naming any other repo would
+    // go to the contents API (the fake serves no demo/updates route), so the copied
+    // pins read the snapshot itself.
+    const pathItems = JSON.parse(readFileSync(join(pathRepo, 'upstreams.json'), 'utf8'));
+    for (const it of pathItems.items) if (it.pin && it.pin.repo === 'demo/updates') it.pin.repo = '';
+    writeFileSync(join(pathRepo, 'upstreams.json'), JSON.stringify(pathItems));
+    r = await postImport(JSON.stringify({ source: pathRepo, kind: 'path' }));
+    assert.equal(r.status, 200, JSON.stringify(await r.json()));
+    // Path rows carry repo = the source's local path, so the board filter keeps them
+    // off GET /api/updates; the stored rows are read from /api/state, which keeps all.
+    await waitFor(async () => (await allRows()).find(u => u.name === 'from-demo')?.current === '2.3.3', 20_000);
+    const pathPin = await (await get('/api/file?path=Dockerfile')).json();
+    const movedPath = pathPin.content.replace('ghcr.io/fake/other:2.3.3-alpine', 'ghcr.io/fake/other:3.0.0-alpine');
+    r = await putFile({ path: 'Dockerfile', content: movedPath, base: pathPin.hash, message: 'test: path edit moves the pin' });
+    assert.equal(r.status, 200);
+    const pathBody = await r.json();
+    assert.equal(pathBody.pushed, false);
+    assert.ok(pathBody.warning.includes('no upstream'), 'the commit stayed local (no remote in the fixture)');
+    await waitFor(async () => (await allRows()).find(u => u.name === 'from-demo')?.current === '3.0.0', 20_000);
+    assert.equal((await allRows()).find(u => u.name === 'from-demo')?.latest, '3.0.0', 'the path edit applied the pin: current meets latest');
+
+    // A failed push still re-imports the snapshot before the error, so the rows
+    // follow even though PUT /api/file answers 502.
+    const checkedAtPath = (await updatesBody()).checkedAt;
+    const pathBranch = String(git(['-C', pathRepo, 'rev-parse', '--abbrev-ref', 'HEAD']).stdout ?? '').trim();
+    const pathBare = join(tmp, 'path-updates-bare.git');
+    assert.equal(git(['init', '-q', '--bare', '-b', pathBranch, pathBare]).status, 0);
+    assert.equal(git(['-C', pathRepo, 'remote', 'add', 'origin', pathBare]).status, 0);
+    assert.equal(git(['-C', pathRepo, 'push', '-q', 'origin', pathBranch]).status, 0);
+    assert.equal(git(['-C', pathRepo, 'branch', `--set-upstream-to=origin/${pathBranch}`]).status, 0);
+    assert.equal(git(['-C', pathRepo, 'remote', 'set-url', 'origin', join(tmp, 'no-such-alate-remote')]).status, 0);
+    r = await putFile({ path: 'Dockerfile', content: pathPin.content, base: (await (await get('/api/file?path=Dockerfile')).json()).hash, message: 'test: push fails, snapshot moved' });
+    assert.equal(r.status, 502, JSON.stringify(await r.json()));
+    await waitFor(async () => (await allRows()).find(u => u.name === 'from-demo')?.current === '2.3.3', 20_000);
+    assert.ok((await updatesBody()).checkedAt > checkedAtPath, 'the failed push still re-ran the check');
     // 78c. POST /config with repo and token in one call is the board's first setup.
     // The check it queues must authenticate with the new token at once, not with
     // whatever was stored before: selectSource queues that check before the route
