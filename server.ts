@@ -391,7 +391,7 @@ function selectSource(spec: string, kind?: string, token = dashToken()): boolean
 // Periodic remote check for a repo source: refresh update state, optionally auto re-import.
 function dashCheck(): void {
   if (running || dashState.source?.kind !== 'repo') return
-  const sha = remoteHead(dashState.source.name, dashState.source.ref, dashToken())
+  const sha = remoteHead(dashState.source.name, dashState.source.ref, dashToken(), dashState.source.host ?? '')
   dashState.update = { checkedAt: new Date().toISOString(), remoteSha: sha, available: sha !== '' && sha !== dashState.source.importedSha }
   if (sha) config.update.remoteSha = sha
   config.update.lastChecked = dashState.update.checkedAt

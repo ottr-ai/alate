@@ -4314,6 +4314,43 @@ try {
     assert.equal(e.status, 400);
     assert.match(e.message, /^git clone failed for gone\/repo@main: /, 'the clone failure names the repo and ref');
     assert.ok(e.message.includes('does not appear to be a git repository'), 'the clone failure carries git stderr');
+    // -- explicit host in the spec: stored on the source; GH_BASE still wins for the URL.
+    const dbH = mkDb10('alat10-h.db');
+    const h1 = dash.importSource(dash.loadState(dbH), 'acme.ghe.com/own/data', 'repo', null, dbH);
+    assert.equal(h1.source.host, 'acme.ghe.com');
+    assert.deepEqual([h1.source.name, h1.source.ref], ['own/data', '']);
+    assert.equal(h1.source.importedSha, git10(['--git-dir', ghOwn, 'rev-parse', 'main']).stdout.trim());
+
+    // -- ambient ALATE_GITHUB_HOST capture: import stores the host; a later edit clones and
+    // pushes through the stored host even after the env var is gone. Fresh cache-busted import
+    // so module-level GH_BASE picks up the fixture while ALATE_GITHUB_HOST is set.
+    const savedHost = process.env.ALATE_GITHUB_HOST;
+    try {
+      process.env.ALATE_GITHUB_HOST = 'acme.ghe.com';
+      const dashHost = await import('./web/dashboard.mjs?alat10h');
+      const dbHA = mkDb10('alat10-ha.db');
+      const ha1 = dashHost.importSource(dashHost.loadState(dbHA), 'own/data@main', 'repo', null, dbHA);
+      assert.equal(ha1.source.host, 'acme.ghe.com');
+      const ha2 = await leak10(() => dashHost.applyFileEdit(ha1, dbHA, { path: 'host10.md', content: 'hi ghe\n', base: null }));
+      assert.equal(ha2.pushed, true);
+      assert.match(ha2.commit, /^[0-9a-f]{40}$/);
+      assert.equal(git10(['--git-dir', ghOwn, 'log', '-1', '--format=%s', 'main']).stdout.trim(), 'alate: add host10.md');
+      assert.equal(ha2.state.source.importedSha, ha2.commit);
+    } finally {
+      if (savedHost === undefined) delete process.env.ALATE_GITHUB_HOST; else process.env.ALATE_GITHUB_HOST = savedHost;
+    }
+
+    // -- invalid ALATE_GITHUB_HOST: a clean 400 naming the variable.
+    const savedBad = process.env.ALATE_GITHUB_HOST;
+    try {
+      process.env.ALATE_GITHUB_HOST = 'https://bad host';
+      const dbHB = mkDb10('alat10-hb.db');
+      e = err10(() => dash.importSource(dash.loadState(dbHB), 'own/data', 'repo', null, dbHB));
+      assert.equal(e.status, 400);
+      assert.ok(e.message.startsWith('ALATE_GITHUB_HOST:'), e.message);
+    } finally {
+      if (savedBad === undefined) delete process.env.ALATE_GITHUB_HOST; else process.env.ALATE_GITHUB_HOST = savedBad;
+    }
 
     // -- snapshotData: exact tree, temp prefix, unsafe stored paths refused.
     const snap = dash.snapshotData(dbI);

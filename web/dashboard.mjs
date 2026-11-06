@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os';
 import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { assertSourceInside, checkDestination, cloneCommand, descriptionText, gitAuthEnv, parseDataSpec, redactSecrets, SNAP_AGENTS_DIR } from '../lib/data.mjs';
+import { assertSourceInside, checkDestination, cloneCommand, dataHost, descriptionText, gitAuthEnv, githubHost, parseDataSpec, redactSecrets, SNAP_AGENTS_DIR } from '../lib/data.mjs';
 
-// Test hook: point the dashboard's GitHub traffic at a local fixture remote.
-const GH_BASE = process.env.ALATE_TEST_GH_BASE ?? 'https://github.com';
+// Test hook: point the dashboard's GitHub traffic at a local fixture remote (override only).
+const GH_BASE = process.env.ALATE_TEST_GH_BASE ?? null;
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const NOT_RULES = new Set(['AGENTS.md', 'README.md']);
@@ -309,32 +309,38 @@ function resolveSource(spec, kind, token) {
   if (!parsed || (!asGiven && (/^([A-Za-z]:[\\/]|\\\\)/.test(spec) || parsed.name.startsWith('.')))) {
     throw Object.assign(new Error(`no data repo at ${spec}; pass a local path or owner/name[@ref]`), { status: 400 });
   }
-  return cloneRepo(spec, parsed.name, parsed.ref, token);
+  return cloneRepo(spec, parsed, token);
 }
 
 // A local dir of that name wins over the GitHub URL (cloneRepo, remoteHead and pushes agree).
-const remoteUrl = name => (existsSync(name) ? name : `${GH_BASE}/${name}`);
+const remoteUrl = (name, host = '') => (existsSync(name) ? name : `${GH_BASE ?? `https://${host || githubHost().host}`}/${name}`);
 
 // Clone a GitHub repo into a fresh temp dir; temp: true so importSource cleans it up.
-function cloneRepo(spec, name, ref, token) {
-  const url = remoteUrl(name);
+function cloneRepo(spec, parsed, token) {
+  let host;
+  try {
+    host = dataHost(parsed, process.env);
+  } catch (err) {
+    throw Object.assign(new Error(err.message), { status: 400 });
+  }
+  const url = remoteUrl(parsed.name, host);
   const active = token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
   const dir = mkdtempSync(join(tmpdir(), 'alate-dashboard-'));
-  const { args: gitArgs, env } = cloneCommand(url, ref, active, dir);
+  const { args: gitArgs, env } = cloneCommand(url, parsed.ref, active, dir);
   const git = spawnSync('git', gitArgs, { env, stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });
   if (git.status !== 0) {
     rmSync(dir, { recursive: true, force: true }); // our own fresh temp dir only
     const stderr = redactSecrets(git.stderr ?? '', active).trim();
-    throw Object.assign(new Error(`git clone failed for ${name}${ref ? `@${ref}` : ''}${stderr ? `: ${stderr}` : ''}`), { status: 400 });
+    throw Object.assign(new Error(`git clone failed for ${parsed.name}${parsed.ref ? `@${parsed.ref}` : ''}${stderr ? `: ${stderr}` : ''}`), { status: 400 });
   }
   // HEAD sha at clone time: the baseline the periodic remote check compares against.
   const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
   if (head.status !== 0) {
     rmSync(dir, { recursive: true, force: true });
-    throw new Error(`cannot read cloned HEAD for ${name}`);
+    throw new Error(`cannot read cloned HEAD for ${parsed.name}`);
   }
   const importedSha = head.stdout.trim();
-  return { dir, temp: true, source: { kind: 'repo', spec, name, ref, importedSha } };
+  return { dir, temp: true, source: { kind: 'repo', spec, name: parsed.name, host, ref: parsed.ref, importedSha } };
 }
 
 // resolvedIn: an already-resolved { dir, temp, source } to import directly (the editor's
@@ -483,10 +489,10 @@ function commitEdit(dir, rel, message, env, token) {
 // Repo source: fresh clone, verify against the clone, commit, push HEAD:<branch>, then import
 // the snapshot from that same clone so importedSha is the new commit. Temp dir always cleaned.
 function editRepoSource(state, db, src, op, token) {
-  const resolved = cloneRepo(src.spec, src.name, src.ref, token);
+  const resolved = cloneRepo(src.spec, { name: src.name, ref: src.ref, host: src.host }, token);
   try {
     applyToTree(resolved.dir, op.rel, op.base, op.bytes);
-    const env = gitAuthEnv(remoteUrl(src.name), token);
+    const env = gitAuthEnv(remoteUrl(src.name, src.host), token);
     const commit = commitEdit(resolved.dir, op.rel, op.message, env, token);
     const branch = src.ref || runGit(resolved.dir, ['rev-parse', '--abbrev-ref', 'HEAD'], env).stdout.trim();
     const push = runGit(resolved.dir, ['push', 'origin', `HEAD:${branch}`], env);
@@ -551,8 +557,8 @@ function applyFileEdit(state, db, edit, token) {
 }
 
 // First sha of `git ls-remote` for a dashboard repo source; '' when the check fails (client-safe).
-function remoteHead(name, ref, token) {
-  const url = remoteUrl(name);
+function remoteHead(name, ref, token, host = '') {
+  const url = remoteUrl(name, host);
   const git = spawnSync('git', ['ls-remote', url, ref || 'HEAD'], {
     env: gitAuthEnv(url, token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN),
     stdio: ['ignore', 'pipe', 'ignore'],

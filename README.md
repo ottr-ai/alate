@@ -37,7 +37,7 @@ alate provisions an [omp](https://github.com/can1357/oh-my-pi) agent on any mach
 
    The named volumes keep the server key, the SQLite db, and the provisioned omp home across restarts.
 
-4. Open <http://127.0.0.1:4570>, import your repo as `owner/name` with a GitHub token, and provision.
+4. Open <http://127.0.0.1:4570>, import your repo as `owner/name` — or `<host>/owner/name` when your repo sits on a GitHub Enterprise Cloud tenant (`acme.ghe.com`) or Enterprise Server host — with a GitHub token, and provision.
 
 Capture is the prepared way to get a usable setup. Docker Compose is the prepared way to run the server.
 
@@ -80,7 +80,7 @@ With `ALATE_LAYER=1` (compose.yaml sets it), `install-user.mjs` installs each pr
 | `sync-user.mjs` | Capture this machine's omp user layer into the repo. | `--home` |
 | `sync-projects.mjs` | Refresh per-project snapshots into the repo. | `--root` |
 
-All install scripts take `--data <dir>` or `--repo <owner/name[@ref]>` (set `GH_TOKEN` for private repos). Capture scripts take `--data <dir>` only.
+All install scripts take `--data <dir>` or `--repo <owner/name[@ref]>` (set `GH_TOKEN` for private repos). The repo form also accepts `<host>/owner/name[@ref]` for a GitHub Enterprise Cloud tenant (`acme.ghe.com`) or Enterprise Server host (`git.example.com`), or a full `https://` URL; `ALATE_GITHUB_HOST` is the ambient default host, and the token goes only to the configured host. Capture scripts take `--data <dir>` only.
 
 ## API
 

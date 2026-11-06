@@ -9,7 +9,7 @@ import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, 
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertSourceInside, checkDestination, cleanupData, cloneCommand, descriptionText, forAll, keepTemp, parseDataSpec, redactSecrets, resolveDataDir, ruleProblems } from './lib/data.mjs';
+import { DEFAULT_GITHUB_HOST, GITHUB_HOST_ENV, assertSourceInside, checkDestination, cleanupData, cloneCommand, dataHost, dataRepoUrl, descriptionText, forAll, githubHost, keepTemp, parseDataSpec, parseGithubHost, redactSecrets, resolveDataDir, ruleProblems } from './lib/data.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-clone-'));
 const TOKEN = 'ghp_abc123/+=XYZ'; // fake: '/' '+' '=' stress the encoded/base64 shapes
@@ -54,19 +54,57 @@ try {
   mkdirSync(plain);
 
   // --- parseDataSpec: existing path wins whole; ref is the entire first-@ suffix.
-  assert.deepEqual(parseDataSpec('owner/repo'), { name: 'owner/repo', ref: '' });
-  assert.deepEqual(parseDataSpec('owner/repo@feature@draft'), { name: 'owner/repo', ref: 'feature@draft' });
-  assert.deepEqual(parseDataSpec('owner/repo@v1.2'), { name: 'owner/repo', ref: 'v1.2' });
-  assert.deepEqual(parseDataSpec('owner/repo@'), { name: 'owner/repo', ref: '' });
-  assert.deepEqual(parseDataSpec(odd), { name: odd, ref: '' }, 'existing path with @ stays whole');
+  assert.deepEqual(parseDataSpec('owner/repo'), { name: 'owner/repo', ref: '', host: '' });
+  assert.deepEqual(parseDataSpec('owner/repo@feature@draft'), { name: 'owner/repo', ref: 'feature@draft', host: '' });
+  assert.deepEqual(parseDataSpec('owner/repo@v1.2'), { name: 'owner/repo', ref: 'v1.2', host: '' });
+  assert.deepEqual(parseDataSpec('owner/repo@'), { name: 'owner/repo', ref: '', host: '' });
+  assert.deepEqual(parseDataSpec(odd), { name: odd, ref: '', host: '' }, 'existing path with @ stays whole');
   assert.equal(parseDataSpec('no-slash-here'), null);
   assert.equal(parseDataSpec('bad@name'), null);
   for (const url of ['https://github.com/owner/repo', 'https://github.com/owner/repo.git/']) {
-    assert.deepEqual(parseDataSpec(url), { name: 'owner/repo', ref: '' });
+    assert.deepEqual(parseDataSpec(url), { name: 'owner/repo', ref: '', host: 'github.com' });
   }
-  assert.deepEqual(parseDataSpec('https://github.com/owner/repo.git@feature@draft'), { name: 'owner/repo', ref: 'feature@draft' });
+  assert.deepEqual(parseDataSpec('https://github.com/owner/repo.git@feature@draft'), { name: 'owner/repo', ref: 'feature@draft', host: 'github.com' });
   for (const spec of ['https://github.com.evil/owner/repo', 'https://user:password@github.com/owner/repo', 'https://github.com/../repo', 'https://github.com/owner/..', '-owner/repo']) {
     assert.equal(parseDataSpec(spec), null);
+  }
+
+  // --- parseGithubHost: total host parser; apiBase follows the host family.
+  assert.deepEqual(parseGithubHost('github.com'), { host: 'github.com', isDefault: true, apiBase: 'https://api.github.com', webBase: 'https://github.com' });
+  assert.deepEqual(parseGithubHost('acme.ghe.com'), { host: 'acme.ghe.com', isDefault: false, apiBase: 'https://api.acme.ghe.com', webBase: 'https://acme.ghe.com' });
+  assert.deepEqual(parseGithubHost('ghe.acme.corp'), { host: 'ghe.acme.corp', isDefault: false, apiBase: 'https://ghe.acme.corp/api/v3', webBase: 'https://ghe.acme.corp' });
+  assert.deepEqual(parseGithubHost('ACME.GHE.COM'), { host: 'acme.ghe.com', isDefault: false, apiBase: 'https://api.acme.ghe.com', webBase: 'https://acme.ghe.com' }, 'hosts normalize to lowercase');
+  const refusesHost = raw => {
+    const parsed = parseGithubHost(raw);
+    assert.ok(parsed.error && parsed.error.startsWith('ALATE_GITHUB_HOST:'), `error shape for ${JSON.stringify(raw)}`);
+    assert.match(parsed.error, /use a bare hostname, for example github\.com or acme\.ghe\.com/);
+    return parsed.error;
+  };
+  refusesHost('');
+  refusesHost('a b');
+  refusesHost('a_b');
+  refusesHost('-x.y');
+  refusesHost('x-.y');
+  refusesHost('https://x');
+  refusesHost('a'.repeat(254));
+  for (const raw of ['github.com', 'acme.ghe.com', 'ghe.acme.corp', 'ACME.GHE.COM']) assert.equal(parseGithubHost(raw).error, undefined, `no error for ${raw}`);
+
+  // --- githubHost: ambient setting; blank/unset falls back to the default, invalid throws.
+  assert.equal(GITHUB_HOST_ENV, 'ALATE_GITHUB_HOST');
+  assert.equal(DEFAULT_GITHUB_HOST, 'github.com');
+  assert.deepEqual(githubHost({}), { host: 'github.com', isDefault: true, apiBase: 'https://api.github.com', webBase: 'https://github.com' });
+  assert.deepEqual(githubHost({ [GITHUB_HOST_ENV]: '  ' }).host, 'github.com', 'blank env value is the default host');
+  assert.equal(githubHost({ [GITHUB_HOST_ENV]: 'acme.ghe.com' }).host, 'acme.ghe.com');
+  assert.throws(() => githubHost({ [GITHUB_HOST_ENV]: 'not a host' }), e => e.message.startsWith('ALATE_GITHUB_HOST:'));
+
+  // --- parseDataSpec host forms: explicit host on any GitHub host; look-alikes refused.
+  assert.deepEqual(parseDataSpec('acme.ghe.com/own/repo'), { name: 'own/repo', ref: '', host: 'acme.ghe.com' });
+  assert.deepEqual(parseDataSpec('acme.ghe.com/own/repo@v1'), { name: 'own/repo', ref: 'v1', host: 'acme.ghe.com' });
+  assert.deepEqual(parseDataSpec('ghe.acme.corp/own/repo@feature@draft'), { name: 'own/repo', ref: 'feature@draft', host: 'ghe.acme.corp' }, 'ref keeps everything after the first @');
+  assert.deepEqual(parseDataSpec('https://acme.ghe.com/own/repo.git@f@d'), { name: 'own/repo', ref: 'f@d', host: 'acme.ghe.com' });
+  assert.deepEqual(parseDataSpec('https://GITHUB.COM/own/repo'), { name: 'own/repo', ref: '', host: 'github.com' }, 'URL hosts normalize to lowercase');
+  for (const spec of ['https://github.com.evil/own/repo', 'github.com.evil/own/repo', 'www.github.com/own/repo', 'owner/repo/extra', 'localhost/own/repo', 'https://a/own/repo', 'a/own/nm/extra']) {
+    assert.equal(parseDataSpec(spec), null, `refusal for ${spec}`);
   }
 
   // --- redactSecrets: raw, URL-encoded and base64 credential shapes.
@@ -89,6 +127,33 @@ try {
   assert.ok(!('GIT_CONFIG_COUNT' in cmd.env), 'no auth config without a token');
   cmd = cloneCommand(odd, '', TOKEN, dir);
   assert.ok(!('GIT_CONFIG_COUNT' in cmd.env), 'local path needs no auth config');
+  cmd = cloneCommand('file://x/repo', '', TOKEN, dir);
+  assert.ok(!('GIT_CONFIG_COUNT' in cmd.env), 'file:// needs no auth config');
+  cmd = cloneCommand('http://github.com/own/repo', '', TOKEN, dir);
+  assert.ok(!('GIT_CONFIG_COUNT' in cmd.env), 'http:// needs no auth config');
+
+  // --- Token isolation across hosts: each clone's config names only its own host.
+  cmd = cloneCommand('https://acme.ghe.com/own/repo', '', TOKEN, dir);
+  assert.deepEqual(cmd.args.at(-2), 'https://acme.ghe.com/own/repo', 'clone URL in argv for ghe.com tenant');
+  assert.equal(cmd.env.GIT_CONFIG_KEY_0, 'http.https://acme.ghe.com/.extraheader');
+  assert.equal(cmd.env.GIT_CONFIG_VALUE_0, `AUTHORIZATION: basic ${basic}`);
+  assert.equal(cmd.env.GIT_CONFIG_COUNT, '1');
+  assert.ok(!cmd.args.join(' ').includes('github.com'), 'ghe clone argv never names github.com');
+  for (const [k, v] of Object.entries(cmd.env)) assert.ok(k.startsWith('GIT_CONFIG') ? !String(v).includes('github.com') : true, `ghe clone env ${k} never names github.com`);
+  cmd = cloneCommand('https://github.com/own/repo', '', TOKEN, dir);
+  assert.deepEqual(cmd.args.at(-2), 'https://github.com/own/repo', 'clone URL in argv for github.com');
+  assert.equal(cmd.env.GIT_CONFIG_KEY_0, 'http.https://github.com/.extraheader');
+  assert.ok(!JSON.stringify(cmd.env).includes('acme.ghe.com'), 'github.com clone never names the GHE tenant');
+
+  // --- dataHost / dataRepoUrl: ambient host decides plain specs; explicit host wins.
+  assert.equal(dataRepoUrl({ name: 'own/repo', ref: '', host: '' }), 'https://github.com/own/repo');
+  assert.equal(dataRepoUrl({ name: 'own/repo', ref: '', host: 'acme.ghe.com' }), 'https://acme.ghe.com/own/repo');
+  assert.equal(dataRepoUrl({ name: 'own/repo', ref: '', host: '' }, { [GITHUB_HOST_ENV]: 'acme.ghe.com' }), 'https://acme.ghe.com/own/repo');
+  assert.equal(dataRepoUrl({ name: 'own/repo', ref: '', host: '' }, { [GITHUB_HOST_ENV]: 'ghe.acme.corp' }), 'https://ghe.acme.corp/own/repo');
+  assert.equal(dataRepoUrl({ name: odd, ref: '', host: '' }), odd, 'an existing local path passes through unchanged');
+  assert.equal(dataHost({ name: 'own/repo', ref: '', host: 'ghe.acme.corp' }), 'ghe.acme.corp', 'explicit host beats the env');
+  assert.equal(dataHost({ name: 'own/repo', ref: '', host: '' }), 'github.com');
+  assert.throws(() => dataHost({ name: 'own/repo', ref: '', host: '' }, { [GITHUB_HOST_ENV]: 'not a host' }), e => e.message.startsWith('ALATE_GITHUB_HOST:'));
 
   // --- Integration: ref containing '@' clones for real; then a whole path containing '@'.
   const refDst = join(tmp, 'dst-ref');
@@ -132,7 +197,7 @@ try {
 
   let r = runSync('no-slash-here');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /--repo must be <owner\/name\[@ref\]> or an existing path/);
+  assert.match(r.stderr, /--repo must be <owner\/name\[@ref\]>, <host>\/owner\/name\[@ref\] or an existing path/);
 
   const tempBefore = readdirSync(tmpdir()).filter(n => n.startsWith('alate-data-'));
   r = runSync(plain, { GH_TOKEN: TOKEN });
@@ -284,7 +349,7 @@ try {
 
     // parseDataSpec: never throws, whatever the string.
     forAll((rand, size) => {
-      const junk = ['', '@', '@@', 'abc@', '/abs/path', './own/nm', 'own//nm', '-own/nm', 'own/..', 'https://github.com/own/nm.git/', `${ident(rand, 3)}@${ident(rand, 3)}@${ident(rand, 3)}`];
+      const junk = ['', '@', '@@', 'abc@', '/abs/path', './own/nm', 'own//nm', '-own/nm', 'own/..', 'a.b/own/nm', 'https://a.b/own/nm', 'https://github.com/own/nm.git/', `${ident(rand, 3)}@${ident(rand, 3)}@${ident(rand, 3)}`];
       return junk[Math.floor(rand() * junk.length)];
     }, spec => { parseDataSpec(spec); });
 
@@ -294,12 +359,12 @@ try {
       return rand() < 0.5 ? spec : `${spec}@${ident(rand, 5)}`;
     }, spec => {
       const p = parseDataSpec(spec);
-      assert.deepEqual(p, { name: spec.split('@')[0], ref: spec.includes('@') ? spec.slice(spec.indexOf('@') + 1) : '' }, `canonical parse: ${spec}`);
+      assert.deepEqual(p, { name: spec.split('@')[0], ref: spec.includes('@') ? spec.slice(spec.indexOf('@') + 1) : '', host: '' }, `canonical parse: ${spec}`);
       assert.deepEqual(parseDataSpec(p.ref ? `${p.name}@${p.ref}` : p.name), p, `round trip: ${spec}`);
     });
     // An existing local path wins whole, including one that contains '@'.
     writeFileSync(join(tmp, 'at@path'), 'x');
-    assert.deepEqual(parseDataSpec(join(tmp, 'at@path')), { name: join(tmp, 'at@path'), ref: '' }, 'a local path containing @ wins whole');
+    assert.deepEqual(parseDataSpec(join(tmp, 'at@path')), { name: join(tmp, 'at@path'), ref: '', host: '' }, 'a local path containing @ wins whole');
   }
 
   console.log('clone.test.mjs ok');

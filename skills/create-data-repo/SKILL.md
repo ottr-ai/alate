@@ -30,10 +30,11 @@ Call this checkout path ALATE below.
 
 ## 2. Choose the repo and the folder
 
-1. Run `gh api user --jq .login` for the GitHub user name.
-2. Ask the user for the repo name. Suggest `<user>/agent-data`.
-3. Confirm one point with the user: the repo will be PRIVATE on GitHub. Refuse a public repo. Stop when the user still wants one.
-4. Ask for the local folder for the repo. Suggest `<home>/agent-data`. Call this folder FOLDER below.
+1. Run `GH_HOST=<host> gh api user --jq .login` for the GitHub user name.
+2. Ask the user which GitHub host hosts the repo: github.com (the default), a GitHub Enterprise Cloud tenant like `acme.ghe.com`, or a GitHub Enterprise Server host like `git.example.com`. Call this host HOST below.
+3. Ask the user for the repo name. Suggest `<user>/agent-data`.
+4. Confirm one point with the user: the repo will be PRIVATE on GitHub. Refuse a public repo. Stop when the user still wants one.
+5. Ask for the local folder for the repo. Suggest `<home>/agent-data`. Call this folder FOLDER below.
 
 ## 3. Copy the starter and capture
 
@@ -60,12 +61,12 @@ yes.
 
 1. `git init` in FOLDER.
 2. `git add .` and `git commit -m "capture from this machine"` in FOLDER.
-3. `gh repo create <owner/name> --private --source . --remote origin` in FOLDER.
+3. `GH_HOST=<host> gh repo create <owner/name> --private --source . --remote origin` in FOLDER. On a host other than github.com, gh needs the token as `GH_ENTERPRISE_TOKEN` (`GH_TOKEN` only authenticates github.com).
 4. `git push -u origin HEAD` in FOLDER.
 
 A failed step stops this skill. Show the error.
 
 ## 6. Tell the user the next steps
 
-1. Point alate at the repo. Open the dashboard at http://127.0.0.1:4570 and import `owner/name` with a GitHub token. In Ottr, use Settings -> Alate.
+1. Point alate at the repo. Open the dashboard at http://127.0.0.1:4570 and import the repo with a GitHub token: `<host>/owner/name` when the host is not github.com, otherwise `owner/name` plus `ALATE_GITHUB_HOST` set to the host. In Ottr, use Settings -> Alate.
 2. Seed the Ottr board: `docker compose run --rm board-seed --repo <owner/name>`
