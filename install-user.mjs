@@ -356,6 +356,14 @@ try {
   const manifest = join(writeRoot, '.alate', 'installed.json');
   checkDestination(writeRoot, manifest);
   const lastManifest = join(readRoot, '.alate', 'installed.json');
+  // Layer mode reads machine state out of the live layer, which a turn can write: it runs
+  // with HOME=<live layer> on the shared home volume, so a snapshot path or this record
+  // can hold a symlink, hard link, or special file whose target only the alate container
+  // can read. The same alias guard the write side gets applies to every machine-side
+  // read, and a violation refuses the run before any write instead of copying the
+  // target's bytes into the new layer. In-place mode reads only paths it already guards
+  // as dest (or writes itself), so this is layer-only.
+  if (layerMode) checkDestination(readRoot, lastManifest);
   let last = {};
   if (existsSync(lastManifest)) {
     try {
@@ -399,6 +407,10 @@ try {
     checkDestination(writeRoot, dest);
     const machineSrc = layerMode && rel === 'omp/agent/config.yml' ? machineRoot : readRoot;
     const readDest = join(machineSrc, '.' + rel);
+    // The machine copy is read three times below (config.yml's deployment blocks, the
+    // fingerprint, the kept bytes): never follow an alias out of the live layer, or out
+    // of an in-place home on a first layer. See the guard on lastManifest above.
+    if (layerMode) checkDestination(machineSrc, readDest);
     // forTarget roots a captured absolute path at the real home; in layer mode the remap
     // below alone moves it into the layer — writeRoot here would put the layer prefix in twice.
     const target = forTarget(rel, readFileSync(srcPath), { home, platform: process.platform, roots });

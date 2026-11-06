@@ -105,6 +105,14 @@ non-zero. A failure after the switch changes nothing about the switch itself.
   the live layer; paths into the shared home stay shared.
 - A path the snapshot dropped is simply absent from the new layer. Nothing is deleted from
   the current layer; a pinned turn keeps reading it.
+- Machine-side reads in layer mode never follow an alias out of the live layer. An agent
+  turn runs with `HOME=<live layer>` on the shared home volume, so it can replace a
+  snapshot path, or the layer's own install record, with a symlink, hard link, or special
+  file whose target the layer must not read (`/state`, `/proc`). Before any machine-side
+  read, the same `checkDestination` guard the write side applies runs against the read
+  path, and a violation refuses the whole run before any write, exactly like an alias at
+  a destination. A first layer over an in-place home applies the same guard to the home's
+  `config.yml` before the migration reads it.
 
 ## Captured absolute paths
 
@@ -177,6 +185,9 @@ them at turn end.
 - A machine-kept file holding a re-rooted path lands pointing into the new layer, never
   into the live one that clean-up deletes.
 - Captured paths: a `catalogPath` under the home prefix lands re-rooted into the new layer.
+- A symlink planted on a snapshot path, or on `<live>/.alate/installed.json`, in the live
+  layer refuses the run before any write, keeps the old current, and never copies the
+  target's bytes into the new layer.
 - `current` as a real directory refuses the run before any write.
 - The non-layer suite (`install-user.test.mjs`) passes unchanged.
 

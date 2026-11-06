@@ -1201,6 +1201,29 @@ try {
     assert.equal(JSON.parse(lgot(join(llayers, 'nogit-9'), '.omp/agent/marketplaces.json')).marketplaces[0].catalogPath,
       join(llayers, 'nogit-9', '.omp/marketplaces/moved.json'), 'a kept machine file re-roots into the new layer, never the old one');
 
+    // A planted alias in the live layer: a turn runs with HOME=<live layer> on the shared
+    // volume, so it can point a snapshot path (or the layer's install record) at a file
+    // only the alate container can read (/state, /proc). Machine-side reads never follow
+    // an alias out of the live layer: the run refuses like an alias at the destination
+    // would, nothing of the target's bytes reaches the new layer or the output, and the
+    // old current stays put.
+    const planted = join(tmp, 'planted-secret.json');
+    writeFileSync(planted, '{"apiKey":"DUMMY-SECRET-123"}\n');
+    const live9 = realpathSync(lcurrent);
+    const plant = rel => { rmSync(join(live9, rel), { force: true }); symlinkSync(planted, join(live9, rel)); };
+    plant('.omp/agent/config.yml');
+    plant('.omp/agent/skills/mine/SKILL.md');
+    r = runL(layerHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 1, 'a planted alias on a snapshot path refuses the run');
+    assert.match(r.stderr, /is not a regular file/);
+    assert.ok(!`${r.stdout}${r.stderr}`.includes('DUMMY-SECRET-123'), 'the planted target never reaches the output');
+    plant('.alate/installed.json');
+    r = runL(layerHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 1, 'a planted alias on the install record refuses the run');
+    assert.match(r.stderr, /is not a regular file/);
+    assert.deepEqual(readdirSync(llayers).sort(), ['nogit-8', 'nogit-9'], 'the refused runs wrote no layer');
+    assert.equal(realpathSync(lcurrent), join(llayers, 'nogit-9'), 'a refused run keeps the old current');
+
     // Migration: the first layer over an existing in-place home reads the machine part of
     // config.yml from the home, so the deployment blocks and other machine edits survive the
     // switch (compose turns ALATE_LAYER=1 on over exactly such a home).
