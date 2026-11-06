@@ -27,9 +27,9 @@
 // -> ~/.ottr/workers/<project>/<file>; workers/_all/ is provisioned like a project. The data
 // repo is their only source, so a changed list replaces the machine copy without --force, and a
 // list it no longer ships is deleted. tools.json, env.txt and requirements.txt are validated before any write.
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, availableParallelism } from 'node:os';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -86,12 +86,45 @@ const pluginInstallFile = rel =>
 // pinned to a tag on purpose:
 // never point this at a moving ref. It needs Python 3.12+ where install-user runs:
 //   pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@v2.13.0"
-// The scan prefers the pinned venv (SKILLSPECTOR_VENV, default ~/.cache/skillspector-venv, the
-// same layout the data repo's .githooks/skillspector-scan.sh bootstraps) and verifies the
-// version before it trusts any verdict: baseline fingerprints bind to scanner_version, so a
-// scanner that is not the pin would silently suppress nothing.
+// Scanner resolution is a trust contract (specs/skillspector-scanner-trust.md): the home
+// volume is shared with worker agent turns, so a candidate that lives inside the home (or a
+// venv inside it, or one not owned by root) is never executed — not even for a --version
+// probe. SKILLSPECTOR_BIN wins when set: it must be an absolute path outside the target
+// home, otherwise the run refuses. Next the pinned venv (SKILLSPECTOR_VENV, default
+// ~/.cache/skillspector-venv, the same layout the data repo's .githooks/skillspector-scan.sh
+// bootstraps) is probed only when it exists, is root-owned on POSIX, and sits outside the
+// home; then PATH. The version is verified before any verdict is trusted: baseline
+// fingerprints bind to scanner_version, so a scanner that is not the pin would silently
+// suppress nothing.
 const SKILLSPECTOR_REF = 'v2.13.0';
 const SKILL_ROOT_NAMES = new Set(['skills', 'managed-skills']);
+
+// Spawned children get allowlisted environments: ALATE_API_KEY and every other server
+// secret never crosses a spawn boundary (specs/skillspector-scanner-trust.md, contract 5).
+const CHILD_ENV_KEYS = ['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'SystemDrive', 'ComSpec', 'PATHEXT'];
+const childEnv = extra => {
+  const env = {};
+  for (const key of [...CHILD_ENV_KEYS, ...(extra ?? [])]) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+};
+
+// True when the path (realpath when it exists, else itself, resolved) lies inside the target
+// home install-user writes into. A scanner inside that home is agent-turn-writable, so it is
+// never executed — not even for a --version probe.
+const insideHome = path => {
+  const real = (() => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return path;
+    }
+  })();
+  const rel = relative(resolve(home), resolve(real));
+  return rel === '' || !rel.startsWith(`..${sep}`);
+};
 
 // Worker additions Ottr's turns read, provisioned per project folder (workers/_all/ is the fleet
 // folder and is provisioned like a project). The data repo is their only source: a changed list
@@ -208,7 +241,7 @@ const recordPass = passes => {
 // The pinned build's verdict for these exact bytes, printed as one block so a tail of the
 // output always shows a whole report.
 const scanOne = (scanner, dir, total) => new Promise((resolve, reject) => {
-  const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv() });
   const out = [], errOut = [];
   child.stdout.on('data', chunk => out.push(chunk));
   child.stderr.on('data', chunk => errOut.push(chunk));
@@ -222,20 +255,50 @@ const scanOne = (scanner, dir, total) => new Promise((resolve, reject) => {
 });
 
 const runScan = async skillDirs => {
-  // The pin is enforced, not just documented: v2 baseline fingerprints bind to scanner_version,
-  // so a scanner that is not the pinned build silently suppresses nothing and every accepted
-  // finding resurfaces as a fresh rejection (the 2026-10-31 Windows host failure). Prefer the
-  // pinned venv (same layout and SKILLSPECTOR_VENV override as the data repo's
-  // .githooks/skillspector-scan.sh), fall back to PATH only when its version matches the pin.
+  // Trust first, probe second (specs/skillspector-scanner-trust.md): no candidate runs
+  // before its trust check. SKILLSPECTOR_BIN wins when set and is hard-validated — absolute
+  // and outside the target home — with no fallback. Then the pinned venv (same layout and
+  // SKILLSPECTOR_VENV override as the data repo's .githooks/skillspector-scan.sh), which
+  // serves only when it is root-owned on POSIX and outside the home. Then PATH. The pin is
+  // enforced, not just documented: v2 baseline fingerprints bind to scanner_version, so a
+  // scanner that is not the pinned build silently suppresses nothing and every accepted
+  // finding resurfaces as a fresh rejection (the 2026-10-31 Windows host failure).
   const venvBin = join(
     process.env.SKILLSPECTOR_VENV ?? join(homedir(), '.cache', 'skillspector-venv'),
     process.platform === 'win32' ? join('Scripts', 'skillspector.exe') : join('bin', 'skillspector'),
   );
   const pinnedVersion = `SkillSpector v${SKILLSPECTOR_REF.slice(1)}`;
+  const candidates = [];
+  const refusals = [];
+  if (process.env.SKILLSPECTOR_BIN !== undefined && process.env.SKILLSPECTOR_BIN !== '') {
+    const bin = process.env.SKILLSPECTOR_BIN;
+    if (!isAbsolute(bin)) {
+      throw new Error(`SKILLSPECTOR_BIN must be an absolute path (got "${bin}"); point it at an absolute scanner outside the home install-user writes into (${home}).`);
+    }
+    if (insideHome(bin)) {
+      throw new Error(`SKILLSPECTOR_BIN points inside the home install-user writes into (${home}): "${bin}". A scanner in that home is agent-turn-writable, so it is never executed. Point SKILLSPECTOR_BIN at an absolute scanner outside that home.`);
+    }
+    candidates.push(bin);
+  }
+  if (existsSync(venvBin)) {
+    const st = statSync(venvBin);
+    const reasons = [];
+    if (process.platform !== 'win32' && st.uid !== 0) reasons.push('not owned by root');
+    if (insideHome(venvBin)) reasons.push(`inside the home install-user writes into (${home})`);
+    if (reasons.length) {
+      console.log(`skipping venv scanner at ${venvBin}: ${reasons.join(', ')}`);
+      refusals.push(`venv scanner at ${venvBin}: ${reasons.join(', ')}`);
+    } else {
+      candidates.push(venvBin);
+    }
+  } else {
+    refusals.push(`venv scanner at ${venvBin} is missing`);
+  }
+  candidates.push('skillspector');
   let scanner = null;
   let reported = null;
-  for (const candidate of [venvBin, 'skillspector']) {
-    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
+  for (const candidate of candidates) {
+    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', env: childEnv() });
     if (probe.error?.code === 'ENOENT') continue;
     if (probe.error) {
       throw new Error(`skillspector could not run (${probe.error.code ?? probe.error.message}); refusing to install ${skillDirs.length} skill snapshot(s).`);
@@ -255,7 +318,8 @@ const runScan = async skillDirs => {
   }
   if (!scanner) {
     const venvRoot = join(venvBin, '..', '..');
-    throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s). The venv at ${venvRoot} is broken (a Python upgrade makes an old venv unusable) or missing: rebuild it with rm -rf "${venvRoot}" && python3 -m venv "${venvRoot}" && "${join(venvRoot, 'bin', 'pip')}" install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}", or install the pinned build (Python 3.12+), then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
+    const refused = refusals.length ? ` No trusted candidate served the scan:\n${refusals.map(r => `- ${r}`).join('\n')}.` : '';
+    throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s).${refused} Remediation: set SKILLSPECTOR_BIN to an absolute scanner outside the home install-user writes into (${home}), point SKILLSPECTOR_VENV at a root-owned venv outside that home, or install the pinned build (Python 3.12+) on PATH. To rebuild the venv (it must be root-owned and live outside the home): rm -rf "${venvRoot}" && python3 -m venv "${venvRoot}" && "${join(venvRoot, 'bin', 'pip')}" install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}", or install the pinned build, then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
   }
   const passes = readPasses();
   const keys = new Map(skillDirs.map(dir => [dir, `${SCAN_CACHE_FORMAT} ${hashSkillDir(dir)} ${SKILLSPECTOR_REF} ${reported} scan ${SCAN_ARGS.join(' ')}`]));
@@ -374,7 +438,7 @@ try {
     // an in-place migration of a real directory is out of scope.
     const st = lstatSync(currentLink, { throwIfNoEntry: false });
     if (st && !st.isSymbolicLink()) throw new Error(`refusing: ${currentLink} exists and is not a symlink; remove or migrate it by hand`);
-    const gitHead = spawnSync('git', ['-C', data.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+    const gitHead = spawnSync('git', ['-C', data.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: childEnv() });
     const commit = gitHead.status === 0 && /^[0-9a-f]{40,64}$/.test((gitHead.stdout ?? '').trim()) ? gitHead.stdout.trim().slice(0, 12) : 'nogit';
     newLayerDir = join(layersDir, `${commit}-${nextLayerCounter(existsSync(layersDir) ? readdirSync(layersDir) : [], commit)}`);
     writeRoot = newLayerDir;
@@ -631,7 +695,7 @@ try {
       // The data-root rules install straight into the layer, through the same sync.mjs and its
       // fail-closed gates the server-side provision uses.
       const toolDir = dirname(fileURLToPath(import.meta.url));
-      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), join(newLayerDir, '.omp', 'agent', 'rules'), '--data', data.dir], { encoding: 'utf8' });
+      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), join(newLayerDir, '.omp', 'agent', 'rules'), '--data', data.dir], { encoding: 'utf8', env: childEnv(['ALATE_TEST_SCRIPT_GATE']) });
       if (rules.error || rules.status !== 0) throw new Error(`rules install failed:\n${rules.stderr || rules.stdout}`);
       if (rules.stdout) console.log(rules.stdout);
     }

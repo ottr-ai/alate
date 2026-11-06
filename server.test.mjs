@@ -240,6 +240,40 @@ try {
     const layerBody = await (await fetch(new URL('/health', layerBase))).json();
     assert.equal(layerBody.layers, true, 'health reports layers true with ALATE_LAYER=1');
   }
+
+  // Child env allowlist: provision script children see only documented keys plus the
+  // ALATE_TEST_* family; ALATE_API_KEY never crosses the spawn boundary.
+  {
+    const childEnvCapture = join(tmp, 'child-env-capture.json');
+    const childKey = 'k'.repeat(40);
+    const envChild = spawnServer(
+      ['--port', '0', '--config', join(tmp, 'server-config-childenv.json')],
+      { ...serverEnv, ALATE_API_KEY: childKey, SKILLSPECTOR_BIN: join(tmp, 'trusted-skillspector'), ALATE_TEST_CHILD_ENV: childEnvCapture },
+    );
+    try {
+      const childBase = await new Promise((resolve, reject) => {
+        let buf = '';
+        envChild.stdout.on('data', chunk => {
+          buf += chunk;
+          const line = /alate server on (http:\/\/127\.0\.0\.1:\d+)\n/.exec(buf);
+          if (line) resolve(line[1]);
+        });
+        envChild.once('exit', code => reject(new Error(`childenv server exited early (${code})`)));
+        setTimeout(() => reject(new Error('childenv server did not start')), 10_000).unref();
+      });
+      const childAuth = { Authorization: `Bearer ${childKey}`, 'Content-Type': 'application/json' };
+      assert.equal((await fetch(new URL('/config', childBase), { method: 'POST', headers: childAuth, body: JSON.stringify({ repo: origin }) })).status, 200, 'childenv server accepts its source');
+      const provBody = await (await fetch(new URL('/provision', childBase), { method: 'POST', headers: childAuth, body: '{}' })).json();
+      assert.equal(provBody.ok, true, 'provision succeeds under the child env allowlist');
+      const captured = JSON.parse(readFileSync(childEnvCapture, 'utf8'));
+      assert.ok(!('ALATE_API_KEY' in captured), 'ALATE_API_KEY never reaches a provision child');
+      assert.ok('PATH' in captured, 'PATH crosses to provision children');
+      assert.equal(captured.SKILLSPECTOR_BIN, join(tmp, 'trusted-skillspector'), 'SKILLSPECTOR_BIN crosses to provision children');
+      assert.ok('ALATE_TEST_CHILD_ENV' in captured, 'ALATE_TEST_* keys cross to provision children');
+    } finally {
+      await new Promise(resolve => { envChild.once('close', resolve); envChild.kill(); });
+    }
+  }
   const onDisk = readFileSync(config, 'utf8');
   assert.ok(onDisk.includes('alate-test-token-9f2c'), 'token persisted in config file');
   if (process.platform !== 'win32') assert.equal(statSync(config).mode & 0o777, 0o600, 'config file mode 0600');

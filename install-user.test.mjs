@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir, availableParallelism } from 'node:os';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, remapHomePaths, sameContent, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
 import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
@@ -21,16 +21,22 @@ copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(scr
 // Layer mode spawns the real sync.mjs beside the script for the rules install.
 copyFileSync(fileURLToPath(new URL('./sync.mjs', import.meta.url)), join(scriptDir, 'sync.mjs'));
 const put = (rel, text) => { mkdirSync(join(data, 'user', rel, '..'), { recursive: true }); writeFileSync(join(data, 'user', rel), text); };
-const run = (extra, h = home, env, cwd) => spawnSync(process.execPath, [join(scriptDir, 'install-user.mjs'), '--home', h, ...extra], {
-  encoding: 'utf8',
-  cwd,
-  // Default env puts the stub skillspector first on PATH (the scan gate) and points
-  // SKILLSPECTOR_VENV at a path that does not exist, so the run resolves the PATH stub; an
-  // explicit env runs without either. Windows cannot exec an extensionless stub through
-  // spawnSync, so there the suite needs a real skillspector: the gate fails closed without
-  // one, by design.
-  env: env ?? (scanned ? { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv') } : undefined),
-});
+const run = (extra, h = home, env, cwd) => {
+  // Neutralize an inherited SKILLSPECTOR_BIN (the container image sets it) unless this call
+  // provides one: the tests below manage scanner resolution explicitly.
+  const resolved = scanned || env ? (env ?? { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv') }) : undefined;
+  if (resolved && !('SKILLSPECTOR_BIN' in resolved)) resolved.SKILLSPECTOR_BIN = '';
+  return spawnSync(process.execPath, [join(scriptDir, 'install-user.mjs'), '--home', h, ...extra], {
+    encoding: 'utf8',
+    cwd,
+    // Default env puts the stub skillspector first on PATH (the scan gate) and points
+    // SKILLSPECTOR_VENV at a path that does not exist, so the run resolves the PATH stub; an
+    // explicit env runs without either. Windows cannot exec an extensionless stub through
+    // spawnSync, so there the suite needs a real skillspector: the gate fails closed without
+    // one, by design.
+    env: resolved,
+  });
+};
 // The stub logs its scan argv and exits with a script-set code: 0 clean, 1 findings. A
 // --version probe is answered but not logged: install-user probes the version once per run
 // before it scans, and the log stays a scan-only record.
@@ -45,18 +51,20 @@ if (scanned) {
   mkdirSync(stubDir, { recursive: true });
   writeStub(0);
 }
-// Mirrors install-user's resolution: the pinned venv, then PATH, and a probe must report the
-// pin. Returns the binary or null; the real-skillspector checks skip without one.
+// Mirrors install-user's trust-first resolution: SKILLSPECTOR_BIN when set, then the pinned
+// venv (only when it is not under the default ~/.cache, which a worker turn can write), then
+// PATH. Returns the first candidate reporting the pin, or null.
 const discoverRealScanner = () => {
   const venv = process.env.SKILLSPECTOR_VENV ?? join(homedir(), '.cache', 'skillspector-venv');
-  const candidates = [
-    join(venv, process.platform === 'win32' ? join('Scripts', 'skillspector.exe') : join('bin', 'skillspector')),
-    ...(process.env.PATH ?? '').split(delimiter).map(dir => join(dir, process.platform === 'win32' ? 'skillspector.exe' : 'skillspector')),
-  ];
-  for (const candidate of candidates) {
+  const answersPin = candidate => {
     const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
-    if (probe.status === 0 && String(probe.stdout).trim() === 'SkillSpector v2.13.0') return candidate;
-  }
+    return probe.status === 0 && String(probe.stdout).trim() === 'SkillSpector v2.13.0';
+  };
+  const candidates = [];
+  if (process.env.SKILLSPECTOR_BIN) candidates.push(process.env.SKILLSPECTOR_BIN);
+  if (!venv.startsWith(join(homedir(), '.cache') + sep)) candidates.push(join(venv, process.platform === 'win32' ? join('Scripts', 'skillspector.exe') : join('bin', 'skillspector')));
+  candidates.push(...(process.env.PATH ?? '').split(delimiter).map(dir => join(dir, process.platform === 'win32' ? 'skillspector.exe' : 'skillspector')));
+  for (const candidate of candidates) if (answersPin(candidate)) return candidate;
   return null;
 };
 const got = rel => readFileSync(join(home, rel), 'utf8');
@@ -783,27 +791,55 @@ try {
     assert.match(r.stdout, /1 installed/);
     assert.equal(got('.omp/agent/skills/mine/RENAME.md'), '# mine, v6\n');
 
-    // The pinned venv wins over PATH: it is the layout the data repo's
-    // .githooks/skillspector-scan.sh bootstraps, so a host that pushes (venv present) and a
-    // machine that restores (this script) scan with the same build the container image
-    // carries. The PATH stub must stay unused while the venv resolves.
+    // The pinned venv is preferred over PATH, but only when the trust gate passes: it must
+    // be root-owned on POSIX and live outside the home install-user writes into, because the
+    // home volume is shared with worker agent turns (specs/skillspector-scanner-trust.md).
     const venvDir = join(tmp, 'pinned-venv');
     const venvCallsLog = join(venvDir, 'calls.log');
     mkdirSync(join(venvDir, 'bin'), { recursive: true });
     writeFileSync(join(venvDir, 'bin', 'skillspector'), `#!/bin/sh\n[ "$1" = scan ] && printf '%s\\n' "$*" >> '${venvCallsLog}'\nif [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi\nexit 0\n`);
     chmodSync(join(venvDir, 'bin', 'skillspector'), 0o755);
     // The cache would answer with the PATH stub's verdicts (same version, same bytes, same
-    // key), so drop it: this run must prove the venv itself scans.
+    // key), so drop it: this run must prove which scanner served.
     rmSync(join(home, '.alate', 'skillspector-pass.json'), { force: true });
     const callsBeforeVenv = readFileSync(callsLog, 'utf8');
-    r = run(['--data', data, '--skip-plugins'], home, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: venvDir });
+    const venvEnv = { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: venvDir };
+    r = run(['--data', data, '--skip-plugins'], home, venvEnv);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /4 unchanged/);
-    const venvCalls = readFileSync(venvCallsLog, 'utf8').trim().split('\n');
-    assert.ok(venvCalls.every(c => c.startsWith('scan ') && c.endsWith('--no-llm --fail-on-findings --use-shipped-baseline')),
-      `the pinned venv ran the static-only scan: ${venvCalls[0]}`);
-    assert.ok(venvCalls.some(c => c.includes(join(data, 'user/omp/agent/skills/mine'))), 'the omp skill snapshot is scanned through the venv');
-    assert.equal(readFileSync(callsLog, 'utf8'), callsBeforeVenv, 'the PATH scanner stays unused when the pinned venv resolves');
+    if (process.getuid?.() !== 0) {
+      // The test-created venv is user-owned, so a non-root runner must see it refused
+      // without a probe and the PATH stub serve instead.
+      assert.match(r.stdout, /skipping venv scanner at .*pinned-venv.*not owned by root/, r.stdout);
+      assert.ok(readFileSync(callsLog, 'utf8').length > callsBeforeVenv.length, 'the PATH scanner served when the venv was not trusted');
+      assert.ok(!existsSync(venvCallsLog), 'the untrusted venv scanner stays unused');
+    } else {
+      const venvCalls = readFileSync(venvCallsLog, 'utf8').trim().split('\n');
+      assert.ok(venvCalls.every(c => c.startsWith('scan ') && c.endsWith('--no-llm --fail-on-findings --use-shipped-baseline')),
+        `the pinned venv ran the static-only scan: ${venvCalls[0]}`);
+      assert.ok(venvCalls.some(c => c.includes(join(data, 'user/omp/agent/skills/mine'))), 'the omp skill snapshot is scanned through the venv');
+      assert.equal(readFileSync(callsLog, 'utf8'), callsBeforeVenv, 'the PATH scanner stays unused when the pinned venv resolves');
+    }
+
+    // Preference proof that runs on every POSIX runner: a trusted SKILLSPECTOR_BIN outside
+    // the home wins over the venv and over PATH, and neither of the others runs.
+    const binDir = join(tmp, 'bin-stub');
+    const binCallsLog = join(binDir, 'calls.log');
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(join(binDir, 'skillspector'), `#!/bin/sh\n[ "$1" = scan ] && printf '%s\\n' "$*" >> '${binCallsLog}'\nif [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi\nexit 0\n`);
+    chmodSync(join(binDir, 'skillspector'), 0o755);
+    rmSync(join(home, '.alate', 'skillspector-pass.json'), { force: true });
+    // A root runner's venv branch above already ran the venv and wrote its log; drop the
+    // stale fixture so this run alone proves the venv stays unused.
+    rmSync(venvCallsLog, { force: true });
+    const callsBeforeBin = readFileSync(callsLog, 'utf8');
+    r = run(['--data', data, '--skip-plugins'], home, { ...venvEnv, SKILLSPECTOR_BIN: join(binDir, 'skillspector') });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(join(binDir, 'skillspector')), `the run names the SKILLSPECTOR_BIN scanner: ${r.stdout}`);
+    const binCalls = readFileSync(binCallsLog, 'utf8').trim().split('\n');
+    assert.ok(binCalls.some(c => c.startsWith('scan ') && c.includes(join(data, 'user/omp/agent/skills/mine'))), 'the SKILLSPECTOR_BIN scanner did the scans');
+    assert.equal(readFileSync(callsLog, 'utf8'), callsBeforeBin, 'the PATH scanner stays unused when SKILLSPECTOR_BIN resolves');
+    assert.ok(!existsSync(venvCallsLog), 'the venv stays unused when SKILLSPECTOR_BIN resolves');
 
     // A venv a Python upgrade broke (bin/skillspector exists but exits 1 with no output: its
     // packages sit in lib/python3.x while bin/python3 is the new interpreter, the 2026-11-01
@@ -823,16 +859,97 @@ try {
     assert.ok(readFileSync(callsLog, 'utf8').length > pathCallsBefore.length, 'the PATH scanner scanned when the venv was broken');
     assert.ok(!existsSync(brokenCallsLog), 'the broken venv scanner stays unused');
 
-    // But a venv scanner that runs and reports a version is held to the pin even when a pinned
-    // scanner sits on PATH: a build below the pin would silently suppress nothing, so the run
-    // refuses and the venv must be rebuilt, not silently swapped for a different build.
-    const oldVenv = join(tmp, 'old-venv');
-    mkdirSync(join(oldVenv, 'bin'), { recursive: true });
-    writeFileSync(join(oldVenv, 'bin', 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'SkillSpector v2.12.0'; exit 0; fi\nexit 0\n`);
-    chmodSync(join(oldVenv, 'bin', 'skillspector'), 0o755);
-    r = run(['--data', data, '--skip-plugins'], home, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: oldVenv });
-    assert.equal(r.status, 1, 'a venv scanner below the pin refuses even with a pinned PATH scanner');
+    // A scanner that runs and reports a version below the pin refuses even when a pinned
+    // scanner sits on PATH: a build below the pin would silently suppress nothing, so the
+    // run refuses. SKILLSPECTOR_BIN is the trusted channel that surfaces the bad verdict on
+    // any runner: the separate bin stub reports v2.12.0 while the PATH stub reports the pin.
+    const oldBinDir = join(tmp, 'old-bin');
+    mkdirSync(oldBinDir, { recursive: true });
+    writeFileSync(join(oldBinDir, 'skillspector'), '#!/bin/sh\nif [ "$1" = "--version" ]; then echo \'SkillSpector v2.12.0\'; exit 0; fi\nexit 0\n');
+    chmodSync(join(oldBinDir, 'skillspector'), 0o755);
+    r = run(['--data', data, '--skip-plugins'], home, { ...venvEnv, SKILLSPECTOR_BIN: join(oldBinDir, 'skillspector') });
+    assert.equal(r.status, 1, 'a scanner below the pin refuses even with a pinned PATH scanner');
     assert.match(r.stderr, /not the pinned SkillSpector v2\.13\.0/);
+
+    // A planted venv inside the target home is never executed, even when it answers the
+    // version probe with the pin: the home volume is shared with worker agent turns, so a
+    // turn could plant a scanner there (specs/skillspector-scanner-trust.md). The planted
+    // binary writes a marker on scan, so every check below proves it never ran.
+    const plantedBin = join(home, '.cache', 'skillspector-venv', 'bin', 'skillspector');
+    const plantedMarker = join(home, 'planted-marker');
+    const plantedCallsLog = join(home, '.cache', 'skillspector-venv', 'planted-calls.log');
+    mkdirSync(join(home, '.cache', 'skillspector-venv', 'bin'), { recursive: true });
+    writeFileSync(plantedBin, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi\n[ "$1" = scan ] && { touch '${plantedMarker}'; printf '%s\\n' "$*" >> '${plantedCallsLog}'; }\nexit 0\n`);
+    chmodSync(plantedBin, 0o755);
+    const stubBin = join(stubDir, 'skillspector');
+
+    // a. SKILLSPECTOR_BIN serves, and the planted binary stays untouched — with no venv
+    // override, so the default venv location under the home is exactly the planted one.
+    rmSync(join(home, '.alate', 'skillspector-pass.json'), { force: true });
+    const plantedCallsBefore = readFileSync(callsLog, 'utf8');
+    // /usr/bin:/bin keeps the run hermetic: no stub, and no real skillspector the CI image
+    // may put on PATH.
+    const noVenvEnv = { PATH: '/usr/bin:/bin', HOME: home };
+    delete noVenvEnv.SKILLSPECTOR_VENV;
+    r = run(['--data', data, '--skip-plugins'], home, { ...noVenvEnv, SKILLSPECTOR_BIN: stubBin });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(stubBin), `the run names the SKILLSPECTOR_BIN scanner: ${r.stdout}`);
+    assert.ok(!existsSync(plantedMarker), 'the planted venv scanner never ran');
+    assert.ok(readFileSync(callsLog, 'utf8').length > plantedCallsBefore.length, 'the trusted stub did the scans');
+
+    // b. Without SKILLSPECTOR_BIN the planted venv is skipped with its reason on stdout and
+    // the PATH stub serves.
+    rmSync(join(home, '.alate', 'skillspector-pass.json'), { force: true });
+    const plantedCallsBefore2 = readFileSync(callsLog, 'utf8');
+    r = run(['--data', data, '--skip-plugins'], home, { ...noVenvEnv, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}` });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /skipping venv scanner at .*skillspector-venv.*inside the home/, r.stdout);
+    assert.ok(!existsSync(plantedMarker), 'the planted venv scanner never ran');
+    assert.ok(readFileSync(callsLog, 'utf8').length > plantedCallsBefore2.length, 'the PATH stub served when the planted venv was refused');
+
+    // c. With no scanner at all the run fails closed, names the remediation, and the planted
+    // binary still never runs.
+    r = run(['--data', data, '--skip-plugins'], home, { ...noVenvEnv, HOME: home });
+    assert.equal(r.status, 1, 'no scanner refuses the run');
+    assert.match(r.stderr, /skillspector not found/);
+    assert.match(r.stderr, /SKILLSPECTOR_BIN/);
+    assert.ok(!existsSync(plantedMarker), 'the planted venv scanner never ran');
+
+    // SKILLSPECTOR_BIN misconfigurations refuse without a fallback: a relative path and a
+    // path inside the target home are both untrusted by contract 2 of the spec.
+    r = run(['--data', data, '--skip-plugins'], home, { ...venvEnv, SKILLSPECTOR_BIN: 'skillspector' });
+    assert.equal(r.status, 1, 'a relative SKILLSPECTOR_BIN refuses the run');
+    assert.match(r.stderr, /absolute/);
+    mkdirSync(join(home, 'bin'), { recursive: true });
+    const homeBin = join(home, 'bin', 'skillspector');
+    writeFileSync(homeBin, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo \'SkillSpector v2.13.0\'; exit 0; fi\nexit 0\n');
+    chmodSync(homeBin, 0o755);
+    r = run(['--data', data, '--skip-plugins'], home, { PATH: process.env.PATH ?? '', HOME: home, SKILLSPECTOR_BIN: homeBin });
+    assert.equal(r.status, 1, 'a SKILLSPECTOR_BIN inside the home refuses the run');
+    assert.match(r.stderr, /home/);
+
+    // The scanner child runs on an allowlisted environment: server secrets like ALATE_API_KEY
+    // never cross the spawn boundary (contract 5), even when install-user itself carries them.
+    const envStubDir = join(tmp, 'env-stub');
+    const envLog = join(envStubDir, 'env.log');
+    mkdirSync(envStubDir, { recursive: true });
+    writeFileSync(join(envStubDir, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi\n[ "$1" = scan ] && env | sort >> '${envLog}'\nexit 0\n`);
+    chmodSync(join(envStubDir, 'skillspector'), 0o755);
+    const envHome = join(tmp, 'env-home');
+    r = run(['--data', data, '--skip-plugins'], envHome, {
+      ...process.env,
+      PATH: `${envStubDir}${delimiter}${process.env.PATH ?? ''}`,
+      SKILLSPECTOR_VENV: join(tmp, 'no-venv'),
+      ALATE_API_KEY: 'x'.repeat(48),
+      GH_TOKEN: 'ghp_secret',
+      PYTHONPATH: '/tmp/evil',
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const childEnvDump = readFileSync(envLog, 'utf8');
+    assert.match(childEnvDump, /^PATH=/m, 'the scanner child keeps PATH');
+    assert.doesNotMatch(childEnvDump, /ALATE_API_KEY/, 'the scanner child never sees ALATE_API_KEY');
+    assert.doesNotMatch(childEnvDump, /GH_TOKEN/, 'the scanner child never sees GH_TOKEN');
+    assert.doesNotMatch(childEnvDump, /PYTHONPATH/, 'the scanner child never sees PYTHONPATH');
 
     // The real verdict, on the real snapshot: the break-ui bytes the Windows host rejected on
     // 2026-10-31 (P1 at SKILL.md:36 resurfaced; the shipped baseline accepts them under the

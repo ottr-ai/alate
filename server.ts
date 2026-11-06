@@ -17,7 +17,22 @@ const repoRoot = import.meta.dirname
 const CONFIG_FILE = flagValue('--config') ?? join(repoRoot, 'server-config.json')
 const CAP = 200000
 const SCRIPTS = ['sync.mjs', 'install-user.mjs']
+// Allowlisted child environment: keeps ALATE_API_KEY and every other secret inside the server
+// process. Children and their children never see it.
+const CHILD_ENV_KEYS = ['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'SystemDrive', 'ComSpec', 'PATHEXT', 'PI_CODING_AGENT_DIR', 'ALATE_LAYER', 'ALATE_DATA', 'ALATE_KEEP_TEMP', 'SKILLSPECTOR_BIN', 'SKILLSPECTOR_VENV', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
+function childEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const key of CHILD_ENV_KEYS) {
+    const value = process.env[key]
+    if (value !== undefined) env[key] = value
+  }
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith('ALATE_TEST_')) env[key] = process.env[key]
+  }
+  return env
+}
 const KNOWN_ROUTES = ['/health', '/config', '/provision', '/api/updates', '/api/updates/check', '/api/files', '/api/file']
+const testChildEnvCapture = process.env.ALATE_TEST_CHILD_ENV
 
 interface UpdateState { lastChecked: string | null; remoteSha: string; provisionedSha: string }
 interface Config {
@@ -91,8 +106,9 @@ async function provision(): Promise<ProvisionResult[]> {
     for (const script of SCRIPTS) {
       const child = spawn(process.execPath, [join(repoRoot, script), '--data', data.dir], {
         cwd: repoRoot,
-        env: process.env,
+        env: childEnv(),
       })
+      if (testChildEnvCapture) writeFileSync(testChildEnvCapture, JSON.stringify(childEnv()))
       let output = ''
       child.stdout.on('data', (d: Buffer) => { if (output.length < CAP + 1000) output += d })
       child.stderr.on('data', (d: Buffer) => { if (output.length < CAP + 1000) output += d })
