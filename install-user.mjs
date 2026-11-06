@@ -462,7 +462,9 @@ try {
     // never snapshot content: capture strips it, and a snapshot captured by an older alate
     // loses the entry here, so the provisioned config.yml never carries the choice.
     if (rel === 'omp/agent/config.yml') snapshot = Buffer.from(withoutMemoryBackend(snapshot.toString('utf8')), 'utf8');
-    if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) snapshot = Buffer.from(remapHomePaths(snapshot.toString('utf8'), layerHome, newLayerDir), 'utf8');
+    // The remap prefix must spell the home exactly as forTarget rooted it above, so a
+    // non-canonical --home still re-roots once; the layer side is canonical.
+    if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) snapshot = Buffer.from(remapHomePaths(snapshot.toString('utf8'), home, newLayerDir), 'utf8');
     // config.yml's top-level hindsight:/alate: blocks are deployment settings that stay on the
     // target: the snapshot never carries them (capture strips them), and the machine's own ride
     // along on every install. In layer mode they come from the live layer's config, the fresh
