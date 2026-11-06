@@ -949,6 +949,7 @@ try {
   let holdNpm = false; // stall the running check at the context-mode npm request
   let releaseNpm = null; // set once the held request arrived; call it to let the check finish
   let child2 = null; // the trigger-check server, spawned and killed inside the try
+  let child3 = null; // the POST /config first-setup server, spawned and killed inside the try
   // Resolves for an already-exited child too: a `close` listener on a dead child never fires.
   const stopServer = p => new Promise(resolve => {
     if (p.exitCode !== null || p.signalCode !== null) return resolve();
@@ -1473,9 +1474,45 @@ try {
     assert.equal(relHits() - hitsAtHold, 2, 'the edit during a running check queues exactly one more check');
     await waitFor(async () => (await updatesBody()).updates.find(u => u.name === 'from-demo')?.current === '3.0.0', 20_000);
     assert.ok(!boardNames((await updatesBody()).updates).includes('from-demo'), 'the late pin move still left the board list at once');
+
+    // 78c. POST /config with repo and token in one call is the board's first setup.
+    // The check it queues must authenticate with the new token at once, not with
+    // whatever was stored before: selectSource queues that check before the route
+    // stores the token. Fresh server: no stored token, no settings call, and an
+    // hour-long update interval so only the queued check can reach the fake.
+    child3 = spawnServer(['--port', '0', '--config', join(tmp, 'server-config-updates3.json'), '--db', join(tmp, 'state-updates3.db'), '--interval', '60', '--update-interval', '3600'], {
+      ...serverEnv, PATH: `${tmpBin}${delimiter}${serverEnv.PATH ?? ''}`,
+      ALATE_TEST_GITHUB_API_BASE: `${upBase}/gh`, ALATE_TEST_NPM_BASE: `${upBase}/npm`,
+      ALATE_TEST_NODE_DIST_BASE: `${upBase}/dist`, ALATE_TEST_CFT_BASE: `${upBase}/cft`,
+    });
+    let apiKey3 = '';
+    base = await new Promise((resolve, reject) => {
+      let buf = '';
+      child3.stdout.on('data', chunk => {
+        buf += chunk;
+        const k = /alate API key: (\S+)\n/.exec(buf);
+        const l = /alate server on (http:\/\/127\.0\.0\.1:\d+)\n/.exec(buf);
+        if (k) apiKey3 = k[1];
+        if (k && l) resolve(l[1]);
+      });
+      child3.once('exit', code => reject(new Error(`config-route server exited early (${code})`)));
+      setTimeout(() => reject(new Error(`config-route server did not start; got: ${buf}`)), 10_000).unref();
+    });
+    apiKey = apiKey3;
+    const hitsAtConfig = upHits.length;
+    r = await postJson('/config', { repo: 'https://github.com/demo/upd2', token: 'config-route-token-77a' }, true);
+    assert.equal(r.status, 200, JSON.stringify(await r.json()));
+    // The queued check's first GitHub request (skill rows run before upstream items)
+    // must already carry the token from this POST: nothing else can trigger a check
+    // here, so any new gh request belongs to it.
+    await waitFor(() => authSeen.slice(hitsAtConfig).some(a => a.prefix === 'gh'), 20_000);
+    const firstGh = authSeen.slice(hitsAtConfig).find(a => a.prefix === 'gh');
+    assert.equal(firstGh.authorization, 'Bearer config-route-token-77a',
+      'the check queued by POST /config authenticates with the token from the same request');
   } finally {
     await stopServer(child);
     if (child2) await stopServer(child2);
+    if (child3) await stopServer(child3);
     await new Promise(resolve => fakeUp.close(resolve));
   }
 

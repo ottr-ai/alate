@@ -232,14 +232,20 @@ app.post<{ Body: ConfigBody | undefined }>('/config', {
   if (path != null && (typeof path !== 'string' || !isDir(path))) return reply.code(400).send({ error: 'invalid path' })
   if (token !== undefined && typeof token !== 'string') return reply.code(400).send({ error: 'invalid token' })
   const nextToken = token === undefined ? config.token : token || null
+  // selectSource queues the first update check for a fresh snapshot, and that check
+  // reads the token from config: set the new token first, so the check authenticates
+  // with it. selectSource persists config on every success path; a failed source
+  // switch restores the previous token and persists that.
+  const prevToken = config.token
+  config.token = nextToken
   let queuedCheck = false
   try {
     queuedCheck = selectSource((repo ?? path) as string, repo != null ? 'repo' : 'path', nextToken ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN)
   } catch (err) {
+    config.token = prevToken
+    saveConfig(config)
     return clientError(reply, err)
   }
-  config.token = nextToken
-  saveConfig(config)
   if (!queuedCheck) void updateCheckAfterChange()
   return { repo: config.repo, path: config.path, tokenSet: !!config.token }
 })
