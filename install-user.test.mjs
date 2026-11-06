@@ -1008,7 +1008,10 @@ try {
     const layerHome = join(tmp, 'layer-home');
     const lconfig = 'modelRoles:\n  default: zai/glm\n';
     putL('omp/agent/config.yml', lconfig);
-    putL('omp/agent/marketplaces.json', `${JSON.stringify({ marketplaces: [{ name: 'm', catalogPath: `${layerHome}/.omp/marketplaces/catalog.json` }] }, null, 2)}\n`);
+    putL('omp/agent/marketplaces.json', `${JSON.stringify({ marketplaces: [
+      { name: 'm', catalogPath: `${layerHome}/.omp/marketplaces/catalog.json` },
+      { name: 'w', catalogPath: 'C:\\Users\\me\\.omp\\marketplaces\\win.json' },
+    ] }, null, 2)}\n`);
     putL('omp/agent/skills/mine/SKILL.md', '# mine\n');
     mkdirSync(join(ldata, 'workers', 'web'), { recursive: true });
     writeFileSync(join(ldata, 'workers', 'web', 'apt.txt'), 'libnss3\n');
@@ -1047,6 +1050,8 @@ try {
     assert.ok(JSON.parse(lgot(l1, '.alate/installed.json'))['omp/agent/config.yml'], 'the install record rides in the layer');
     assert.equal(JSON.parse(lgot(l1, '.omp/agent/marketplaces.json')).marketplaces[0].catalogPath,
       join(l1, '.omp/marketplaces/catalog.json'), 'captured home paths re-root into the layer');
+    assert.equal(JSON.parse(lgot(l1, '.omp/agent/marketplaces.json')).marketplaces[1].catalogPath,
+      join(l1, '.omp/marketplaces/win.json'), 'a captured Windows path re-roots into the layer exactly once');
     assert.ok(lstatSync(join(l1, '.omp/agent/agent.db')).isSymbolicLink(), 'shared state links back to the home');
     assert.equal(readlinkSync(join(l1, '.omp/agent/agent.db')), join(layerHome, '.omp/agent/agent.db'));
     assert.ok(lstatSync(join(l1, '.omp/oauth')).isSymbolicLink());

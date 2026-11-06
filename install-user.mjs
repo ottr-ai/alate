@@ -389,7 +389,9 @@ try {
     checkDestination(writeRoot, dest);
     const machineSrc = layerMode && rel === 'omp/agent/config.yml' ? machineRoot : readRoot;
     const readDest = join(machineSrc, '.' + rel);
-    const target = forTarget(rel, readFileSync(srcPath), { home: writeRoot, platform: process.platform, roots });
+    // forTarget roots a captured absolute path at the real home; in layer mode the remap
+    // below alone moves it into the layer — writeRoot here would put the layer prefix in twice.
+    const target = forTarget(rel, readFileSync(srcPath), { home, platform: process.platform, roots });
     notes.push(...target.notes);
     // Captured config can point at absolute paths in the capture home; a layer re-roots them
     // so a turn pinned to the layer resolves files under its own path.
