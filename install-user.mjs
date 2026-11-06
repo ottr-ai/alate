@@ -17,8 +17,10 @@
 // Plugins install from the captured lockfile with `bun install --frozen-lockfile` in ~/.omp/plugins, the
 // same root omp's plugin manager installs into. The install runs with --ignore-scripts unless the data
 // repo opts in with a plugins-allow-scripts marker at its root, and with an allowlisted environment, so
-// server secrets never reach bun or a lifecycle script. In layer mode a machine change to the plugins
-// install files (package.json, bun.lock, patches/) never rides into the new layer: the snapshot wins.
+// server secrets never reach bun or a lifecycle script. Packages install with bun's copyfile
+// backend, so the provisioner never creates a hard link into the snapshot tree. In layer mode a
+// machine change to the plugins install files (package.json, bun.lock, patches/) never rides into
+// the new layer: the snapshot wins.
 // Also installs the per-project worker additions Ottr's turns read: workers/<project>/apt.txt
 // (Debian packages), tools.json (declarative downloads), env.txt (env names, never values) and
 // requirements.txt (pinned, hashed Python packages)
@@ -604,7 +606,12 @@ try {
 
     if (!skipPlugins && existsSync(join(userRoot, 'omp', 'plugins', 'package.json'))) {
       const pluginsDir = join(writeRoot, '.omp', 'plugins');
-      const bunArgs = allowPluginScripts ? ['install', '--frozen-lockfile'] : ['install', '--frozen-lockfile', '--ignore-scripts'];
+      // copyfile, never bun's hardlink default: a file: dep's snapshot source would end up
+      // with a second link, and the alias guards on machine reads and writes would refuse
+      // the next provision. Planted aliases still refuse; the provisioner creates none.
+      const bunArgs = allowPluginScripts
+        ? ['install', '--frozen-lockfile', '--backend', 'copyfile']
+        : ['install', '--frozen-lockfile', '--backend', 'copyfile', '--ignore-scripts'];
       const bun = spawnSync('bun', bunArgs, {
         cwd: pluginsDir,
         stdio: 'inherit',

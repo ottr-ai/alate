@@ -72,12 +72,13 @@ Rules for the links:
 6. SkillSpector scan of the skills inside the installed layer, same pin, same flags
    (`--no-llm --fail-on-findings --use-shipped-baseline`). A failed scan deletes the layer
    folder and leaves `current` unchanged.
-7. Plugins: `bun install --frozen-lockfile` with cwd `<layer>/.omp/plugins`, so
-   `node_modules` of a running turn never change (unless `--skip-plugins`). The install
+7. Plugins: `bun install --frozen-lockfile --backend copyfile` with cwd `<layer>/.omp/plugins`,
+   so `node_modules` of a running turn never change (unless `--skip-plugins`). The install
    runs with `--ignore-scripts` unless the data repo ships a `plugins-allow-scripts` marker
    at its root, and the spawn environment is an explicit allowlist, so server secrets never
-   reach bun or a lifecycle script. A failure deletes the layer folder and leaves `current`
-   unchanged.
+   reach bun or a lifecycle script. The copyfile backend keeps every snapshot file
+   single-linked, so the alias guards on machine reads never refuse a link the provisioner
+   created itself. A failure deletes the layer folder and leaves `current` unchanged.
 8. Create the link set in the layer.
 9. Switch: create a temporary symlink in the base dir, then `rename()` it over `current`.
    POSIX rename is atomic; a reader sees either the old or the new target, never a gap.

@@ -4,7 +4,7 @@
 // The examples/data install workflow also skips plugins; neither proves Bun installation.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir, availableParallelism } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1268,6 +1268,10 @@ try {
       const p1 = realpathSync(join(pbase, 'current'));
       const snapPkg = readFileSync(join(plugData, 'user/omp/plugins/package.json'), 'utf8');
       assert.equal(readFileSync(join(p1, '.omp/plugins/package.json'), 'utf8'), snapPkg, 'the first layer installs the snapshot');
+      // bun's default backend hardlinks packages into node_modules, which would give a file:
+      // dep's snapshot source a second link and trip the alias guards on the next provision.
+      assert.equal(statSync(join(p1, '.omp/plugins/dep/package.json')).nlink, 1,
+        'bun installs a copy, never a hardlink into the snapshot: the alias guards keep passing');
       // The turn edits its live layer's plugins manifest: the edit plants a postinstall
       // that writes a marker beside the layer records, as an injected turn would.
       const pwned = join(pbase, 'pwned');
@@ -1296,14 +1300,14 @@ try {
     let rs = runP(shimHome, [], shimEnv);
     assert.equal(rs.status, 0, rs.stderr);
     let call = JSON.parse(readFileSync(bunCalls, 'utf8'));
-    assert.deepEqual(call.argv, ['install', '--frozen-lockfile', '--ignore-scripts']);
+    assert.deepEqual(call.argv, ['install', '--frozen-lockfile', '--backend', 'copyfile', '--ignore-scripts']);
     assert.ok(!call.env.includes('ALATE_API_KEY') && !call.env.includes('GITHUB_TOKEN'), 'server secrets never reach bun');
     assert.ok(call.env.includes('PATH') && call.env.includes('HOME'));
     writeFileSync(join(plugData, 'plugins-allow-scripts'), '\n');
     rs = runP(shimHome, [], shimEnv);
     assert.equal(rs.status, 0, rs.stderr);
     call = JSON.parse(readFileSync(bunCalls, 'utf8'));
-    assert.deepEqual(call.argv, ['install', '--frozen-lockfile'], 'the data-repo marker opts in');
+    assert.deepEqual(call.argv, ['install', '--frozen-lockfile', '--backend', 'copyfile'], 'the data-repo marker opts in');
     assert.ok(!call.env.includes('ALATE_API_KEY') && !call.env.includes('GITHUB_TOKEN'), 'the allowlist holds even when scripts are on');
 
     // A failed scan deletes the failed layer folder and keeps the old current: a busy board
