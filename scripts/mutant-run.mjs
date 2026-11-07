@@ -16,9 +16,17 @@
 // only verdict input — fails iff a full chain run would fail. A wrong or stale map
 // entry only shifts work between stages; it never changes a verdict. An id with no
 // stamp skips stage 1 and runs the whole chain: slower, never wrong.
+//
+// Every invocation runs the chain inside a private temp dir: one mkdtemp under the OS
+// tmpdir, passed to the chain as TMPDIR/TEMP/TMP and removed at exit — also when a
+// chain file fails. Concurrent Stryker workers inherit one shared TMPDIR, and the
+// leak assertions in clone.test.mjs and server.test.mjs scan readdirSync(tmpdir())
+// for their prefixes, so a sibling worker's mkdtemp landing inside such a window
+// failed the run and was recorded as a kill.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -97,10 +105,21 @@ export const stageSplit = (chain, stage1) => ({
 });
 
 const runFiles = files => {
-  for (const file of files) {
-    const run = spawnSync(process.execPath, [file], { stdio: 'inherit' });
-    if (run.status !== 0) process.exit(run.status ?? 1);
+  const dir = mkdtempSync(join(tmpdir(), 'alate-mutrun-'));
+  const env = { ...process.env, TMPDIR: dir, TEMP: dir, TMP: dir };
+  let status = 0;
+  try {
+    for (const file of files) {
+      const run = spawnSync(process.execPath, [file], { stdio: 'inherit', env });
+      if (run.status !== 0) {
+        status = run.status ?? 1;
+        break;
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true }); // our own private dir only
   }
+  return status;
 };
 
 export const main = () => {
@@ -111,8 +130,7 @@ export const main = () => {
   }
   const mutant = process.env.__STRYKER_ACTIVE_MUTANT__;
   if (!mutant) {
-    runFiles(chain);
-    return;
+    process.exit(runFiles(chain));
   }
   const map = reachMap(chain);
   const sources = [...new Set([...map.keys(), ...Object.keys(SPAWN_EDGES)])];
@@ -123,12 +141,12 @@ export const main = () => {
   }
   const { first, rest } = stageSplit(chain, hits);
   if (first.length === 0 || first.length === chain.length) {
-    runFiles(chain); // Unknown file, or every file reaches it: one pass.
-    return;
+    process.exit(runFiles(chain)); // Unknown file, or every file reaches it: one pass.
   }
   console.error(`[mutant-run] mutant ${mutant} (${mutated || 'unknown file'}): stage 1 runs ${first.length} of ${chain.length} test files`);
-  runFiles(first);
-  runFiles(rest);
+  const status = runFiles(first);
+  if (status !== 0) process.exit(status);
+  process.exit(runFiles(rest));
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main();

@@ -1162,8 +1162,11 @@ try {
     mkdirSync(join(pinnedDir, 'lib'), { recursive: true });
     copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(pinnedDir, 'lib', 'data.mjs'));
     const swapped = readFileSync(fileURLToPath(new URL('./install-user.mjs', import.meta.url)), 'utf8')
-      .replace("const SKILLSPECTOR_REF = 'v2.13.0';", "const SKILLSPECTOR_REF = 'v2.14.0';");
-    assert.ok(swapped.includes("SKILLSPECTOR_REF = 'v2.14.0';"), 'the pin swap took');
+      // Stryker's sandbox copy instruments the pin literal, so the exact declaration
+      // never matches there; replace the whole declaration line instead. Mutant runs
+      // flip the instrumented switches elsewhere in the copy as usual.
+      .replace(/^const SKILLSPECTOR_REF = .*$/m, "const SKILLSPECTOR_REF = 'v2.14.0';");
+    assert.ok(swapped.includes("const SKILLSPECTOR_REF = 'v2.14.0';"), 'the pin swap took');
     writeFileSync(join(pinnedDir, 'install-user.mjs'), swapped);
     r = spawnSync(process.execPath, [join(pinnedDir, 'install-user.mjs'), '--home', cacheHome, '--data', cacheData, '--skip-plugins'], {
       encoding: 'utf8',
