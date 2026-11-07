@@ -33,6 +33,9 @@ function childEnv(): NodeJS.ProcessEnv {
 }
 const KNOWN_ROUTES = ['/health', '/config', '/provision', '/api/updates', '/api/updates/check', '/api/files', '/api/file']
 const testChildEnvCapture = process.env.ALATE_TEST_CHILD_ENV
+// Test hook: a server that ignores SIGTERM exercises the test suite's teardown escalation;
+// only the process-group SIGKILL fallback stops it.
+if (process.env.ALATE_TEST_SIGTERM === 'ignore') process.on('SIGTERM', () => {})
 
 interface UpdateState { lastChecked: string | null; remoteSha: string; provisionedSha: string }
 interface Config {

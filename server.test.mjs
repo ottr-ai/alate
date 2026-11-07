@@ -259,14 +259,54 @@ delete serverEnv.ALATE_LAYER;
 // Every server this suite starts dies with it. A failed assertion (a killed mutant) exits the
 // suite early; an untracked server would outlive it forever and hold the mutation runner's pipes.
 const servers = new Set();
+// detached: the server leads its own POSIX process group, so teardown can kill its whole
+// tree (provision grandchildren included). All pipes: the child inherits no fd of this
+// process, so a stray server cannot keep the mutation runner's output pipes open; the tap
+// keeps server stderr as visible as the old inherited fd was.
 const spawnServer = (args, env = serverEnv) => {
-  const p = spawn(process.execPath, [join(repoRoot, 'server.ts'), ...args], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'inherit'] });
+  const p = spawn(process.execPath, [join(repoRoot, 'server.ts'), ...args], {
+    cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32',
+  });
+  p.stderr.on('data', chunk => process.stderr.write(chunk));
   servers.add(p);
   p.once('exit', () => servers.delete(p));
   return p;
 };
-const killServers = () => { for (const p of servers) p.kill(); };
-process.on('exit', killServers); // also covers exits that bypass the finally (errors thrown in callbacks)
+const alive = p => p.exitCode === null && p.signalCode === null;
+// Signals the whole group; the direct p.kill() fallback is Windows, where groups are not
+// addressable and a SIGTERM cannot be ignored in the first place.
+const signalGroup = (p, signal) => {
+  if (process.platform === 'win32') {
+    if (signal === 'SIGKILL') spawnSync('taskkill', ['/pid', String(p.pid), '/T', '/F']);
+    else p.kill(signal);
+    return;
+  }
+  try { process.kill(-p.pid, signal); } catch { /* the group is already gone */ }
+};
+const settled = (ps, ms) => new Promise(resolve => {
+  const pending = ps.filter(alive);
+  if (pending.length === 0) return resolve();
+  let left = pending.length;
+  const timer = setTimeout(() => resolve(), ms).unref();
+  for (const p of pending) p.once('close', () => { if (--left === 0) { clearTimeout(timer); resolve(); } });
+});
+const KILL_GRACE_MS = 2000; // generous for a loaded mutation worker; a healthy server exits in ms
+// SIGTERM the group, then SIGKILL whatever ignored it (a mutant can install a SIGTERM
+// handler). Resolves with the survivors, normally an empty list.
+const stopGroups = async ps => {
+  const first = ps.filter(alive);
+  for (const p of first) signalGroup(p, 'SIGTERM');
+  await settled(first, KILL_GRACE_MS);
+  const stubborn = first.filter(alive);
+  for (const p of stubborn) signalGroup(p, 'SIGKILL');
+  await settled(stubborn, KILL_GRACE_MS);
+  return stubborn.filter(alive);
+};
+const stopServer = p => stopGroups([p]);
+const stopAllServers = () => stopGroups([...servers]);
+// Synchronous best effort for exits that bypass the awaited teardown (errors thrown in
+// callbacks): SIGKILL is the only signal that is certain, and a grace period is impossible here.
+process.on('exit', () => { for (const p of servers) if (alive(p)) signalGroup(p, 'SIGKILL'); });
 let child = spawnServer(['--port', '0', '--config', join(tmp, 'server-config.json'), '--interval', '1', '--db', stateFile]);
 
 const waitFor = async (fn, ms) => {
@@ -1126,12 +1166,6 @@ try {
   let releaseNpm = null; // set once the held request arrived; call it to let the check finish
   let child2 = null; // the trigger-check server, spawned and killed inside the try
   let child3 = null; // the POST /config first-setup server, spawned and killed inside the try
-  // Resolves for an already-exited child too: a `close` listener on a dead child never fires.
-  const stopServer = p => new Promise(resolve => {
-    if (p.exitCode !== null || p.signalCode !== null) return resolve();
-    p.once('close', resolve);
-    p.kill();
-  });
   const authSeen = [];
   const upHits = [];
   const fakeUp = createServer((req, res) => {
@@ -4718,15 +4752,9 @@ try {
 
   // ALATE_API_KEY boot: the env seeds the first-start key, a short value refuses to boot.
   {
-    // Like spawnServer, but both output pipes are captured and ALATE_API_KEY is always explicit.
-    const keyBoot = (configFile, dbFile, envValue) => {
-      const p = spawn(process.execPath, [join(repoRoot, 'server.ts'), '--port', '0', '--config', configFile, '--db', dbFile], {
-        cwd: repoRoot, env: { ...serverEnv, ALATE_API_KEY: envValue }, stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      servers.add(p);
-      p.once('exit', () => servers.delete(p));
-      return p;
-    };
+    // spawnServer with the env key always explicit; both output pipes are captured.
+    const keyBoot = (configFile, dbFile, envValue) =>
+      spawnServer(['--port', '0', '--config', configFile, '--db', dbFile], { ...serverEnv, ALATE_API_KEY: envValue });
     const bootOutput = p => new Promise((resolve, reject) => {
       let buf = '';
       const onChunk = c => {
@@ -4811,7 +4839,35 @@ try {
     }
   }
 
+  // Teardown escalation: a server that ignores SIGTERM (what a mutant can become) must still
+  // die, and no process may be left behind. Windows cannot ignore SIGTERM, so the check is
+  // POSIX-only.
+  if (process.platform !== 'win32') {
+    const cfgIg = join(tmp, 'server-config-sigterm.json');
+    writeFileSync(cfgIg, JSON.stringify({ apiKey: null }));
+    const IGN = spawnServer(['--port', '0', '--config', cfgIg, '--db', join(tmp, 'state-sigterm.db')], { ...serverEnv, ALATE_TEST_SIGTERM: 'ignore' });
+    await new Promise((resolve, reject) => {
+      let buf = '';
+      IGN.stdout.on('data', chunk => {
+        buf += chunk;
+        if (/alate server on /.test(buf)) resolve();
+      });
+      IGN.once('exit', () => reject(new Error(`the SIGTERM-ignoring server exited early: ${buf.slice(-300)}`)));
+      setTimeout(() => reject(new Error(`the SIGTERM-ignoring server did not start: ${buf.slice(-300)}`)), 30_000).unref();
+    });
+    // Bounded so a SIGTERM-only teardown fails this test instead of hanging forever.
+    const outcome = await Promise.race([
+      stopServer(IGN).then(left => ({ left })),
+      new Promise(resolve => setTimeout(() => resolve({ timeout: true }), 15_000).unref()),
+    ]);
+    assert.ok(!outcome.timeout, 'teardown returned; it must not hang on a SIGTERM-ignoring server');
+    assert.deepEqual(outcome.left, [], 'the SIGTERM-ignoring server did not survive teardown');
+    assert.throws(() => process.kill(IGN.pid, 0), err => err.code === 'ESRCH', 'no server process is left behind');
+    assert.equal(IGN.signalCode, 'SIGKILL', 'SIGTERM was ignored; only the SIGKILL escalation stopped the server');
+  }
+
 } finally {
-  killServers();
+  const left = await stopAllServers();
+  assert.deepEqual(left, [], `teardown left ${left.length} server(s) alive: ${left.map(p => p.pid).join(', ')}`);
   if (!keepTemp()) rmSync(tmp, { recursive: true, force: true });
 }
