@@ -38,12 +38,15 @@ export default {
   tempDirName: join(tmpdir(), "alate-stryker"),
   mutate: ["server.ts", "web/dashboard.mjs", "lib/updates.mjs"],
   reporters: ["clear-text", "progress"],
-  // The break threshold equals the measured score of this tree, rounded down (fresh
-  // cache, quiet machine, 2026-11-07: 88.35; the 2026-11-06 number of 93.88 came from
-  // runs whose workers shared one TMPDIR and did not cover this full mutate set).
-  // Raise it when the score rises; never lower it or shrink the mutate set.
+  // The break threshold holds the score of a green gate: 93. The 2026-11-07 full-set
+  // quiet measurement scored 88.35 — the earlier 93.88 came from runs whose workers
+  // shared one TMPDIR and did not cover this full mutate set — so the gate stays red
+  // until about 169 more of the 423 measured survivors are killed or justified:
+  // 217 in lib/updates.mjs (95 of them in the isValidUpdateRecord validator and its
+  // boardText/boardHttpUrl/boardIso helpers), 94 in web/dashboard.mjs, 112 in
+  // server.ts. Raise it when the score rises; never lower it or shrink the mutate set.
   // Remaining survivors: the named list below predates this task and covers the gates
-  // it names; the full-set re-measure leaves about 200 more survivors for triage.
+  // it names; the full-set re-measure counts 423, and the unlisted ones await triage.
   // - exact error-string wording beyond the pinned main ones (status codes are asserted);
   // - process lifecycle/timing: port negation, interval scaling, timer.unref, argv boundary;
   // - initial CLI selectors and the boot dashCheck duplicate the POST /api/import
@@ -74,5 +77,5 @@ export default {
   //   only rewords the 404; the display-cut line differs only past the 200-char cut;
   //   the concurrent-write window (fileEdit's running/writing check) is unreachable from a sequential
   //   fetch suite, which serves one origin over one connection.
-  thresholds: { high: 80, low: 60, break: 88 },
+  thresholds: { high: 80, low: 60, break: 93 },
 };

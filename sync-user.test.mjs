@@ -345,6 +345,191 @@ try {
   assert.ok(r.stderr.includes('~/.omp/agent/config.yml:1: apiKey holds a literal value; reference an env var instead'), r.stderr);
   put('.omp/agent/config.yml', good);
 
+  // The credential scalar scanners (scalarProblem/yamlScalar/yamlValueProblem/
+  // continuationProblem) judge every secret-named key in the hand-edited YAML config.
+  // One packed refusal run names each offending key at its exact line; the companion
+  // acceptance runs hold every shape that must stay valid, so a mutated scanner flips
+  // one of the two outcomes.
+  {
+    const rel = '.omp/agent/config.yml';
+    const restore = () => put(rel, good);
+    // [line, exact problem message]: every refusal edge of the credential scanners,
+    // each pinned to its own line so a flipped message can never hide behind a sibling.
+    const LIT = 'holds a literal value; reference an env var instead';
+    const BLK = 'holds a YAML block; reference an env var instead';
+    const bad = [
+      ['api_key: "quoted literal"', LIT],   // quoted string is still a literal
+      ["secret2: 'Bearer abc'", LIT],       // quoted Bearer prefix, literal token
+      ['password: Basic abc', LIT],         // bare Basic prefix, literal token
+      ['credential: |', BLK],               // block indicator
+      ['private_key: >2', BLK],             // block indicator with chomping digit
+      ['token: "true"', LIT],               // quoted boolean spelling is a string
+      ['authorization: ${VAR}x', LIT],      // env ref with trailing junk
+      ['api_key2: $V#tail', LIT],           // '#' needs whitespace to be a comment
+      ['api_key3: "halfopen', LIT],         // unbalanced quote is not a quoted scalar
+      ['token2: $V extra', LIT],            // env ref with a second word
+      ['secret3: ${VAR', LIT],              // unclosed brace is not a reference
+      ['private_key2: $1BAD', LIT],         // reference must start with a letter/underscore
+      ['authorization2: ${A B}', LIT],      // brace form allows word characters only
+      ['api_key4: $', LIT],                 // a bare '$' is not a reference
+      ['api_key5: $ $V', LIT],              // a reference must start the value
+      ['api_key6: |x', LIT],                // '|' followed by text is a literal, not a block
+      ['api_key9: x|2', LIT],               // a trailing block indicator is still a literal
+      ['private_key3: xtrue', LIT],         // a boolean spelling must be the whole value
+      ['private_key4: trueX', LIT],         // ...anchored at both ends, case-insensitively
+    ];
+    put(rel, bad.map(([line]) => line).join('\n') + '\n');
+    r = run();
+    assert.equal(r.status, 1, r.stderr);
+    for (let i = 0; i < bad.length; i++) {
+      const key = bad[i][0].slice(0, bad[i][0].indexOf(':'));
+      assert.ok(r.stderr.includes(`~/${rel}:${i + 1}: ${key} ${bad[i][1]}`), `line ${i + 1} (${bad[i][0]}): ${r.stderr}`);
+    }
+    restore();
+
+    // Quoted env references and Bearer/Basic prefixes stay valid: the quotes and the
+    // case-insensitive prefix must be stripped before the reference check, any amount
+    // of prefix whitespace included, and whitespace inside the quotes trimmed away.
+    put(rel, [
+      'api_key: "$V"',
+      "secret: '$W'",
+      'password: "Bearer $T"',
+      "token: 'Basic $T2'",
+      'password2: Bearer  $T3', // double space after the prefix
+      'token4: BASIC $B',       // uppercase prefix
+      'apiKey: " $V"',          // padding inside the quotes
+    ].join('\n') + '\n');
+    r = run();
+    assert.equal(r.status, 0, r.stderr);
+    restore();
+
+    // Unquoted true/false/null/~ are real scalars and stay inert where the same
+    // spellings quoted refuse; comment tails and comment-only values are prose;
+    // an empty value with no deeper continuation line is nothing to judge; a
+    // continuation skips comments and blanks, and `key:` at the very end holds nothing.
+    put(rel, [
+      'token: true',
+      'password: False',
+      'credential: ~',
+      'private_key: null',
+      'secret2: $OK',
+      'apiKey:   $SPACED', // surrounding whitespace
+      'apiKey6: $T3   ',   // trailing whitespace after the reference
+      'token3: $V # trailing comment',
+      'authorization: # only a comment',
+      'credentials:',
+      'apiKey2:',
+      'apiKey4: ""',
+      'apiKey7:',
+      '  # note',
+      'sib2: ${V}',
+      'apiKey8:',
+      '    # deep note',
+      'sib3: ${V}',
+      'last: ${W}',
+      'apiKey5:',
+    ].join('\n') + '\n');
+    r = run();
+    assert.equal(r.status, 0, r.stderr);
+    restore();
+
+    // A `key:` with no value receives the first meaningful line below it: blank lines
+    // and comments are skipped, and an indented literal deeper than the key refuses.
+    put(rel, 'apiKey:\n\n  # note\n  deeperliteral\n');
+    r = run();
+    assert.equal(r.status, 1, r.stderr);
+    assert.ok(r.stderr.includes(`~/${rel}:1: apiKey holds an indented multiline value; reference an env var instead`), r.stderr);
+    restore();
+
+    // A continuation line at the same indent as the key is a sibling, not a literal.
+    put(rel, 'credentials:\nsibling: ${V}\n');
+    r = run();
+    assert.equal(r.status, 0, r.stderr);
+    restore();
+  }
+
+  // The mcp.json scan parses before matching, so scalarProblem judges the raw JSON
+  // string: a lone quote character is not a quoted scalar, and a quoted Bearer value
+  // that trims to nothing still refuses.
+  {
+    put('.omp/agent/config.yml', good);
+    const rel = '.omp/agent/mcp.json';
+    put(rel, JSON.stringify({ mcpServers: { gh: { env: { API_KEY2: '"', TOKEN2: 'Bearer ', PASSWORD2: '"$V$' } } } }, null, 2));
+    r = run();
+    assert.equal(r.status, 1, r.stderr);
+    assert.ok(r.stderr.includes(`~/${rel}: "API_KEY2" holds a literal value; reference an env var instead`), r.stderr);
+    assert.ok(r.stderr.includes(`~/${rel}: "TOKEN2" holds a literal value; reference an env var instead`), r.stderr);
+    assert.ok(r.stderr.includes(`~/${rel}: "PASSWORD2" holds a literal value; reference an env var instead`), r.stderr);
+    // A JSON env reference keeps the surrounding whitespace of the raw string, and a
+    // quoted reference with interior padding still resolves to an env var.
+    put(rel, JSON.stringify({ mcpServers: { gh: { env: { API_KEY: ' $V ', SECRET: '" $V"' } } } }, null, 2));
+    r = run();
+    assert.equal(r.status, 0, r.stderr);
+    put('.omp/agent/mcp.json', JSON.stringify({ mcpServers: { gh: { env: { GITHUB_TOKEN: '${GITHUB_TOKEN}' }, headers: { Authorization: 'Bearer ${GH_PAT}' } } } }, null, 2));
+    put('.omp/agent/config.yml', good);
+  }
+
+  // The exported YAML syntax gate refuses exactly the constructs it cannot decode;
+  // these unit cases pin every documented refusal and acceptance edge of yamlProblems.
+  {
+    const issues = text => yamlProblems(text, 'c.yml');
+    const ok = (text, why) => assert.deepEqual(issues(text), [], `${why ?? 'accepted'}: ${JSON.stringify(text)}`);
+    const bad = (text, why) => assert.ok(issues(text).some(s => s.includes(`unsupported YAML syntax (${why})`)), `${why}: ${JSON.stringify(text)}`);
+
+    // Acceptance edges: one-line block style in all its shapes.
+    ok('k: v\n', 'plain scalar');
+    ok('---\nk: v\n', 'leading document marker');
+    ok(' ---\nk: v\n', 'indented document marker');
+    ok('---\t\nk: v\n', 'tab after the document marker');
+    ok("k: 'it''s'\n", "'' escape in a single-quoted scalar");
+    ok('k: "open" tail\n', 'closed double quote');
+    ok('"key": v\n', 'double-quoted key');
+    ok("'key': v\n", 'single-quoted key');
+    ok('# whole line\nk: v # tail\n', 'comments');
+    ok('k: v#nospace\n', "'#' glued to the value is not a comment");
+    ok('- a\n- b: c\n', 'sequence entries');
+    ok('parent:\n  child: v\n  list:\n    - x\n', 'nested mappings and sequences');
+    ok('k: v\r\nj: w\r\n', 'CRLF line endings');
+    ok('a:b\n', "colon without a following space is not a key separator");
+    ok('k:\n\n\n', 'empty value');
+    ok('k: ${V} # x\n', 'env reference with a comment tail');
+
+    // Refusal edges, one per documented construct.
+    bad('%X 1.2\n', 'directive');
+    bad('  %X\n', 'directive');
+    bad('k: v\n...\n', 'end-of-document marker');
+    bad('...\n', 'end-of-document marker');
+    bad('---\nk: v\n---\nj: w\n', 'multi-document file');
+    bad('k: v\n---\n', 'multi-document file');
+    bad('---\n---\n', 'multi-document file');
+    bad(' --- "open\n', 'quoted scalar spans lines'); // a marker-prefix match must not skip the scan
+    bad('x " ---\n', 'quoted scalar spans lines');    // '---' mid-line is not a document marker
+    ok('-* x\n');                          // '-' only starts a marker before a space
+    bad('- &x\n', 'node indicator "&"');   // ...and the next node may still be anchored
+    ok('#x: &y\n');                        // a whole-line comment hides everything after it
+    ok('"k"&x\n', 'a closed quote leaves the rest of the line inert');
+    ok("'k'&x\n");
+    bad('k: v#x: &y\n', 'node indicator "&"'); // '#' glued to a value does not comment out the tail
+    bad('k: v# x: &y\n', 'node indicator "&"'); // ...and the break looks behind, not ahead
+    ok('x:y:&\n');                         // a colon without a trailing space never restarts a key
+    ok('k: <x\n');                         // a lone '<' is not a merge key
+    ok('k: v<x\n');                        // nor is any node character before one
+    bad('k: "a\\nb"\n', 'escape in a double-quoted scalar');
+    bad('"k\\t": v\n', 'escape in a double-quoted scalar');
+    bad('k: "open\nnever\n', 'quoted scalar spans lines');
+    bad("k: 'open\nnever\n", 'quoted scalar spans lines');
+    bad('<<: *base\n', 'merge key');
+    bad('k:\n  <<: *base\n', 'merge key');
+    for (const ch of ['&', '*', '!', '%', '@', '?', '[', ']', '{', '}', ',', '|', '>', '`']) {
+      const line = ch === '%' ? 'k: %v\n' : `${ch} x\n`;
+      bad(line, `node indicator "${ch}"`);
+    }
+
+    // The refusal message names the file, the line, and the construct.
+    assert.deepEqual(issues('k: &a v\n'),
+      ['~/c.yml:1: unsupported YAML syntax (node indicator "&"); keep c.yml one-line block style']);
+  }
+
   rmSync(join(home, '.omp/plugins/bun.lock'));
   r = run();
   assert.equal(r.status, 1);

@@ -1,7 +1,7 @@
 // Self-check for sync-projects.mjs: node sync-projects.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -59,6 +59,11 @@ try {
   const missing = spawnSync(process.execPath, [join(repo, 'sync-projects.mjs'), '--root', ws, '--data', join(tmp, 'nope')], { encoding: 'utf8' });
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /No data dir/);
+
+  // --repo without a real data dir is refused: capture runs against a local checkout only.
+  const repoOnly = spawnSync(process.execPath, [join(repo, 'sync-projects.mjs'), '--repo', repo, '--root', ws], { encoding: 'utf8' });
+  assert.equal(repoOnly.status, 1);
+  assert.match(repoOnly.stderr, /--repo needs a git clone/);
 
   manifest({ contextFiles: ['AGENTS.md'], projects: { alpha: [], ghost: [] } });
   r = run();
@@ -123,6 +128,68 @@ try {
       assert.equal(safeRel(out, 'again'), out, `idempotent: ${JSON.stringify(raw)} -> ${out}`);
     });
   }
+
+  // --- manifest validation and snapshot-walk exactness on a second data dir ---
+  const data2 = join(tmp, 'data2');
+  mkdirSync(join(data2, 'projects'), { recursive: true });
+  const ws2 = join(tmp, 'ws2');
+  mkdirSync(ws2, { recursive: true });
+  const run2 = () => spawnSync(process.execPath, [join(repo, 'sync-projects.mjs'), '--root', ws2, '--data', data2], { encoding: 'utf8' });
+  const bad2 = (raw, msg) => {
+    writeFileSync(join(data2, 'projects/projects.json'), raw);
+    const r = run2();
+    assert.equal(r.status, 1);
+    // bad() throws, so stderr carries a node stack; pin the exact error line inside it.
+    assert.match(r.stderr, new RegExp(`^Error: projects\\.json: ${msg.replace(/[^A-Za-z0-9 ._-]/g, ch => '\\' + ch)}$`, 'm'));
+  };
+
+  // Every manifest-shape guard with its exact message: non-object, null and array manifests,
+  // non-string contextFiles entries, array and null projects, and the safeRel label prefixes.
+  bad2('"nope"', 'manifest must be an object');
+  bad2('null', 'manifest must be an object');
+  bad2('[]', 'manifest must be an object');
+  bad2('5', 'projects must be an object'.replace('projects', 'manifest'));
+  bad2(JSON.stringify({ contextFiles: ['AGENTS.md', 5], projects: {} }), 'contextFiles must be an array of strings');
+  bad2(JSON.stringify({ contextFiles: 'AGENTS.md', projects: {} }), 'contextFiles must be an array of strings');
+  bad2(JSON.stringify({ contextFiles: ['/etc'], projects: {} }), 'contextFiles: absolute path /etc');
+  bad2(JSON.stringify({ contextFiles: [], projects: [] }), 'projects must be an object');
+  bad2(JSON.stringify({ contextFiles: [], projects: 'x' }), 'projects must be an object');
+  bad2(JSON.stringify({ contextFiles: [], projects: null }), 'projects must be an object');
+  bad2(JSON.stringify({ contextFiles: [], projects: { 'C:\\x': [] } }), 'project name: absolute path C:\\x');
+  bad2(JSON.stringify({ contextFiles: [], projects: { 'a/b': [] } }), 'project name a/b must be one directory segment');
+  bad2(JSON.stringify({ contextFiles: [], projects: { pa: [5] } }), 'pa: extras must be an array of strings');
+  bad2(JSON.stringify({ contextFiles: [], projects: { pa: ['/abs'] } }), 'project pa: absolute path /abs');
+
+  // Snapshot-walk refusals: a symlink and a fifo inside the snapshot dir are named exactly.
+  mkdirSync(join(data2, 'projects', 'a2'), { recursive: true });
+  put(ws2, 'a2/AGENTS.md', '# a2\n');
+  writeFileSync(join(data2, 'projects/projects.json'), JSON.stringify({ contextFiles: ['AGENTS.md'], projects: { a2: [] } }));
+  symlinkSync(join(ws2, 'a2', 'AGENTS.md'), join(data2, 'projects', 'a2', 'dangling'));
+  let r2 = run2();
+  assert.equal(r2.status, 1);
+  assert.match(r2.stderr, /snapshot dir .* contains a symlink dangling; remove it by hand/);
+  rmSync(join(data2, 'projects', 'a2', 'dangling'));
+  const fifo = join(data2, 'projects', 'a2', 'pipe');
+  assert.equal(spawnSync('mkfifo', [fifo]).status, 0, 'mkfifo is required for the non-regular-entry case');
+  r2 = run2();
+  assert.equal(r2.status, 1);
+  assert.match(r2.stderr, /contains a non-regular entry pipe; remove it by hand/);
+  rmSync(fifo);
+
+  // The `have` walk is recursive, normalizes backslashes, and prints the exact gone-notes
+  // (sorted here because readdir order is not); nothing else may appear in the output.
+  mkdirSync(join(data2, 'projects', 'a2', 'nested'), { recursive: true });
+  writeFileSync(join(data2, 'projects', 'a2', 'a\\b.md'), 'x\n');
+  writeFileSync(join(data2, 'projects', 'a2', 'nested', 'old.md'), 'x\n');
+  rmSync(join(ws2, 'a2', 'AGENTS.md')); // context file gone in the project -> note, never an error
+  writeFileSync(join(data2, 'projects/projects.json'), JSON.stringify({ contextFiles: ['AGENTS.md'], projects: { a2: [] } }));
+  r2 = run2();
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.deepEqual(r2.stdout.split('\n').filter(l => l.startsWith('note: ')).sort(), [
+    'note: a/b.md is gone in a2; delete projects/a2/a/b.md by hand if stale',
+    'note: nested/old.md is gone in a2; delete projects/a2/nested/old.md by hand if stale',
+  ]);
+  assert.match(r2.stdout, /0 added, 0 updated, 0 unchanged from /);
 
   console.log('sync-projects.mjs ok');
 } finally {

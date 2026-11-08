@@ -1261,6 +1261,47 @@ try {
     console.log('win32: the scanner-stub checks need a real skillspector on PATH; gate assertions skipped');
   }
 
+  // The plugins block: with omp/plugins/package.json in the snapshot and no --skip-plugins,
+  // the script runs `bun install --frozen-lockfile` with cwd <home>/.omp/plugins through a
+  // stub bun that records argv and cwd; a missing bun and a failing bun fail with distinct
+  // messages, and --skip-plugins never spawns bun at all.
+  if (scanned) {
+    const bunLog = join(stubDir, 'bun-calls.log');
+    const bunDir = join(tmp, 'bun-stub');
+    mkdirSync(bunDir, { recursive: true });
+    const writeBun = exit => {
+      rmSync(bunLog, { force: true });
+      writeFileSync(join(bunDir, 'bun'), `#!/bin/sh\n{ pwd; printf '%s\\n' "$@"; } >> '${bunLog}'\nexit ${exit}\n`);
+      chmodSync(join(bunDir, 'bun'), 0o755);
+    };
+    const bunEnv = { ...process.env, PATH: `${stubDir}${delimiter}${bunDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv') };
+    const plugHome = join(tmp, 'plug-home');
+    writeBun(0);
+    let r = run(['--data', data], plugHome, bunEnv);
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /plugins skipped/, 'a real plugin install is never reported as skipped');
+    assert.equal(readFileSync(bunLog, 'utf8'),
+      `${join(plugHome, '.omp', 'plugins')}\ninstall\n--frozen-lockfile\n`,
+      'bun runs install --frozen-lockfile inside <home>/.omp/plugins');
+    // --skip-plugins never spawns bun even though the snapshot ships plugins/package.json.
+    rmSync(bunLog, { force: true });
+    r = run(['--data', data, '--skip-plugins'], plugHome, bunEnv);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /plugins skipped/);
+    assert.ok(!existsSync(bunLog), 'a skipped install never invokes bun');
+    // A bun that fails is an error naming the plugins directory.
+    writeBun(1);
+    r = run(['--data', data], plugHome, bunEnv);
+    assert.equal(r.status, 1);
+    assert.ok(r.stderr.includes(`bun install failed in ${join(plugHome, '.omp', 'plugins')}`), r.stderr);
+    // A missing bun is a distinct, clearer error.
+    r = run(['--data', data], plugHome, { ...process.env, PATH: stubDir, SKILLSPECTOR_VENV: join(tmp, 'no-venv') });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /bun not found; cannot install plugins\./);
+  } else {
+    console.log('win32: the bun-stub checks need extensionless stubs; skipped');
+  }
+
   // Layer mode (POSIX only: the switch is a symlink rename): each provision installs into a
   // fresh .alate/layers/<commit>-<n> folder and switches .alate/current with one atomic
   // rename, so nothing a running turn reads ever changes (specs/agent-layer-switch.md). The
@@ -1692,6 +1733,28 @@ try {
       assert.equal(out.split(layer).join(home), t, 'the remap is reversible');
       if (!new RegExp(`["\\s:]${home}/`).test(t)) assert.equal(out, t, 'no boundary occurrence, no change');
     });
+    // Shared state stays in the home: every shared-state path in a fresh layer is a symlink
+    // back to the home counterpart (so HOME=<layer> sees the same state), and a path the
+    // snapshot itself ships stays snapshot content instead of a link.
+    const ldata2 = join(tmp, 'data-links');
+    const putL2 = (rel, text) => { mkdirSync(dirname(join(ldata2, 'user', rel)), { recursive: true }); writeFileSync(join(ldata2, 'user', rel), text); };
+    putL2('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putL2('gitconfig', '[user]\n\tname = layer test\n');
+    const linkHome = join(tmp, 'link-home');
+    const runL2 = extra => run(['--data', ldata2, ...extra], linkHome);
+    r = runL2(['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    const linkLayer = realpathSync(join(linkHome, '.alate', 'current'));
+    const sharedLinks = ['.omp/agent/agent.db', '.pi/agent/optimizer.json', '.omp/oauth', '.omp/sessions', '.omp/agent/sessions', '.omp/agent/memories', '.omp/memories', '.config', '.cache', '.bun'];
+    for (const rel of sharedLinks) {
+      assert.ok(lstatSync(join(linkLayer, rel)).isSymbolicLink(), `${rel} is a link to the shared home state`);
+      assert.equal(readlinkSync(join(linkLayer, rel)), join(linkHome, rel), `${rel} targets the home counterpart`);
+      if (['.omp/oauth', '.omp/sessions', '.omp/agent/sessions', '.omp/agent/memories', '.omp/memories', '.config', '.cache', '.bun'].includes(rel))
+        assert.ok(existsSync(join(linkLayer, rel)), `${rel} resolves: the home dirLink was created, not left dangling`);
+    }
+    // The snapshot ships .gitconfig: it stays snapshot content, and the keep is announced.
+    assert.match(r.stdout, /layer keeps snapshot content: \.gitconfig\n/);
+    assert.ok(lstatSync(join(linkLayer, '.gitconfig')).isFile(), 'a snapshot-shipped link path keeps snapshot content');
   }
 
   // Rules restored through user/ land in the live agent rules dir, so they pass the same

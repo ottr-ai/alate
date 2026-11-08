@@ -2,7 +2,7 @@
 // Hermetic: the data repo, the rules target and a copy of the tool script all live in a temp dir.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -206,6 +206,116 @@ try {
   assert.match(r.stderr, /item "bad check": unknown check type/);
   assert.match(r.stderr, /item "bad origin": origin is not a GitHub repo URL/);
   assert.match(r.stderr, /item "bad pin": pin needs repo, file and key/);
+
+  // --- origin gate exactness: reset data2 to a minimal shape per scenario ---
+  const reset2 = () => {
+    rmSync(data2, { recursive: true, force: true });
+    mkdirSync(data2, { recursive: true });
+    put2('AGENTS.md', agents);
+  };
+  const freshTarget = name => { const t = join(tmp, name); mkdirSync(t, { recursive: true }); return t; };
+
+  // Full-coverage install: every kind, every check type, a valid pin, and own globs
+  // exercising each glob feature (**, *, ?, regex metacharacters); the gate stays silent.
+  reset2();
+  put2('a+b.md', rule);
+  put2('preXpost.md', rule);
+  put2('xXy.md', rule);
+  put2('aXb.md', rule);
+  put2('upstreams.json', JSON.stringify({ own: ['a+b.md', 'pre**post.md', 'x?y.md', 'a*b.md'], items: [
+    { name: 'i1', kind: 'image-pin', origin: 'https://github.com/o/n', check: { type: 'npm', package: 'p' } },
+    { name: 'i2', kind: 'mcp', origin: 'https://github.com/o/n', check: { type: 'github-release' } },
+    { name: 'i3', kind: 'rule-set', origin: 'https://github.com/o/n', check: { type: 'github-path' } },
+    { name: 'i4', kind: 'skill', origin: 'https://github.com/o/n', check: { type: 'node-dist' }, pin: { repo: 'r', file: 'f', key: 'k' } },
+    { name: 'i5', kind: 'plugin', origin: 'https://github.com/aa/b', check: { type: 'chrome-for-testing' } },
+    { name: 'i6', kind: 'skill', origin: 'https://github.com/o/ab' },
+  ]}));
+  r = run(freshTarget('rules6'), ['--data', data2]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stderr, '');
+
+  // Every item problem message in one exact list: a null item (label falls back to "#0",
+  // kind/origin (missing) suffixes), unknown kind and check type, non-GitHub origin, bad pin.
+  reset2();
+  put2('u1.md', rule); // uncovered: pins the "no recorded origin" hint after the item problems
+  put2('upstreams.json', JSON.stringify({ items: [
+    null,
+    { name: 'n1' },
+    { name: 'n2', kind: 'weird', origin: 'ftp://x/', check: {}, pin: 5 },
+    { kind: 'skill', origin: 'https://github.com/o/n/' },
+    { name: 'n4', kind: 'skill', origin: 'https://github.com/o/n', check: null },
+    { name: 'p1', kind: 'skill', origin: 'https://github.com/o/n', pin: { repo: 1, file: 2, key: 3 } },
+  ]}));
+  r = run(freshTarget('rules7'), ['--data', data2]);
+  assert.equal(r.status, 1);
+  assert.equal(r.stderr, [
+    'Nothing installed. Fix:',
+    '  upstreams.json: item "#0": unknown kind (missing)',
+    '  upstreams.json: item "#0": origin is not a GitHub repo URL',
+    '  upstreams.json: item "n1": unknown kind (missing)',
+    '  upstreams.json: item "n1": origin is not a GitHub repo URL',
+    '  upstreams.json: item "n2": unknown kind weird',
+    '  upstreams.json: item "n2": origin is not a GitHub repo URL',
+    '  upstreams.json: item "n2": unknown check type (missing)',
+    '  upstreams.json: item "n2": pin needs repo, file and key',
+    '  upstreams.json: item "n4": unknown check type (missing)',
+    '  upstreams.json: item "p1": pin needs repo, file and key',
+    '  u1.md: no recorded origin — add an item to upstreams.json or an own entry',
+  ].join('\n') + '\n');
+
+  // Origin-URL regex edges (trailing path, leading junk, whitespace in owner), item paths
+  // covering a rule, and a corrupt user/agents/mcp.json surfacing as a parse problem.
+  reset2();
+  put2('c1.md', rule);
+  put2('c2.md', rule);
+  mkdirSync(join(data2, 'user/omp/agent'), { recursive: true });
+  put2('user/omp/agent/mcp.json', '{');
+  put2('upstreams.json', JSON.stringify({ own: [], items: [
+    { name: 'q', kind: 'skill', origin: 'https://github.com/o/n', paths: ['c1.md', 'zz.md'] },
+    { name: 'r1', kind: 'skill', origin: 'https://github.com/o/n/extra' },
+    { name: 'r2', kind: 'skill', origin: 'try https://github.com/o/n' },
+    { name: 'r3', kind: 'skill', origin: 'https://github.com/o n/x' },
+  ]}));
+  r = run(freshTarget('rules8'), ['--data', data2]);
+  assert.equal(r.status, 1);
+  const gateLines = r.stderr.split('\n');
+  assert.equal(gateLines[0], 'Nothing installed. Fix:');
+  assert.deepEqual(gateLines.slice(1, 4), [
+    '  upstreams.json: item "r1": origin is not a GitHub repo URL',
+    '  upstreams.json: item "r2": origin is not a GitHub repo URL',
+    '  upstreams.json: item "r3": origin is not a GitHub repo URL',
+  ], r.stderr);
+  assert.match(gateLines[4], /^  user\/omp\/agent\/mcp\.json: /);
+  const mcpMsg = (() => { try { JSON.parse('{'); } catch (e) { return e.message; } })();
+  assert.equal(gateLines[4], `  user/omp/agent/mcp.json: ${mcpMsg}`);
+  assert.deepEqual(gateLines.slice(5), [
+    '  c2.md: no recorded origin — add an item to upstreams.json or an own entry',
+    '',
+  ], r.stderr);
+
+  // No items and no own entries: the fallbacks are empty and the only rule is uncovered.
+  reset2();
+  put2('z.md', rule);
+  put2('upstreams.json', '{}');
+  r = run(freshTarget('rules9'), ['--data', data2]);
+  assert.equal(r.status, 1);
+  assert.equal(r.stderr, 'Nothing installed. Fix:\n  z.md: no recorded origin — add an item to upstreams.json or an own entry\n');
+
+  // Glob patterns are fully anchored: a name that merely contains or extends a pattern is
+  // still uncovered and named exactly.
+  reset2();
+  put2('qa+b.md', rule);
+  put2('xa+b.md', rule);
+  put2('a+b.md2.md', rule);
+  put2('upstreams.json', JSON.stringify({ own: ['a+b.md'], items: [] }));
+  r = run(freshTarget('rules10'), ['--data', data2]);
+  assert.equal(r.status, 1);
+  assert.equal(r.stderr, [
+    'Nothing installed. Fix:',
+    '  a+b.md2.md: no recorded origin — add an item to upstreams.json or an own entry',
+    '  qa+b.md: no recorded origin — add an item to upstreams.json or an own entry',
+    '  xa+b.md: no recorded origin — add an item to upstreams.json or an own entry',
+  ].join('\n') + '\n');
 
   if (process.platform === 'win32') {
     const link = join(tmp, 'rules-link');
