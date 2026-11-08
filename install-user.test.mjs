@@ -1262,8 +1262,9 @@ try {
   }
 
   // The plugins block: with omp/plugins/package.json in the snapshot and no --skip-plugins,
-  // the script runs `bun install --frozen-lockfile` with cwd <home>/.omp/plugins through a
-  // stub bun that records argv and cwd; a missing bun and a failing bun fail with distinct
+  // the script runs `bun install --frozen-lockfile --backend copyfile` (plus --ignore-scripts
+  // unless the data repo allows plugin scripts) with cwd <home>/.omp/plugins through a stub
+  // bun that records argv and cwd; a missing bun and a failing bun fail with distinct
   // messages, and --skip-plugins never spawns bun at all.
   if (scanned) {
     const bunLog = join(stubDir, 'bun-calls.log');
@@ -1281,8 +1282,8 @@ try {
     assert.equal(r.status, 0, r.stderr);
     assert.doesNotMatch(r.stdout, /plugins skipped/, 'a real plugin install is never reported as skipped');
     assert.equal(readFileSync(bunLog, 'utf8'),
-      `${join(plugHome, '.omp', 'plugins')}\ninstall\n--frozen-lockfile\n`,
-      'bun runs install --frozen-lockfile inside <home>/.omp/plugins');
+      `${join(plugHome, '.omp', 'plugins')}\ninstall\n--frozen-lockfile\n--backend\ncopyfile\n--ignore-scripts\n`,
+      'bun runs install --frozen-lockfile --backend copyfile --ignore-scripts inside <home>/.omp/plugins');
     // --skip-plugins never spawns bun even though the snapshot ships plugins/package.json.
     rmSync(bunLog, { force: true });
     r = run(['--data', data, '--skip-plugins'], plugHome, bunEnv);
