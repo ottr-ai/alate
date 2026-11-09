@@ -39,14 +39,25 @@ export default {
   mutate: ["server.ts", "web/dashboard.mjs", "lib/updates.mjs"],
   reporters: ["clear-text", "progress"],
   // The break threshold holds the score of a green gate: 93. The 2026-11-07 full-set
-  // quiet measurement scored 88.35 — the earlier 93.88 came from runs whose workers
-  // shared one TMPDIR and did not cover this full mutate set — so the gate stays red
-  // until about 169 more of the 423 measured survivors are killed or justified:
-  // 217 in lib/updates.mjs (95 of them in the isValidUpdateRecord validator and its
-  // boardText/boardHttpUrl/boardIso helpers), 94 in web/dashboard.mjs, 112 in
-  // server.ts. Raise it when the score rises; never lower it or shrink the mutate set.
-  // Remaining survivors: the named list below predates this task and covers the gates
-  // it names; the full-set re-measure counts 423, and the unlisted ones await triage.
+  // quiet measurement scored 88.35 (423 survivors). After the ALAT-94 tests, the
+  // 2026-11-08 quiet full run (with the ALAT-93 teardown fix applied) scored 91.48:
+  // 314 survivors of 3686 mutants — 118 in lib/updates.mjs, 82 in web/dashboard.mjs,
+  // 114 in server.ts. The gate stays red until about 56 more are killed. Raise the
+  // threshold when the score rises; never lower it or shrink the mutate set.
+  // Survivors proven equivalent during that work (harness splice of the exact rows):
+  // - BOARD_ISO anchor drops: Date.parse accepts no string the anchors would separate;
+  //   the boardHttpUrl empty catch keeps protocol null, so the result is the same false;
+  // - checkUpdates/loadUpdates max scans (`>` vs `>=`, guard flips): every row of one run
+  //   carries the same ctx.now stamp, so no order of equal values changes the max;
+  // - entry sort comparators (`<`/`>` variants, second-ternary flips): binary insertion
+  //   still sorts unique paths from the truthful `<` answer alone;
+  // - computeChanges `?.` drops ahead of a `?? []` default, and next-side chains on the
+  //   always-full scanInventory shape; parseJsonc `i <= src.length` (the compound
+  //   condition stops one step later at no extra character);
+  // - listFiles/countFiles existsSync and type guards behind callers that already check;
+  //   remoteHead split/index shapes and its default stdio array; rmSync force flags on
+  //   existing files; the github-path `''` sentinel (startsWith('') is always true).
+  // The remaining unlisted survivors await triage (follow-up card). Earlier justified classes:
   // - exact error-string wording beyond the pinned main ones (status codes are asserted);
   // - process lifecycle/timing: port negation, interval scaling, timer.unref, argv boundary;
   // - initial CLI selectors and the boot dashCheck duplicate the POST /api/import
