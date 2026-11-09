@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { forAll, keepTemp } from './lib/data.mjs';
 
 import { diffLines } from './web/diff.mjs';
-import { checkUpdates, cmpVer, initUpdates, isValidUpdateRecord } from './lib/updates.mjs';
+import { checkUpdates, cmpVer, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs';
 
 // Proof-mark diff: change, pure addition, pure deletion, and no change.
 assert.deepEqual(diffLines(['a', 'b', 'c'], ['a', 'B', 'c']), [{ start: 1, count: 1, old: ['b'] }]);
@@ -66,6 +66,118 @@ const tmp = mkdtempSync(join(tmpdir(), 'alate-server-'));
     udb.close();
     delete process.env.ALATE_TEST_GITHUB_API_BASE;
     gh.close();
+  }
+}
+
+// isValidUpdateRecord pins every refusal branch the board's record() mirrors. The provider
+// routes filter loadUpdates() through this validator, so a flipped check would serve
+// board-invalid rows and a flipped accept would drop real ones.
+{
+  const validRecord = () => ({
+    pin: { file: 'f', key: 'k' },
+    id: 'i', name: 'n', kind: 'skill',
+    origin: 'https://example.com/o', repo: 'owner/repo.name-1',
+    current: '1.0.0', latest: '1.1.0',
+    target: null,
+    publishedAt: '2026-01-01T00:00:00Z', qualifiesAt: '2026-01-08T00:00:00Z',
+    notesUrl: 'https://example.com/notes',
+  });
+  const oneDiff = { file: 'f', url: 'https://example.com/d' };
+  assert.equal(isValidUpdateRecord(validRecord()), true, 'a complete record is accepted');
+  for (const kind of ['image-pin', 'mcp', 'rule-set', 'skill', 'plugin']) {
+    assert.equal(isValidUpdateRecord({ ...validRecord(), kind }), true, `kind ${kind} is accepted`);
+  }
+  assert.equal(isValidUpdateRecord({ ...validRecord(), origin: 'http://example.com/o', notesUrl: 'http://example.com/n', diffs: [{ file: 'f', url: 'http://example.com/d' }] }), true, 'plain http URLs are accepted');
+  assert.equal(isValidUpdateRecord({ ...validRecord(), managedBy: 'omp' }), true, 'a valid managedBy is accepted');
+  assert.equal(isValidUpdateRecord({ ...validRecord(), removed: true }), true, 'removed with a null target is accepted');
+  assert.equal(isValidUpdateRecord({ ...validRecord(), diffs: [] }), true, 'an empty diffs list is accepted');
+  assert.equal(isValidUpdateRecord({ ...validRecord(), diffs: [oneDiff] }), true, 'one valid diff is accepted');
+  assert.equal(isValidUpdateRecord({ ...validRecord(), diffs: Array.from({ length: 50 }, () => oneDiff) }), true, '50 diffs are accepted');
+  assert.equal(isValidUpdateRecord({ ...validRecord(), id: 'x'.repeat(200) }), true, 'a 200-character boardText field is accepted');
+  assert.equal(isValidUpdateRecord({ ...validRecord(), origin: 'https://example.com/' + 'x'.repeat(1980) }), true, 'a 2000-character URL is accepted');
+  assert.equal(isValidUpdateRecord({ ...validRecord(), publishedAt: '2026-01-01T00:00:00.123456789Z' }), true, 'nine fractional digits are accepted');
+  assert.equal(isValidUpdateRecord({ ...validRecord(), publishedAt: '2026-01-01T00:00:00.1Z' }), true, 'a one-digit fraction is accepted');
+  assert.equal(isValidUpdateRecord({ ...validRecord(), publishedAt: '2026-01-01T00:00:00+05:30' }), true, 'a positive timezone offset is accepted');
+  assert.equal(isValidUpdateRecord({ ...validRecord(), publishedAt: '2026-01-01T00:00:00-08:00' }), true, 'a negative timezone offset is accepted');
+  // Non-objects and missing/null pin objects.
+  for (const bad of [null, undefined, 'x', 42, true, []]) {
+    assert.equal(isValidUpdateRecord(bad), false, 'a non-object record is refused');
+  }
+  const refuses = (over) => assert.equal(isValidUpdateRecord({ ...validRecord(), ...over }), false, `refused: ${JSON.stringify(over)}`.slice(0, 80));
+  refuses({ pin: undefined }); // no pin
+  refuses({ pin: null });
+  refuses({ pin: { file: '', key: 'k' } }); // empty boardText
+  refuses({ pin: { file: 'f'.repeat(201), key: 'k' } }); // past the 200 cap
+  refuses({ pin: { file: 'f\n', key: 'k' } }); // control character
+  refuses({ pin: { file: 5, key: 'k' } }); // non-string boardText
+  refuses({ id: '' });
+  refuses({ name: 'x'.repeat(201) });
+  refuses({ name: 'a\u0000b' });
+  refuses({ kind: 'nope' }); // outside BOARD_KINDS
+  refuses({ kind: 5 });
+  refuses({ origin: 'ftp://example.com/a' }); // protocol allowlist
+  refuses({ origin: 'javascript:alert(1)' });
+  refuses({ origin: 'not a url' }); // URL parse failure
+  refuses({ origin: 'https://example.com/' + 'x'.repeat(1981) }); // past the 2000 cap
+  refuses({ origin: 5 });
+  refuses({ repo: '' });
+  refuses({ repo: 'owner' }); // no slash
+  refuses({ repo: 'owner/' }); // empty name segment
+  refuses({ repo: '/repo' }); // empty owner segment
+  refuses({ repo: 'ow ner/x' }); // space in owner
+  refuses({ repo: 'owner/re po' }); // space in name
+  refuses({ repo: 'owner/repo/x' }); // extra segment
+  refuses({ repo: ' owner/repo' }); // leading junk pins the ^ anchor
+  refuses({ repo: 'owner/repo!!' }); // trailing junk pins the $ anchor
+  refuses({ repo: 'owner_1/repo' }); // underscore is outside the owner class
+  refuses({ current: '' });
+  refuses({ latest: 'x'.repeat(201) });
+  refuses({ target: 123 }); // target is null or boardText
+  refuses({ target: '' });
+  refuses({ publishedAt: '2026-01-01' }); // date only
+  refuses({ publishedAt: '2026-01-01 00:00:00Z' }); // parses, but the BOARD_ISO regex refuses it
+  refuses({ publishedAt: '2020-13-45T99:99:99Z' }); // regex passes, Date.parse is NaN
+  refuses({ publishedAt: 'x2026-01-01T00:00:00Z' }); // leading junk pins the ^ anchor
+  refuses({ publishedAt: '2026-01-01T00:00:00Zx' }); // trailing junk pins the $ anchor
+  refuses({ publishedAt: '2026-01-01T00:00:00.1234567890Z' }); // ten fractional digits
+  refuses({ publishedAt: '2026-01-01T00:00:00' }); // no zone
+  refuses({ publishedAt: '2026-01-01T00:00:00+5:30' }); // one-digit offset hour
+  refuses({ publishedAt: '2026-01-01t00:00:00z' }); // parses, but lowercase t/z fails the BOARD_ISO regex
+  refuses({ qualifiesAt: 'nope' });
+  refuses({ notesUrl: 'ftp://example.com' });
+  refuses({ notesUrl: undefined }); // boardHttpUrl refuses non-strings
+  refuses({ managedBy: 5 });
+  refuses({ managedBy: '' });
+  refuses({ removed: false }); // removed must be true
+  refuses({ removed: 1 });
+  refuses({ removed: true, target: 'x' }); // removed needs a null target
+  refuses({ diffs: 'x' });
+  refuses({ diffs: {} }); // for..of would throw, the validator must refuse
+  refuses({ diffs: [{ file: 'f' }] }); // diff url missing
+  refuses({ diffs: [{ file: '', url: 'https://example.com/d' }] });
+  refuses({ diffs: [{ file: 'f', url: 'ftp://example.com' }] });
+  refuses({ diffs: [null] });
+  refuses({ diffs: [5] });
+  refuses({ diffs: Array.from({ length: 51 }, () => oneDiff) }); // past the 50 cap
+}
+
+// loadUpdates: checkedAt is the max across rows and rows sort by name then id, with ''
+// as each missing field's sort key.
+{
+  const udb = new DatabaseSync(join(tmp, 'updates-sort.db'));
+  try {
+    initUpdates(udb);
+    const put = (id, value) => udb.prepare('INSERT INTO updates (id, value) VALUES (?, ?)').run(id, JSON.stringify(value));
+    put('b', { name: 'b', id: 'b', checkedAt: '2026-01-02T00:00:00Z' });
+    put('a2', { name: 'a', id: 'a@2', checkedAt: '2026-01-03T00:00:00Z' });
+    put('a1', { name: 'a', id: 'a@1', checkedAt: '2026-01-01T00:00:00Z' });
+    put('noname', { id: 'z', checkedAt: '2026-01-04T00:00:00Z' });
+    put('noid', { name: 'a', checkedAt: '2026-01-05T00:00:00Z' });
+    const { checkedAt, updates } = loadUpdates(udb);
+    assert.deepEqual(updates.map(u => u.id), ['z', undefined, 'a@1', 'a@2', 'b'], 'rows sort by name then id, missing fields first');
+    assert.equal(checkedAt, '2026-01-05T00:00:00Z', 'checkedAt is the max across rows');
+  } finally {
+    udb.close();
   }
 }
 
@@ -293,6 +405,9 @@ try {
   r = await postJson('/config', { repo: 'bad name!' }, true);
   assert.equal(r.status, 400);
   assert.equal((await r.json()).error, 'invalid repo');
+  r = await postJson('/config', { repo: '' }, true);
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'invalid repo', 'an empty repo string is refused like any non-path junk');
   r = await postJson('/config', { path: join(tmp, 'definitely-missing-dir') }, true);
   assert.equal(r.status, 400);
   assert.equal((await r.json()).error, 'invalid path');
@@ -391,6 +506,22 @@ try {
     assert.equal(res.status, 200, '127.0.0.1 Host with the bound port is accepted');
     res = await rawReq('/api/state', { host: `[::1]:${boundPort}` });
     assert.equal(res.status, 200, '[::1] Host with the bound port is accepted');
+    res = await rawReq('/api/state', { host: 'localhost' });
+    assert.equal(res.status, 200, 'a Host without a port names the default port');
+    res = await rawReq('/api/state', { host: `127.255.255.255:${boundPort}` });
+    assert.equal(res.status, 200, 'the top loopback address is accepted');
+    res = await rawReq('/api/state', { host: `127.5.20.255:${boundPort}` });
+    assert.equal(res.status, 200, 'one-, two-, and three-digit loopback octets parse');
+    res = await rawReq('/api/state', { host: `127.0.0.256:${boundPort}` });
+    assert.equal(res.status, 421, 'an octet above 255 is not a loopback name');
+    res = await rawReq('/api/state', { host: `evil.127.0.0.1:${boundPort}` });
+    assert.equal(res.status, 421, 'a loopback prefix cannot launder a hostile name');
+    res = await rawReq('/api/state', { host: `127.0.257:${boundPort}` });
+    assert.equal(res.status, 200, 'a short ipv4 form that normalizes into the loopback range is a loopback name');
+    res = await rawReq('/api/state', { host: `127.xy.20.255:${boundPort}` });
+    assert.equal(res.status, 421, 'a non-digit inside an octet is not a loopback name');
+    res = await rawReq('/api/state', { host: `127.259.0.1:${boundPort}` });
+    assert.equal(res.status, 421, 'an octet of 259 is not a loopback name');
     res = await rawReq('/api/key', { host: `localhost:${boundPort}`, origin: `http://localhost:${boundPort}` }, 'POST');
     assert.equal(res.status, 200, 'allowed-host same-origin write rotates the key');
     apiKey = JSON.parse(res.body).key;
@@ -474,9 +605,16 @@ try {
     r = await postJson('/config', { repo: origin }, true);
     assert.equal(r.status, 400);
     assert.equal((await (await get('/config')).json()).repo, origin);
+    // A failed switch that carries a replacement token restores and repersists the old
+    // one. repo pointing at an existing dir passes repoValid and dies inside
+    // selectSource, so the route catch (not validation) must restore the token.
+    r = await postJson('/config', { repo: emptyDir, token: 'alate-test-token-roll' }, true);
+    assert.equal(r.status, 400, `a failed source switch refuses: ${JSON.stringify(await r.json())}`);
+    assert.equal(JSON.parse(readFileSync(config, 'utf8')).token, 'alate-test-token-9f2c', 'a failed switch restores and repersists the previous token');
     r = await postJson('/provision', {}, true);
     assert.equal(r.status, 200);
     assert.equal((await r.json()).ok, true);
+    assert.equal(JSON.parse(readFileSync(config, 'utf8')).token, 'alate-test-token-9f2c', 'the snapshot provision after a failed switch persists the restored token');
   } finally { renameSync(offline, origin); }
 
   const invalidSnapshot = join(tmp, 'invalid-snapshot');
@@ -642,6 +780,9 @@ try {
   assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
   assert.equal(r.headers.get('cache-control'), 'no-store');
   assert.match(r.headers.get('content-security-policy'), /manifest-src 'self'/);
+  assert.match(r.headers.get('content-security-policy'), /script-src 'self';/);
+  assert.match(r.headers.get('content-security-policy'), /connect-src 'self';/);
+  assert.ok(!r.headers.get('content-security-policy').includes('8400'), 'the production CSP names no dev server');
   assert.match(await r.text(), /rel="manifest" href="\/manifest\.webmanifest"/);
   r = await get('/style.css');
   assert.equal(r.status, 200);
@@ -1765,7 +1906,13 @@ try {
     assert.equal((await get(`/api/file?path=${encodeURIComponent(bad)}`)).status, 400, bad);
   }
   assert.ok(((await (await get('/api/file?path=.')).json()).error).includes('unsafe file path'), 'validation errors name the problem');
+  const longBad = `${'x'.repeat(150)}/../escape.md`;
+  const longBody = ((await (await get(`/api/file?path=${encodeURIComponent(longBad)}`)).json()).error);
+  assert.ok(longBody.includes('x'.repeat(100)) && !longBody.includes('x'.repeat(101)), 'the refused path shows its first 100 characters only');
   assert.equal((await putJson({ path: 42, content: 'x', base: null })).status, 400, 'non-string path refuses');
+  assert.equal((await (await putJson({ path: 42, content: 'x', base: null })).json()).error, 'unsafe file path: ', 'a non-string path shows the empty cut');
+  const colonBody = ((await (await get('/api/file?path=C%3A%2Fnotes.md')).json()).error);
+  assert.ok(colonBody.includes('C:/notes.md'), 'the colon path is refused with its name');
 
   // Create with a custom message: the commit lands on disk and in the bare remote.
   r = await putJson({ path: 'docs/new.md', content: 'created\n', base: null, message: 'test: create new.md' });
@@ -2354,6 +2501,10 @@ try {
         ]];
         if (url.pathname === '/gh/repos/fake/r13/releases') return [200, [{ tag_name: 'v-rel', draft: false, prerelease: false, published_at: old30 }]];
         if (url.pathname === '/gh/repos/fake/r14/releases') return [200, [{ tag_name: 'v1.0.0', draft: false, prerelease: false, published_at: old30, html_url: 'z14' }]];
+        if (url.pathname === '/gh/repos/fake/r15/releases') return [200, [
+          { tag_name: 'v2.0.0', draft: false, prerelease: false, published_at: old30, html_url: 'z15a' },
+          { tag_name: 123, draft: false, prerelease: false, published_at: old30, html_url: 'z15b' },
+        ]];
         return null;
       };
       const r = rows(await run({ 'upstreams.json': UP([
@@ -2368,6 +2519,7 @@ try {
         item('r12', { version: '1.0.0', check: { type: 'github-release', tagPrefix: 'v', tagSuffix: '-rel' } }),
         item('r13', { check: { type: 'github-release', tagPrefix: 'v', tagSuffix: '-rel' } }),
         item('r14', { version: '9.9.9', check: { type: 'github-release' } }),
+        item('r15', { check: { type: 'github-release' } }),
       ]) }));
       assert.deepEqual([r.r3.latest, r.r3.target, r.r3.current, r.r3.publishedAt], ['v2.0.0', 'v2.0.0', null, old30], 'a null current still targets the newest old release');
       assert.match(r.r4.error, /^GET http:\/\/127\.0\.0\.1:\d+\/gh\/repos\/fake\/r4\/releases\?per_page=100 failed: HTTP 500$/);
@@ -2379,9 +2531,140 @@ try {
       assert.deepEqual([r.r12.latest, r.r12.target], ['1.4.0', '1.4.0'], 'a hyphen version never qualifies');
       assert.deepEqual([r.r13.latest, r.r13.target, r.r13.publishedAt, r.r13.notesUrl, r.r13.error ?? null], [null, null, null, null, null], 'a tag that strips to nothing leaves the row empty');
       assert.deepEqual([r.r14.latest, r.r14.target], ['v1.0.0', null], 'a current above every release never targets');
+      assert.deepEqual([r.r15.latest, r.r15.target], ['123', '123'], 'a numeric tag is stringified and checked like any other');
       assert.ok(!JSON.stringify(r).includes('tok-xyz'), 'the token never reaches a row');
       const ghHits = hits.filter(h => h.p.startsWith('/gh/'));
       assert.ok(ghHits.length >= 2 && ghHits.every(h => h.auth === 'Bearer tok-xyz'), 'the token rides GitHub calls only');
+    }
+
+    // bun.lock is JSONC: comments (with quote and brace lookalikes), trailing commas and a
+    // block comment must survive the strip, so the dep row still parses and reaches npm.
+    {
+      handler = url => {
+        if (url.pathname === '/gh/repos/fake/relc/releases') return [200, [{ tag_name: 'rel-1', draft: false, prerelease: false, published_at: old30, html_url: 'c1' }]];
+        if (url.pathname === '/gh/repos/fake/relc/commits/rel-1') return [200, { sha: 'S1' }];
+        if (url.pathname === '/gh/repos/fake/relc') return [200, {}];
+        if (url.pathname.startsWith('/gh/repos/fake/relc/git/trees/')) return [200, { tree: [{ path: 'skills/e', type: 'tree', sha: 'T2' }] }];
+        return null;
+      };
+      const jsonc = '{\n'
+        + '  // a comment , with "quotes" and {braces}\n'
+        + '  "packages": { "@s/p": ["@s/p@github:fake/relc#S1"], },\n'
+        + '  /* block with a / slash and a * star inside */ "workspaces": { "": { "dependencies": { "@s/p": "github:fake/relc", }, "notes": "//slash /* not block */", }, },\n'
+        + '}'
+        + '\n// tail comment without a newline';
+      const r = rows(await run({ 'user/omp/plugins/bun.lock': jsonc }));
+      assert.deepEqual([r['@s/p']?.latest, r['@s/p']?.error ?? null], ['rel-1', null], 'the commented bun.lock still parses and checks the dep');
+    }
+
+    // npm rows: only non-prerelease versions, created/modified excluded, and an
+    // unparseable publish time still publishes latest but never yields a gate.
+    {
+      handler = url => url.pathname === '/npm/pkg-x' ? [200, {
+        time: { created: old30, modified: fresh2, '0.9.0-beta': old30, '1.0.0': 'not-a-timestamp' },
+      }] : null;
+      const r = rows(await run({ 'upstreams.json': UP([
+        item('pkg-x', { version: '0.9.0', check: { type: 'npm', package: 'pkg-x' } }),
+      ]) }));
+      assert.deepEqual([r['pkg-x'].latest, r['pkg-x'].target, r['pkg-x'].publishedAt, r['pkg-x'].qualifiesAt],
+        ['1.0.0', null, 'not-a-timestamp', null], JSON.stringify(r['pkg-x']));
+    }
+
+    // chrome-for-testing: the target needs a strictly newer version AND a week-old
+    // first-seen stamp; equal or ahead currents never target.
+    {
+      handler = url => url.pathname === '/cft/last-known-good-versions.json' ? [200, { channels: { Stable: { version: '131.0.0.0' } } }] : null;
+      const db = mkDb({ 'upstreams.json': UP([item('cft-x', { version: '130.0.0.0', check: { type: 'chrome-for-testing', channel: 'Stable' } })]) });
+      db.prepare('INSERT INTO update_seen (key, seenAt) VALUES (?, ?)').run('item:cft-x|131.0.0.0', old30);
+      await checkUpdates(db, { dataRepo: 'demo/data' });
+      const r = rows(db);
+      assert.deepEqual([r['cft-x'].latest, r['cft-x'].target, r['cft-x'].publishedAt], ['131.0.0.0', '131.0.0.0', old30], 'a strictly newer week-old version targets');
+      const db2 = mkDb({ 'upstreams.json': UP([
+        item('cft-y', { version: '131.0.0.0', check: { type: 'chrome-for-testing', channel: 'Stable' } }),
+        item('cft-z', { version: '132.0.0.0', check: { type: 'chrome-for-testing', channel: 'Stable' } }),
+        item('cft-w', { version: '131.0.0', check: { type: 'chrome-for-testing', channel: 'Stable' } }),
+      ]) });
+      db2.prepare('INSERT INTO update_seen (key, seenAt) VALUES (?, ?)').run('item:cft-y|131.0.0.0', old30);
+      db2.prepare('INSERT INTO update_seen (key, seenAt) VALUES (?, ?)').run('item:cft-z|131.0.0.0', old30);
+      db2.prepare('INSERT INTO update_seen (key, seenAt) VALUES (?, ?)').run('item:cft-w|131.0.0.0', old30);
+      await checkUpdates(db2, { dataRepo: 'demo/data' });
+      const r2 = rows(db2);
+      assert.deepEqual([r2['cft-y'].target, r2['cft-z'].target], [null, null], 'equal or ahead currents never target');
+      assert.equal(r2['cft-w'].target, null, 'a version equal by compare with a different string never targets');
+    }
+
+    // github-path: the target is the head sha only for a first-seen-week-ago sha that
+    // differs from current; a full-sha or prefix current never targets.
+    {
+      const sha = 'abcdef1234567890abcdef1234567890abcdef12';
+      handler = url => url.pathname === '/gh/repos/fake/px/commits' ? [200, [{ sha, html_url: 'p1' }]] : null;
+      const mk = async current => {
+        const db = mkDb({ 'upstreams.json': UP([item('px', { version: current, check: { type: 'github-path' } })]) });
+        db.prepare('INSERT INTO update_seen (key, seenAt) VALUES (?, ?)').run(`item:px|${sha}`, old30);
+        await checkUpdates(db, { dataRepo: 'demo/data' });
+        return rows(db).px;
+      };
+      const rNull = await mk(null);
+      assert.deepEqual([rNull.latest, rNull.target, rNull.publishedAt], [sha, sha, old30], 'a first-seen week-old sha targets a null current');
+      const rFull = await mk(sha);
+      assert.deepEqual([rFull.latest, rFull.target], [sha, null], 'a full-sha current never targets');
+      const rPrefix = await mk(sha.slice(0, 7));
+      assert.deepEqual([rPrefix.latest, rPrefix.target], [sha, null], 'a prefix current never targets');
+    }
+
+    // Skill rows: current is the release whose folder sha matches the locked hash; a
+    // changed lock hash loses current and targets the week-old release with a folder.
+    {
+      handler = url => {
+        if (url.pathname === '/gh/repos/fake/rels/releases') return [200, [{ tag_name: 'rel-1', draft: false, prerelease: false, published_at: old30, html_url: 'sk1' }]];
+        if (url.pathname === '/gh/repos/fake/rels/commits/rel-1') return [200, { sha: 'S1' }];
+        if (url.pathname === '/gh/repos/fake/rels') return [200, {}];
+        if (url.pathname.startsWith('/gh/repos/fake/rels/git/trees/')) return [200, { tree: [{ path: 'skills/e', type: 'tree', sha: 'T2' }] }];
+        return null;
+      };
+      const lockDb = hash => mkDb({
+        'user/agents/.skill-lock.json': JSON.stringify({ skills: { e: { sourceUrl: 'https://github.com/fake/rels', skillPath: 'skills/e/SKILL.md', skillFolderHash: hash } } }),
+      });
+      const r = rows(await (async () => { const db = lockDb('T2'); await checkUpdates(db, { dataRepo: 'demo/data' }); return db; })());
+      assert.deepEqual([r.e.current, r.e.latest, r.e.target, r.e.error ?? null], ['rel-1', 'rel-1', null, null], 'a matching folder sha reads as current with no target');
+      const r2 = rows(await (async () => { const db = lockDb('T9'); await checkUpdates(db, { dataRepo: 'demo/data' }); return db; })());
+      assert.deepEqual([r2.e.current, r2.e.latest, r2.e.target, r2.e.error ?? null], ['T9', 'rel-1', 'rel-1', null], 'an unmatched hash stays as current and targets the week-old release');
+    }
+
+    // Skill rows: only the 10 newest releases are folder-matched; a release without the
+    // folder can never target; a lock ref names current when no folder matches; the target
+    // loop never backs below the matched current.
+    {
+      handler = url => {
+        if (url.pathname === '/gh/repos/fake/relcap/releases') return [200, Array.from({ length: 11 }, (_, i) => ({ tag_name: `rel-${11 - i}`, draft: false, prerelease: false, published_at: old30, html_url: `k${11 - i}` }))];
+        if (url.pathname === '/gh/repos/fake/relmix/releases') return [200, [
+          { tag_name: 'rel-3', draft: false, prerelease: false, published_at: old30, html_url: 'm3' },
+          { tag_name: 'rel-2', draft: false, prerelease: false, published_at: old30, html_url: 'm2' },
+          { tag_name: 'rel-1', draft: false, prerelease: false, published_at: old30, html_url: 'm1' },
+        ]];
+        if (url.pathname === '/gh/repos/fake/relmix') return [200, {}];
+        const mixCommit = url.pathname.match(/^\/gh\/repos\/fake\/relmix\/commits\/([^?/]+)/)?.[1];
+        if (mixCommit) return [200, { sha: `S-${mixCommit}` }];
+        if (url.pathname === '/gh/repos/fake/relmix/compare/rel-1...rel-3') return [200, { files: [] }];
+        const cap = url.pathname.match(/^\/gh\/repos\/fake\/relcap\/git\/trees\//);
+        if (cap) {
+          const tag = url.pathname.match(/^\/gh\/repos\/fake\/relcap\/git\/trees\/([^?/]+)/)?.[1];
+          return [200, { tree: [{ path: 'skills/e', type: 'tree', sha: tag === 'rel-1' ? 'T2' : 'T9' }] }];
+        }
+        const tag = url.pathname.match(/^\/gh\/repos\/fake\/relmix\/git\/trees\/([^?/]+)/)?.[1];
+        if (tag === 'rel-3') return [200, { tree: [{ path: 'skills/e', type: 'tree', sha: 'T2' }] }];
+        if (tag === 'rel-2') return [200, { tree: [{ path: 'skills/other', type: 'tree', sha: 'TX' }] }];
+        if (tag === 'rel-1') return [200, { tree: [{ path: 'skills/e', type: 'tree', sha: 'T5' }] }];
+        return null;
+      };
+      const lockDb2 = extra => mkDb({ 'user/agents/.skill-lock.json': JSON.stringify({ skills: { e: { sourceUrl: 'https://github.com/fake/relcap', skillPath: 'skills/e/SKILL.md', skillFolderHash: 'T2', ...extra } } }) });
+      const mixDb = extra => mkDb({ 'upstreams.json': '[]', 'user/agents/.skill-lock.json': JSON.stringify({ skills: { e: { sourceUrl: 'https://github.com/fake/relmix', skillPath: 'skills/e/SKILL.md', skillFolderHash: 'T2', ...extra } } }) });
+      const cap = rows(await (async () => { const db = lockDb2({}); await checkUpdates(db, { dataRepo: 'demo/data' }); return db; })());
+      assert.equal(cap.e.current, 'T2', 'only the 10 newest releases are matched against the folder sha');
+      const matched = rows(await (async () => { const db = mixDb({}); await checkUpdates(db, { dataRepo: 'demo/data' }); return db; })());
+      assert.deepEqual([matched.e.current, matched.e.target], ['rel-3', null], 'a folder-less middle release never targets and the loop never backs below current');
+      const withRef = rows(await (async () => { const db = mixDb({ skillFolderHash: 'T9', ref: 'rel-1' }); await checkUpdates(db, { dataRepo: 'demo/data' }); return db; })());
+      assert.deepEqual([withRef.e.current, withRef.e.target], ['rel-1', 'rel-3'], `dump2: ${JSON.stringify(withRef.e)}`);
     }
 
     // github-release security fast path: tier A (body cites a CVE) and tier B (OSV record ties the CVE to the repo).
@@ -3617,6 +3900,14 @@ try {
     const fm = d => `---\ndescription: ${d}\n---\n`;
     const git10 = (args, opts = {}) => git(args, { ...opts, cwd: w10, encoding: 'utf8' });
     const scan10 = d => dash.scanInventory(join(w10, d));
+    // Temp-dir leak watcher: dashboard and snapshot temp dirs never outlive a call.
+    const leak10 = fn => {
+      const before = new Set(readdirSync(tmpdir()).filter(n => /^alate-(dashboard|snapshot)-/.test(n)));
+      const out = fn();
+      const fresh = readdirSync(tmpdir()).filter(n => /^alate-(dashboard|snapshot)-/.test(n) && !before.has(n));
+      assert.deepEqual(fresh, [], 'dashboard temp dirs must not leak');
+      return out;
+    };
     const err10 = fn => { try { fn(); } catch (e) { return e; } throw new Error('expected a throw'); };
 
     // -- scanInventory: empty repo returns the full default shape.
@@ -3632,6 +3923,22 @@ try {
     const mp = scan10('mp10');
     assert.deepEqual([mp.projects.contextFiles, mp.warnings],
       [[], ['projects/projects.json: missing or unparseable; showing what exists']]);
+
+    // -- CRLF frontmatter parses; a manifest without a projects table still lists context files.
+    dig('crlf10/rule.md', '---\r\ndescription: crlf rule\r\n---\r\nbody\r\n');
+    assert.deepEqual(scan10('crlf10').rules, [{ name: 'rule.md', description: 'crlf rule' }], 'CRLF frontmatter is parsed');
+    ddir('tproj10/projects');
+    dig('tproj10/projects/ctx.md', 'ctx\n');
+    writeFileSync(join(w10, 'tproj10/projects/projects.json'), JSON.stringify({ contextFiles: ['ctx.md'] }));
+    const tp = scan10('tproj10');
+    assert.deepEqual([tp.projects.contextFiles, tp.projects.named], [['ctx.md'], []], 'a manifest without a projects table lists its context files');
+    writeFileSync(join(w10, 'tproj10/projects/projects.json'), JSON.stringify({ projects: [] }));
+    const tp2 = scan10('tproj10');
+    assert.deepEqual(tp2.projects.contextFiles, [], 'an array projects table contributes no named projects');
+    assert.deepEqual(tp2.warnings, [
+      'projects/projects.json: contextFiles must be an array of strings; ignored',
+      'projects/projects.json: projects must be an object; ignored',
+    ], 'a manifest with mistyped fields warns for each');
 
     // -- main inventory fixture: rules, user layer, plugins, projects, counts.
     dig('main10/demo-rule.md', fm('demo rule'));
@@ -3933,23 +4240,17 @@ try {
     assert.equal(git10(['--git-dir', ghOwn, 'symbolic-ref', 'HEAD', 'refs/heads/main']).status, 0);
     const ownSha = git10(['--git-dir', ghOwn, 'rev-parse', 'HEAD']).stdout.trim();
     const dbR = mkDb10('alat10-r.db');
-    const r1 = dash.importSource(dash.loadState(dbR), 'own/data@main', 'repo', null, dbR);
+    const r1 = await leak10(() => dash.importSource(dash.loadState(dbR), 'own/data@main', 'repo', null, dbR));
     assert.equal(r1.source.kind, 'repo');
     assert.deepEqual([r1.source.name, r1.source.ref, r1.source.importedSha], ['own/data', 'main', ownSha]);
     assert.deepEqual(dash.listStoredFiles(dbR).map(r => ({ ...r })), [{ path: 'intro.md', bytes: 6 }]);
     assert.equal(dash.remoteHead('own/data'), ownSha);
     assert.equal(dash.remoteHead('own/data', 'main'), ownSha);
     assert.equal(dash.remoteHead('absent/repo'), '');
+    assert.equal(dash.remoteHead('own/data', 'no-such-ref'), '', 'a successful ls-remote without the ref yields an empty sha');
 
     // -- repo-source edit: clone, write, commit, push, re-import; temp dirs never leak.
-    const leak10 = async fn => {
-      const before = new Set(readdirSync(tmpdir()).filter(n => /^alate-(dashboard|snapshot)-/.test(n)));
-      const out = await fn();
-      const fresh = readdirSync(tmpdir()).filter(n => /^alate-(dashboard|snapshot)-/.test(n) && !before.has(n));
-      assert.deepEqual(fresh, [], 'dashboard temp dirs must not leak');
-      return out;
-    };
-    await leak10(async () => {});
+    await leak10(() => {});
     const res1 = await leak10(() => dash.applyFileEdit(r1, dbR, { path: 'edit10.md', content: 'hi ten\n', base: null }));
     assert.equal(res1.pushed, true);
     assert.equal(res1.warning, undefined);
@@ -3961,12 +4262,21 @@ try {
     const res2 = await leak10(() => dash.applyFileEdit(res1.state, dbR, { path: 'edit10.md', content: 'up ten\n', base: editHash, message: '  Stryker ten  ' }));
     assert.equal(res2.pushed, true);
     assert.equal(git10(['--git-dir', ghOwn, 'log', '-1', '--format=%s', 'main']).stdout.replace(/\n$/, ''), 'Stryker ten', 'message is trimmed to one line');
+    const editHash2 = dash.readStoredFile(dbR, 'edit10.md').hash;
+    const res2b = await leak10(() => dash.applyFileEdit(res2.state, dbR, { path: 'edit10.md', content: 'up ten b\n', base: editHash2, message: null }));
+    assert.equal(git10(['--git-dir', ghOwn, 'log', '-1', '--format=%s', 'main']).stdout.replace(/\n$/, ''), 'alate: edit edit10.md', 'a null message falls back to the default subject');
     e = err10(() => dash.applyFileEdit(res2.state, dbR, { path: 'edit10.md', content: 'x\n', base: '0'.repeat(64) }));
     assert.equal(e.status, 409);
     e = err10(() => dash.applyFileEdit({ source: null }, dbR, { path: 'x.md', content: 'x', base: null }));
     assert.equal(e.status, 400);
     e = err10(() => dash.applyFileEdit(res2.state, dbR, { path: 'x.md', content: 'x', base: null, delete: true }));
     assert.equal(e.status, 400);
+
+    // A clone failure names the repo and ref and carries git's stderr; nothing leaks the token.
+    e = err10(() => dash.importSource(dash.loadState(mkDb10('alat10-cl.db')), 'gone/repo@main', 'repo', null, mkDb10('alat10-cl2.db')));
+    assert.equal(e.status, 400);
+    assert.match(e.message, /^git clone failed for gone\/repo@main: /, 'the clone failure names the repo and ref');
+    assert.ok(e.message.includes('does not appear to be a git repository'), 'the clone failure carries git stderr');
 
     // -- snapshotData: exact tree, temp prefix, unsafe stored paths refused.
     const snap = dash.snapshotData(dbI);
@@ -3978,7 +4288,7 @@ try {
     for (const bad of ['a\\b.md', 'a//b.md']) {
       dbS.exec('DELETE FROM files');
       dbS.prepare('INSERT INTO files (path, content) VALUES (?, ?)').run(bad, Buffer.from(`x`));
-      e = err10(() => dash.snapshotData(dbS));
+      e = err10(() => leak10(() => dash.snapshotData(dbS)));
       assert.equal(e.message, `unsafe snapshot path: ${bad}`, bad);
     }
   }
@@ -4118,6 +4428,65 @@ try {
       assert.equal(body.results[0].truncated, true, 'a >200000-byte script output is flagged truncated');
       assert.equal(body.results[0].output.length, 200000, 'the captured output is cut to CAP bytes');
       await mut10Kill(A.p);
+    }
+
+    // Server ENV: the child environment allowlist is exact. The capture file holds every
+    // allowlisted name this process sets and nothing else (no ALATE_LAYER, no secrets).
+    {
+      const envNames = ['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'SystemDrive', 'ComSpec', 'PATHEXT', 'PI_CODING_AGENT_DIR', 'ALATE_DATA', 'ALATE_KEEP_TEMP', 'SKILLSPECTOR_BIN', 'SKILLSPECTOR_VENV', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'];
+      const capFile = join(tmp, 'child-env.json');
+      const functional = { PATH: process.env.PATH, HOME: tmpHome, USERPROFILE: tmpHome, TEMP: serverTmp, TMP: serverTmp, TMPDIR: serverTmp };
+      const E = mut10Spawn(['--port', '0', '--config', join(tmp, 'server-config-env.json'), '--db', join(tmp, 'state-env.db'), '--interval', '100000'],
+        { ALATE_TEST_CHILD_ENV: capFile, ...functional, ...Object.fromEntries(envNames.filter(k => !(k in functional)).map((k, i) => [k, `allow-${i}`])) });
+      const { base, key } = await E.up;
+      const [stE] = await mut10Post(base, '/config', { path: emptyDir }, key);
+      assert.equal(stE, 200, 'the capture server takes a path source');
+      await mut10Post(base, '/provision', {}, key).then(([stP, bodyP]) => assert.equal(stP, 200, `provision failed: ${JSON.stringify(bodyP).slice(0, 300)}`));
+      await waitFor(async () => existsSync(capFile), 10_000);
+      const child = JSON.parse(readFileSync(capFile, 'utf8'));
+      assert.deepEqual(Object.keys(child).sort(), envNames
+        .concat(['ALATE_TEST_CHILD_ENV', 'ALATE_TEST_GH_BASE', 'ALATE_TEST_PROVISION_GATE', 'ALATE_TEST_SCRIPT_GATE'])
+        .sort(), 'the child env carries exactly the allowlisted names plus the ALATE_TEST_ pass-through (no ALATE_LAYER, no secrets)');
+      assert.ok(!('ALATE_API_KEY' in child), 'secrets stay outside the child env');
+      await mut10Kill(E.p);
+    }
+
+    // Server LK: a dashboard error with no status serves 500 — hold the write lock mid-import.
+    {
+      const cfgLk = join(tmp, 'server-config-lk.json');
+      const dbLk = join(tmp, 'state-lk.db');
+      const dataLk = join(tmp, 'data-lk');
+      mkdirSync(join(dataLk, 'projects'), { recursive: true });
+      writeFileSync(join(dataLk, 'demo-rule.md'), '---\ndescription: d\n---\nbody\n');
+      writeFileSync(join(dataLk, 'projects', 'projects.json'), JSON.stringify({ contextFiles: [], projects: {} }));
+      const LK = mut10Spawn(['--port', '0', '--config', cfgLk, '--db', dbLk, '--interval', '100000']);
+      const { base } = await LK.up;
+      const holder = new DatabaseSync(dbLk);
+      const importLK = () => mut10Post(base, '/api/import', { source: dataLk }, null, { origin: base });
+      try {
+        holder.exec('BEGIN IMMEDIATE');
+        const [st, body] = await importLK();
+        assert.equal(st, 500, `a status-less dashboard error maps to 500; got ${st}: ${body.error}`);
+        assert.equal(body.error, 'database is locked', 'the 500 body is the raw busy error, not a status-tagged one');
+      } finally {
+        holder.exec('ROLLBACK');
+        holder.close();
+      }
+      const [st2] = await importLK();
+      assert.equal(st2, 200, 'the released import succeeds, so the 500 was the lock');
+      await mut10Kill(LK.p);
+    }
+
+    // Server LIVE: ALATE_LIVE relaxes script-src/connect-src for the dev server only.
+    {
+      const cfgLive = join(tmp, 'server-config-live.json');
+      const dbLive = join(tmp, 'state-live.db');
+      const LIVE = mut10Spawn(['--port', '0', '--config', cfgLive, '--db', dbLive, '--interval', '100000'], { ALATE_LIVE: '1' });
+      const { base } = await LIVE.up;
+      const csp = (await fetch(new URL('/style.css', base))).headers.get('content-security-policy');
+      assert.ok(csp.includes("script-src 'self' http://localhost:8400"), 'ALATE_LIVE adds the dev server to script-src');
+      assert.ok(csp.includes("connect-src 'self' http://localhost:8400"), 'ALATE_LIVE adds the dev server to connect-src');
+      await mut10Kill(LIVE.p);
     }
 
     // Server A2: a pre-written key must survive boot, and a save must re-assert 0600.
