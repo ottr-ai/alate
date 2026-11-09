@@ -137,8 +137,9 @@ const tmp = mkdtempSync(join(tmpdir(), 'alate-server-'));
   refuses({ publishedAt: '2026-01-01' }); // date only
   refuses({ publishedAt: '2026-01-01 00:00:00Z' }); // parses, but the BOARD_ISO regex refuses it
   refuses({ publishedAt: '2020-13-45T99:99:99Z' }); // regex passes, Date.parse is NaN
-  refuses({ publishedAt: 'x2026-01-01T00:00:00Z' }); // leading junk pins the ^ anchor
-  refuses({ publishedAt: '2026-01-01T00:00:00Zx' }); // trailing junk pins the $ anchor
+  refuses({ publishedAt: 'x2026-01-01T00:00:00Z' }); // leading junk fails the regex
+  refuses({ publishedAt: '+002026-01-01T00:00:00Z' }); // parses as an extended year: only the ^ anchor refuses it
+  refuses({ publishedAt: '2026-01-01T00:00:00Zx' }); // trailing junk fails the regex
   refuses({ publishedAt: '2026-01-01T00:00:00.1234567890Z' }); // ten fractional digits
   refuses({ publishedAt: '2026-01-01T00:00:00' }); // no zone
   refuses({ publishedAt: '2026-01-01T00:00:00+5:30' }); // one-digit offset hour

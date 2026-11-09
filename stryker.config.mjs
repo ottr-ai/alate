@@ -45,8 +45,7 @@ export default {
   // 114 in server.ts. The gate stays red until about 56 more are killed. Raise the
   // threshold when the score rises; never lower it or shrink the mutate set.
   // Survivors proven equivalent during that work (harness splice of the exact rows):
-  // - BOARD_ISO anchor drops: Date.parse accepts no string the anchors would separate;
-  //   the boardHttpUrl empty catch keeps protocol null, so the result is the same false;
+  // - the boardHttpUrl empty catch: protocol stays null, so the result is the same false;
   // - checkUpdates/loadUpdates max scans (`>` vs `>=`, guard flips): every row of one run
   //   carries the same ctx.now stamp, so no order of equal values changes the max;
   // - entry sort comparators (`<`/`>` variants, second-ternary flips): binary insertion
