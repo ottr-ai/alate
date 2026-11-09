@@ -55,8 +55,8 @@ const dataWithRules = (c, rules = DATA_RULES) => {
   return join(c.dir, 'data');
 };
 
-// sync-user requires every ITEMS entry to exist, else it refuses. The one exception is the
-// capture's OPTIONAL set (~/.omp/plugins/patches): these fixtures deliberately lack it.
+// sync-user never requires an ITEMS entry: a missing one is 'not present', never an error.
+// These fixtures deliberately lack ~/.omp/plugins/patches.
 const USER_ITEMS = [
   '.omp/agent/config.yml', '.omp/agent/mcp.json', '.omp/agent/optimizer.json',
   '.pi/agent/pix.json',

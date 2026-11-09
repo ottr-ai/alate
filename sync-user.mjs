@@ -38,12 +38,9 @@ const ITEMS = [
   '.agents/skills',
 ];
 const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
-// Items a home may legitimately lack: ~/.omp/plugins/patches exists only once a patched
-// plugin is installed; pix.json only once the pix plugin has run; marketplaces.json and
-// installed_plugins.json only once a marketplace/plugin is registered; and ~/.omp/agent/skills
-// only once a skill is installed. A normal fresh Windows omp home misses all of these, and
-// their absence must not refuse the capture. Everything else in ITEMS is required.
-const OPTIONAL = new Set(['.omp/plugins/patches', '.pi/agent/pix.json', '.omp/agent/skills', '.omp/marketplaces.json', '.omp/plugins/installed_plugins.json']);
+// No item is required: a missing ITEMS entry is 'not present', never an error, because every
+// omp home differs and a fresh one misses most entries. Refusal stays for secrets and
+// unreadable files only; ITEMS remains the allowlist of what may be captured.
 // Shapes of real credentials (codeguard-1-hardcoded-credentials), not words: docs that only mention keys still sync.
 const SHAPES = [
   ['AWS access key', /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b/],
@@ -206,16 +203,17 @@ for (const item of CONFIG) {
   try {
     const st = statSync(join(realHome, item));
     configOrigins.set(`${st.dev}:${st.ino}`, item);
-  } catch { /* missing: reported by the ITEMS loop below */ }
+  } catch { /* missing: the item is absent, so nothing aliases it */ }
 }
 
 const problems = [];
 const plan = [];
+const summary = [];
+let present = 0;
 for (const item of ITEMS) {
   const src = join(home, item);
   if (!existsSync(src)) {
-    if (OPTIONAL.has(item)) console.log(`note: ~/${item} is missing; skipped`);
-    else problems.push(`~/${item} is missing (fix ITEMS in sync-user.mjs or pass --home)`);
+    summary.push(`~/${item}: not present`);
     continue;
   }
   try {
@@ -273,6 +271,8 @@ for (const item of ITEMS) {
       }
       plan.push([rel.replace(/^\./, ''), bytes]);
     }
+    present++;
+    summary.push(`~/${item}: captured`);
   } catch (err) {
     problems.push(err.message.startsWith('~/') ? err.message : `~/${item}: ${err.message}`);
   }
@@ -280,6 +280,12 @@ for (const item of ITEMS) {
 if (problems.length) {
   console.error(`Nothing synced. Fix:\n  ${problems.join('\n  ')}`);
   process.exit(1);
+}
+for (const line of summary) console.log(line);
+// Nothing present means nothing to write: leave the data repo untouched.
+if (!present) {
+  console.log('nothing to capture');
+  process.exit(0);
 }
 
 // Repos use autocrlf: the comparison shares the CRLF normalize rule with the fingerprints.

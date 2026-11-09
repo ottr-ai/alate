@@ -541,9 +541,10 @@ try {
 
   rmSync(join(home, '.omp/plugins/bun.lock'));
   r = run();
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /~\/\.omp\/plugins\/bun\.lock is missing/);
-  assert.match(r.stderr, /Nothing synced/);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes('~/.omp/plugins/bun.lock: not present'), r.stdout);
+  assert.ok(r.stdout.includes('note: user/omp/plugins/bun.lock is gone from this machine'), r.stdout);
+  assert.ok(existsSync(join(data, 'user/omp/plugins/bun.lock')), 'stale copies are never deleted');
 
   // A missing data dir dies before touching anything.
   const missing = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', home, '--data', join(tmp, 'nope')], { encoding: 'utf8' });
@@ -567,7 +568,7 @@ try {
   const stubEnv = { ...process.env, HOME: childHome, USERPROFILE: childHome };
   delete stubEnv.PI_CODING_AGENT_DIR;
   if (process.platform !== 'win32') stubEnv.PATH = `${stub}${delimiter}${stubEnv.PATH ?? ''}`;
-  put('.omp/plugins/bun.lock', '{}'); // the missing-item refusal above removed it
+  put('.omp/plugins/bun.lock', '{}'); // restore the fixture the removal above deleted
   const blockText = 'hindsight:\n  apiUrl: http://nas\n  apiToken: $HINDSIGHT_TOKEN';
   const eol = (s, crlf) => (crlf ? s.replaceAll('\n', '\r\n') : s);
   for (const crlf of [false, true]) {
@@ -615,8 +616,7 @@ try {
   assert.equal(r2.status, 0, r2.stderr);
   assert.ok(!r2.stdout.includes('patches/@xynogen'), r2.stdout); // never reported stale
   assert.equal(snap(patchPath), patch, 'the patch file is captured with the plugins layer');
-  // A home without patches/ still captures: bun.lock and the rest of the required items
-  // stay required (the bun.lock refusal above proves one).
+  // A home without patches/ still captures: no ITEMS entry is required any more.
   const plainHome = name => {
     const h = join(tmp, name);
     for (const it of ['.omp/agent/config.yml', '.omp/agent/mcp.json', '.omp/agent/optimizer.json',
@@ -634,16 +634,55 @@ try {
   r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', nopatch, '--data', data], { encoding: 'utf8' });
   assert.equal(r2.status, 0, `a home without patches/ must still capture: ${r2.stderr}`);
 
-  // A normal fresh Windows omp home misses all four optional state files. Their absence
-  // must not refuse the capture: each is skipped with a note instead.
+  // A normal fresh Windows omp home misses all four state files. Their absence is never
+  // an error: each is one 'not present' line, and the present items still capture.
   const winhome = plainHome('home-windows-missing');
   const WIN_MISSING = ['.pi/agent/pix.json', '.omp/agent/skills', '.omp/marketplaces.json', '.omp/plugins/installed_plugins.json'];
   for (const it of WIN_MISSING) rmSync(join(winhome, it), { recursive: true });
   r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', winhome, '--data', data], { encoding: 'utf8' });
   assert.equal(r2.status, 0, `a fresh Windows home must capture: ${r2.stderr}`);
   for (const it of WIN_MISSING)
-    assert.ok(r2.stdout.includes(`note: ~/${it} is missing; skipped`), `no skip note for ${it}: ${r2.stdout}`);
-  assert.ok(!r2.stderr.includes('is missing'), `an optional absence must not refuse: ${r2.stderr}`);
+    assert.ok(r2.stdout.includes(`~/${it}: not present`), `no 'not present' line for ${it}: ${r2.stdout}`);
+  assert.ok(r2.stdout.includes('~/.omp/agent/config.yml: captured'), r2.stdout);
+  assert.ok(!r2.stderr, `an absence must not refuse: ${r2.stderr}`);
+
+  // A partial home: the present items capture, the absent ones are 'not present', and
+  // nothing refuses. A fresh data dir proves exactly what the run writes.
+  const partHome = join(tmp, 'home-partial');
+  mkdirSync(join(partHome, '.omp/agent'), { recursive: true });
+  writeFileSync(join(partHome, '.omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
+  mkdirSync(join(partHome, '.agents'), { recursive: true });
+  writeFileSync(join(partHome, '.agents/.skill-lock.json'), '{"skills":{}}\n');
+  const partData = join(tmp, 'data-partial');
+  mkdirSync(partData);
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', partHome, '--data', partData], { encoding: 'utf8' });
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.ok(r2.stdout.includes('~/.omp/agent/config.yml: captured'), r2.stdout);
+  assert.ok(r2.stdout.includes('~/.agents/.skill-lock.json: captured'), r2.stdout);
+  assert.ok(r2.stdout.includes('~/.pi/agent/pix.json: not present'), r2.stdout);
+  assert.ok(r2.stdout.includes('~/.omp/agent/skills: not present'), r2.stdout);
+  assert.match(r2.stdout, /2 added, 0 updated, 0 unchanged/);
+  assert.equal(readFileSync(join(partData, 'user/omp/agent/config.yml'), 'utf8'), 'modelRoles:\n  default: zai/glm\n');
+  assert.ok(!existsSync(join(partData, 'user/pi')), 'an absent item writes nothing');
+
+  // A secret in a present item still refuses, even with most of the home absent.
+  writeFileSync(join(partHome, '.omp/agent/config.yml'), `apiKey: ${FAKES['GitHub token']}\n`);
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', partHome, '--data', partData], { encoding: 'utf8' });
+  assert.equal(r2.status, 1);
+  assert.match(r2.stderr, /Nothing synced/);
+  assert.ok(r2.stderr.includes('~/.omp/agent/config.yml:1: possible GitHub token'), r2.stderr);
+  assert.equal(readFileSync(join(partData, 'user/omp/agent/config.yml'), 'utf8'), 'modelRoles:\n  default: zai/glm\n', 'a refused run syncs nothing');
+
+  // An empty home: exit 0, no item captured, nothing written to the data repo.
+  const emptyHome = join(tmp, 'home-empty');
+  mkdirSync(emptyHome);
+  const emptyData = join(tmp, 'data-empty');
+  mkdirSync(emptyData);
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', emptyHome, '--data', emptyData], { encoding: 'utf8' });
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.ok(r2.stdout.includes('nothing to capture'), r2.stdout);
+  assert.ok(!r2.stdout.includes(': captured'), r2.stdout);
+  assert.ok(!existsSync(join(emptyData, 'user')), 'an empty home writes nothing to the data repo');
 
   // The machine shell setup never rides the snapshot: a top-level shellPath: and the
   // skills.customDirectories entries name absolute paths of the capture host, and the
