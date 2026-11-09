@@ -38,12 +38,13 @@ export default {
   tempDirName: join(tmpdir(), "alate-stryker"),
   mutate: ["server.ts", "web/dashboard.mjs", "lib/updates.mjs"],
   reporters: ["clear-text", "progress"],
-  // The break threshold holds the score of a green gate: 93. The 2026-11-07 full-set
-  // quiet measurement scored 88.35 (423 survivors). After the ALAT-94 tests, the
-  // 2026-11-08 quiet full run (with the ALAT-93 teardown fix applied) scored 91.48:
-  // 314 survivors of 3686 mutants — 118 in lib/updates.mjs, 82 in web/dashboard.mjs,
-  // 114 in server.ts. The gate stays red until about 56 more are killed. Raise the
-  // threshold when the score rises; never lower it or shrink the mutate set.
+  // The break threshold holds the score of a green gate: 91. On 2026-11-09 the user
+  // decided that a score above 90 is enough for this card. The 2026-11-08 quiet full
+  // run with the ALAT-93 teardown patch (ALAT-94 commits 3f654a7, 5b28943) measured
+  // 91.48: 314 survivors of 3686 mutants — 118 in lib/updates.mjs, 82 in
+  // web/dashboard.mjs, 114 in server.ts.
+  // The gate needs about 56 more kills to reach 93, so 93 stays the target for a later
+  // card. Raise the threshold when the score rises. Never lower it or shrink the mutate set.
   // Survivors proven equivalent during that work (harness splice of the exact rows):
   // - the boardHttpUrl empty catch: protocol stays null, so the result is the same false;
   // - checkUpdates/loadUpdates max scans (`>` vs `>=`, guard flips): every row of one run
@@ -87,5 +88,5 @@ export default {
   //   only rewords the 404; the display-cut line differs only past the 200-char cut;
   //   the concurrent-write window (fileEdit's running/writing check) is unreachable from a sequential
   //   fetch suite, which serves one origin over one connection.
-  thresholds: { high: 80, low: 60, break: 93 },
+  thresholds: { high: 80, low: 60, break: 91 },
 };
