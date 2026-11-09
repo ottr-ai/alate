@@ -463,9 +463,12 @@ try {
     put(rel, JSON.stringify({ mcpServers: { gh: { env: { API_KEY2: '"', TOKEN2: 'Bearer ', PASSWORD2: '"$V$' } } } }, null, 2));
     r = run();
     assert.equal(r.status, 1, r.stderr);
-    assert.ok(r.stderr.includes(`~/${rel}: "API_KEY2" holds a literal value; reference an env var instead`), r.stderr);
-    assert.ok(r.stderr.includes(`~/${rel}: "TOKEN2" holds a literal value; reference an env var instead`), r.stderr);
-    assert.ok(r.stderr.includes(`~/${rel}: "PASSWORD2" holds a literal value; reference an env var instead`), r.stderr);
+    // The literal-value tail is the mcp.json fix this branch added; the scalar edges
+    // under it are the pulled pins, kept verbatim.
+    const jsonFix = 'use "$VAR" in mcp.json, put the value in workers/<project>/env.txt, and set it in Ottr Settings -> Env';
+    assert.ok(r.stderr.includes(`~/${rel}: "API_KEY2" holds a literal value; ${jsonFix}`), r.stderr);
+    assert.ok(r.stderr.includes(`~/${rel}: "TOKEN2" holds a literal value; ${jsonFix}`), r.stderr);
+    assert.ok(r.stderr.includes(`~/${rel}: "PASSWORD2" holds a literal value; ${jsonFix}`), r.stderr);
     // A JSON env reference keeps the surrounding whitespace of the raw string, and a
     // quoted reference with interior padding still resolves to an env var.
     put(rel, JSON.stringify({ mcpServers: { gh: { env: { API_KEY: ' $V ', SECRET: '" $V"' } } } }, null, 2));
