@@ -54,6 +54,9 @@ works for a dry run).
   Only reviews (the Review button and every release) and explicit architecture
   work run it. Architecture work asks to review the architecture or test
   quality, or uses the codebase-design or ponytail-audit skill.
+  A gate-restoration card states the measured score, the target, and the kill gap. The turn confirms the target with the user before the first full batch run.
+  Run one full foreground `npx stryker run` for each batch of survivor clusters (a full server run takes about 4 h). The final acceptance run covers the whole tree.
+  `thresholds.break` never goes above 90. A measured score above 90 may be set to 90.
   Reviews additionally run the property deep tier once, as a source of findings, never
   as a gate (the gate tier runs inside the chain above at the fixed seed 42, 200 runs):
   `PROP_RUNS=20000 node server.test.mjs && PROP_RUNS=20000 node sync-projects.test.mjs && PROP_RUNS=20000 node sync-user.test.mjs && PROP_RUNS=20000 node clone.test.mjs && PROP_RUNS=20000 node zero-deps.test.mjs && PROP_RUNS=20000 node license-gate.test.mjs`.
