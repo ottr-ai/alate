@@ -22,7 +22,11 @@ const home = join(tmp, 'home');
 const childHome = join(tmp, 'child-home');
 mkdirSync(childHome);
 const sandbox = (env = process.env) => {
-  const child = { ...env, HOME: childHome, USERPROFILE: childHome, ALATE_DATA: join(tmp, 'no-aldata') };
+  // A caller HOME that differs from this process's own home is an explicit fixture
+  // decision (the scanner tests couple the venv location to it); every other child, and
+  // every child that would inherit this process's real home, gets the scratch home.
+  const home = env?.HOME && env.HOME !== process.env.HOME ? env.HOME : childHome;
+  const child = { ...env, HOME: home, USERPROFILE: home, ALATE_DATA: join(tmp, 'no-aldata') };
   delete child.PI_CODING_AGENT_DIR; // the nested sync.mjs spawn must not see a real agent dir
   return child;
 };

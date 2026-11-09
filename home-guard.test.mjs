@@ -2,8 +2,9 @@
 // Three modes: (none) self-check with fake homes; `record [snap]` snapshots the real home;
 // `check [snap]` re-walks and fails with one diff line per finding.
 // The platform's own runtime state (the omp databases and hour logs, .omp/cache,
-// .omp/run, and the two bookkeeping files under .alate) is excluded: a live worker
-// writes it during any chain run, and none of it is a test write.
+// .omp/run, the session stores under .omp — context-mode, custom-session-files,
+// snapcompact — and the two bookkeeping files under .alate) is excluded: a live
+// worker writes it during any chain run, and none of it is a test write.
 // Exists because a Stryker mutant once dropped install-user.mjs's --home handling, so the
 // script fell back to os.homedir() and deleted files of the shared Ottr worker home.
 import assert from 'node:assert/strict';
@@ -22,6 +23,9 @@ const LIVE = {
   '.agents': () => false,
   '.omp': rel => rel === 'logs' || rel.startsWith('logs/') || rel === 'cache' || rel.startsWith('cache/')
     || rel === 'run' || rel.startsWith('run/')
+    || rel === 'context-mode' || rel.startsWith('context-mode/')
+    || rel === 'agent/custom-session-files' || rel.startsWith('agent/custom-session-files/')
+    || rel === 'snapcompact-savings.jsonl'
     || /^agent\/[A-Za-z0-9]+\.db(?:\.|-|$)/.test(rel),
 };
 const resolveSnap = (argv) => argv[3] ?? process.env.ALATE_HOME_GUARD_SNAPSHOT ?? join(tmpdir(), 'alate-home-guard-snapshot.json');
@@ -92,7 +96,8 @@ const selfCheck = () => {
   const fake = join(tmp, 'home');
   for (const rel of ['.alate/state.json', '.alate/in-use.json', '.alate/skillspector-pass.json',
     '.agents/skills/x/SKILL.md', '.omp/agent/rules/r.md', '.omp/agent/agent.db', '.omp/agent/agent.db-wal',
-    '.omp/logs/omp.231.log', 'unwatched.txt']) {
+    '.omp/logs/omp.231.log', '.omp/context-mode/sessions/s.db-shm', '.omp/agent/custom-session-files/a',
+    '.omp/snapcompact-savings.jsonl', 'unwatched.txt']) {
     mkdirSync(join(fake, rel, '..'), { recursive: true });
     writeFileSync(join(fake, rel), rel);
   }
@@ -107,6 +112,8 @@ const selfCheck = () => {
     utimesSync(join(fake, '.omp/agent/agent.db-wal'), new Date(), new Date(Date.now() + 9000));
     writeFileSync(join(fake, '.omp/logs/omp.231.log'), 'more\n');
     writeFileSync(join(fake, '.alate/skillspector-pass.json'), '{}\n');
+    writeFileSync(join(fake, '.omp/context-mode/sessions/s.db-shm'), 'more\n');
+    writeFileSync(join(fake, '.omp/snapcompact-savings.jsonl'), 'more\n');
     assert.equal(run('check', fake, snap).status, 0, 'live runtime churn passes');
     // Adding a file under a watched dir fails.
     writeFileSync(join(fake, '.alate', 'extra.txt'), 'x');
@@ -127,7 +134,8 @@ const selfCheck = () => {
     // The recorded snapshot contains the watched entries and no unwatched one.
     const recorded = JSON.parse(readFileSync(snap, 'utf8'));
     assert.deepEqual(Object.keys(recorded).sort(), ['agent', 'agent/rules', 'agent/rules/r.md', 'skills', 'skills/x', 'skills/x/SKILL.md', 'state.json']);
-    assert.ok(!('agent/agent.db' in recorded) && !('logs' in recorded) && !('in-use.json' in recorded), 'live runtime entries stay out of the snapshot');
+    assert.ok(!('agent/agent.db' in recorded) && !('logs' in recorded) && !('in-use.json' in recorded)
+      && !('context-mode' in recorded) && !('snapcompact-savings.jsonl' in recorded), 'live runtime entries stay out of the snapshot');
     console.log('home-guard ok');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
