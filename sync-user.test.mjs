@@ -658,6 +658,17 @@ try {
   r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', shellhome, '--data', data], { encoding: 'utf8' });
   assert.equal(r2.status, 0, r2.stderr);
   assert.equal(snap('omp/agent/config.yml'), clean, 'block style strips to the same portable text');
+  // A CRLF config (the Windows norm) strips too: kept lines keep their '\r', host keys leave.
+  // A fresh data dir, so the snapshot bytes are written from this run: the shared data dir
+  // would count the CRLF text as unchanged (normText is CRLF-stable) and keep the LF copy.
+  const dataCrlf = join(tmp, 'data-crlf');
+  mkdirSync(dataCrlf);
+  writeFileSync(join(shellhome, '.omp/agent/config.yml'),
+    'modelRoles:\r\n  default: zai/glm\r\nshellPath: C:\\Program Files\\PowerShell\\7\\pwsh.exe\r\n' +
+    'skills:\r\n  customDirectories: [C:/Users/dev/omp-skills]\r\n  theme: portable\r\n');
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', shellhome, '--data', dataCrlf], { encoding: 'utf8' });
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.equal(readFileSync(join(dataCrlf, 'user/omp/agent/config.yml'), 'utf8'), clean.replaceAll('\n', '\r\n'), 'CRLF strips to the CRLF portable text');
   // The gate still judges the portable text: syntax the strip does not remove refuses, and
   // the machine shell entry next to it cannot smuggle the capture past the scan.
   writeFileSync(join(shellhome, '.omp/agent/config.yml'),
@@ -736,6 +747,10 @@ try {
       ['theme:\n  dark: x\n', 'theme:\n  dark: x\n'],
       ['a: v', 'a: v'], // no final newline, nothing dropped: byte for byte
       ['skills:', 'skills:'],
+      // A CRLF config (the Windows norm) strips identically: every kept line keeps its '\r'.
+      ['a: v\r\nskills:\r\n  customDirectories: [C:/a]\r\n  other: keep\r\n', 'a: v\r\nskills:\r\n  other: keep\r\n'],
+      ['shellPath: C:\\x\r\na: v\r\n', 'a: v\r\n'],
+      ['skills:\r\n  customDirectories:\r\n    - C:/a\r\nb: w\r\n', 'b: w\r\n'],
     ];
     for (const [input, want] of HOST_CASES)
       assert.equal(withoutHostPaths(input), want, `strip of ${JSON.stringify(input)}`);
