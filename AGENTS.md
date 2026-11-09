@@ -58,6 +58,7 @@ works for a dry run).
   as a gate (the gate tier runs inside the chain above at the fixed seed 42, 200 runs):
   `PROP_RUNS=20000 node server.test.mjs && PROP_RUNS=20000 node sync-projects.test.mjs && PROP_RUNS=20000 node sync-user.test.mjs && PROP_RUNS=20000 node clone.test.mjs && PROP_RUNS=20000 node zero-deps.test.mjs && PROP_RUNS=20000 node license-gate.test.mjs`.
   A failure there becomes a finding with the seed and the failing input; triage decides whether the code or the property is wrong.
+- Every mutant declared equivalent in a stryker config comment must cite its proof: a command with its output, or a pinned example input. Prose alone is not a proof.
 
 ## Releases and versions
 
