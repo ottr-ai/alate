@@ -1,5 +1,41 @@
 {
   "_doc": "Records where every public item came from. sync.mjs fails when a public item has no recorded origin. See README.md, section 'Data repo layout'.",
   "own": ["*.md"],
-  "items": []
+  "items": [
+    {
+      "name": "security-audit",
+      "kind": "skill",
+      "origin": "https://github.com/cloudflare/security-audit-skill",
+      "check": { "type": "github-path", "repo": "cloudflare/security-audit-skill", "path": "skills/security-audit" },
+      "paths": ["user/agents/skills/security-audit"]
+    },
+    {
+      "name": "project-codeguard",
+      "kind": "rule-set",
+      "origin": "https://github.com/cosai-oasis/project-codeguard",
+      "check": { "type": "github-release", "repo": "cosai-oasis/project-codeguard", "tagPrefix": "v" },
+      "paths": ["codeguard-*.md"]
+    },
+    {
+      "name": "codebase-design",
+      "kind": "skill",
+      "origin": "https://github.com/mattpocock/skills",
+      "check": { "type": "github-path", "repo": "mattpocock/skills", "path": "skills/engineering/codebase-design" },
+      "paths": ["user/agents/skills/codebase-design"]
+    },
+    {
+      "name": "ponytail",
+      "kind": "skill",
+      "origin": "https://github.com/DietrichGebert/ponytail",
+      "check": { "type": "github-path", "repo": "DietrichGebert/ponytail", "path": "skills/ponytail" },
+      "paths": ["user/agents/skills/ponytail"]
+    },
+    {
+      "name": "impeccable",
+      "kind": "skill",
+      "origin": "https://github.com/pbakaus/impeccable",
+      "check": { "type": "github-path", "repo": "pbakaus/impeccable", "path": ".agents/skills/impeccable" },
+      "paths": ["user/agents/skills/impeccable"]
+    }
+  ]
 }
