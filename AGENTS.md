@@ -23,7 +23,8 @@ with `--data`. `examples/data` is a neutral fixture used by tests and CI.
   own self-check against fake homes. Chain runs that share one machine set
   `ALATE_HOME_GUARD_SNAPSHOT` to separate snapshot paths. The guard ignores the
   platform's own runtime files (the omp databases, logs, cache, run, the session
-  stores under `.omp` — context-mode, custom-session-files, snapcompact — and the two
+  stores under `.omp` — context-mode, custom-session-files, snapcompact — the agent
+  blob cache `agent/blobs`, and the two
   bookkeeping files under `.alate`): a live worker writes them during any chain.
 - `web/index.html`/`style.css`/`app.js`/`diff.mjs`: the dashboard's static assets (Galley Proof world, see `DESIGN.md`; `diff.mjs` is the editor's line diff for proof marks; `manifest.webmanifest`, `sw.js`, and `icons/` make the dashboard installable as a PWA — `sw.js` is a network-first offline shell, and its precache list mirrors the static table in `server.ts`), and `web/dashboard.mjs` its inventory and file-edit logic, served by `server.ts` on the same loopback port as the provisioning API; the dashboard's self-check lives in `server.test.mjs`.
 - `server.ts` (+ `server.test.mjs`): long-running loopback provisioning server (key-authenticated provision API, server-side config, periodic data-repo update checks), built on Fastify and run via `node server.ts` type stripping — no build step; it also serves the dashboard UI, its inventory API (`GET /api/state`, `POST /api/import`) and its file editor API (`GET /api/files`, `GET`/`PUT`/`DELETE /api/file`: snapshot reads plus edits that verify a base hash, commit and push) with `--db <file>` (SQLite snapshot of source files and inventory, default `alate.db` beside the config file) and `--data <dir>` (import at startup) flags; `server.test.mjs` is its self-check.

@@ -26,6 +26,7 @@ const LIVE = {
     || rel === 'context-mode' || rel.startsWith('context-mode/')
     || rel === 'agent/custom-session-files' || rel.startsWith('agent/custom-session-files/')
     || rel === 'snapcompact-savings.jsonl'
+    || rel === 'agent/blobs' || rel.startsWith('agent/blobs/')
     || /^agent\/[A-Za-z0-9]+\.db(?:\.|-|$)/.test(rel),
 };
 const resolveSnap = (argv) => argv[3] ?? process.env.ALATE_HOME_GUARD_SNAPSHOT ?? join(tmpdir(), 'alate-home-guard-snapshot.json');
@@ -101,6 +102,8 @@ const selfCheck = () => {
     mkdirSync(join(fake, rel, '..'), { recursive: true });
     writeFileSync(join(fake, rel), rel);
   }
+  // The blob cache dir pre-exists on any machine that has run omp once; its entries churn.
+  mkdirSync(join(fake, '.omp/agent/blobs'), { recursive: true });
   const snap = join(tmp, 'snap.json');
   try {
     assert.equal(run('record', fake, snap).status, 0, 'record passes');
@@ -114,6 +117,8 @@ const selfCheck = () => {
     writeFileSync(join(fake, '.alate/skillspector-pass.json'), '{}\n');
     writeFileSync(join(fake, '.omp/context-mode/sessions/s.db-shm'), 'more\n');
     writeFileSync(join(fake, '.omp/snapcompact-savings.jsonl'), 'more\n');
+    writeFileSync(join(fake, '.omp/agent/blobs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'), 'blob\n');
+    writeFileSync(join(fake, '.omp/agent/blobs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png'), 'blob\n');
     assert.equal(run('check', fake, snap).status, 0, 'live runtime churn passes');
     // Adding a file under a watched dir fails.
     writeFileSync(join(fake, '.alate', 'extra.txt'), 'x');
