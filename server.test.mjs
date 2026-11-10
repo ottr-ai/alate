@@ -4610,7 +4610,7 @@ try {
       const capFile = join(tmp, 'child-env.json');
       const functional = { PATH: process.env.PATH, HOME: tmpHome, USERPROFILE: tmpHome, TEMP: serverTmp, TMP: serverTmp, TMPDIR: serverTmp };
       const E = mut10Spawn(['--port', '0', '--config', join(tmp, 'server-config-env.json'), '--db', join(tmp, 'state-env.db'), '--interval', '100000'],
-        { ALATE_TEST_CHILD_ENV: capFile, ...functional, ...Object.fromEntries(envNames.filter(k => !(k in functional)).map((k, i) => [k, `allow-${i}`])) });
+        { ALATE_TEST_CHILD_ENV: capFile, ...functional, ...Object.fromEntries(envNames.filter(k => !(k in functional)).map((k, i) => [k, join(tmp, `allow-${i}`)])) });
       const { base, key } = await E.up;
       const [stE] = await mut10Post(base, '/config', { path: emptyDir }, key);
       assert.equal(stE, 200, 'the capture server takes a path source');
