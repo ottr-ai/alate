@@ -1,7 +1,8 @@
 // alate server: provisioning API + inventory dashboard UI (single server; the standalone dashboard server was folded in).
 // Run directly: node server.ts (Node type stripping, no build step).
 import { spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -9,7 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { AddressInfo } from 'node:net'
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
-import { cleanupData, parseDataSpec, redactSecrets } from './lib/data.mjs'
+import { cleanupData, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
 import { applyFileEdit, importSource, listStoredFiles, loadState, readStoredFile, remoteHead, snapshotData } from './web/dashboard.mjs'
 import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
 
@@ -48,6 +49,12 @@ interface Config {
   update: UpdateState
 }
 interface ProvisionResult { script: string; code: number | null; output: string; truncated: boolean }
+// One provisioning item's per-item outcome, as written to the results file by the script
+// (specs/provision-item-by-item.md). rule/at name the first finding for a failed item.
+interface ProvisionItem { item: string; status: 'installed' | 'unchanged' | 'rejected' | 'no-origin'; rule: string | null; at: string | null; report?: string }
+// Stored on the dashboard state after every provision run; served by GET /api/state. sha pins
+// the results to the imported snapshot, so a stale set is never shown for a newer snapshot.
+interface ProvisionState { at: string; sha: string | null; ok: boolean; items: ProvisionItem[] }
 
 function loadConfig(): Config {
   try {
@@ -102,14 +109,38 @@ let running = false
 let writing = false
 
 
+// Worse status wins when both scripts report the same item key.
+const STATUS_RANK: Record<ProvisionItem['status'], number> = { unchanged: 0, installed: 1, 'no-origin': 2, rejected: 3 }
+const REPORT_CAP = 4000
+
+// Read one child's results file (specs/provision-item-by-item.md). A missing or unparseable
+// file means no data; the caller fails closed on it.
+function readProvisionResults(file: string): { fatal: boolean; items: { item: string; status: ProvisionItem['status']; rule?: unknown; at?: unknown; report?: unknown }[] } | null {
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    if (!parsed || typeof parsed.fatal !== 'boolean' || !Array.isArray(parsed.items)) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
 async function provision(): Promise<ProvisionResult[]> {
   const data = snapshotData(db)
+  const tmp = mkdtempSync(join(tmpdir(), 'alate-provision-'))
   try {
     const results: ProvisionResult[] = []
+    const merged = new Map<string, ProvisionItem>()
     for (const script of SCRIPTS) {
+      const resultsFile = join(tmp, `${script}.results.json`)
+      const env = childEnv()
+      // Test seam: while the gate file exists, drop the results-file path so a child can
+      // exit non-zero with no results file, exercising the pipeline's fail-closed branch.
+      const noResultsGate = process.env.ALATE_TEST_NO_RESULTS_FILE
+      if (!(noResultsGate && existsSync(noResultsGate))) env[PROVISION_ENV] = resultsFile
       const child = spawn(process.execPath, [join(repoRoot, script), '--data', data.dir], {
         cwd: repoRoot,
-        env: childEnv(),
+        env,
       })
       if (testChildEnvCapture) writeFileSync(testChildEnvCapture, JSON.stringify(childEnv()))
       let output = ''
@@ -122,12 +153,42 @@ async function provision(): Promise<ProvisionResult[]> {
       const truncated = output.length > CAP
       const raw = truncated ? output.slice(0, CAP) : output
       results.push({ script, code, output: redactSecrets(raw, dashToken()), truncated })
-      // Fail closed: a nonzero or null code stops the pipeline, so a source sync.mjs
-      // refused never reaches install-user.mjs and its user/ layer stays unwritten.
-      if (code !== 0) break
+      // Merge per-item results by stable key; the worse status wins, and reports join.
+      const parsed = readProvisionResults(resultsFile)
+      if (parsed) {
+        for (const entry of parsed.items) {
+          if (!entry || typeof entry.item !== 'string' || !(entry.status in STATUS_RANK)) continue
+          const status = entry.status
+          const rule = typeof entry.rule === 'string' ? entry.rule : null
+          const at = typeof entry.at === 'string' ? entry.at : null
+          const report = typeof entry.report === 'string' && entry.report
+            ? entry.report.length > REPORT_CAP ? redactSecrets(entry.report.slice(0, REPORT_CAP) + '…', dashToken()) : redactSecrets(entry.report, dashToken())
+            : undefined
+          const prev = merged.get(entry.item)
+          if (!prev) {
+            merged.set(entry.item, { item: entry.item, status, rule, at, ...(report ? { report } : {}) })
+            continue
+          }
+          const joined = [prev.report, report].filter(Boolean).join('\n')
+          if (joined) prev.report = joined.length > REPORT_CAP ? joined.slice(0, REPORT_CAP) + '…' : joined
+          if (STATUS_RANK[status] > STATUS_RANK[prev.status]) Object.assign(prev, { status, rule, at })
+        }
+      }
+      // Fail closed only on true refusals: a killed child, or a non-zero exit whose results
+      // file is missing or says the whole run was refused. A per-item failure (non-zero exit
+      // with fatal: false) never stops the pipeline (specs/provision-item-by-item.md).
+      if (code === null || (code !== 0 && (parsed === null || parsed.fatal))) break
     }
+    dashState.provision = {
+      at: new Date().toISOString(),
+      sha: dashState.source?.importedSha || null,
+      ok: results.every(r => r.code === 0),
+      items: [...merged.values()].sort((a, b) => (a.item < b.item ? -1 : a.item > b.item ? 1 : 0)),
+    } satisfies ProvisionState
+    persistDash()
     return results
   } finally {
+    rmSync(tmp, { recursive: true, force: true })
     cleanupData(data)
   }
 }

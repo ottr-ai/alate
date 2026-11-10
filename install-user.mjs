@@ -12,6 +12,14 @@
 // deliberate refresh. Fresh homes (CI, worker images) just copy.
 // A path the snapshot dropped is deleted when it still holds what alate installed; a copy changed
 // here stays and loses its record.
+// Provision is per item (specs/provision-item-by-item.md): a skill or Markdown file that fails
+// a content or scan gate, or a snapshot item with no recorded origin in upstreams.json, is left
+// out and reported while every item that passed still installs. Global refusals stay
+// all-or-nothing: a broken gate itself (missing or wrong-version scanner, crashed scan, invalid
+// worker list, unreadable or structurally broken upstreams.json, machine-changed copies) refuses
+// the whole run. When ALATE_PROVISION_RESULTS holds an absolute path, one JSON file with the
+// per-item results is written there at the end of every run (success, item failures, and
+// refusals); failed items are also printed as one stdout block at the end.
 // JSON config is adapted to the target machine first (forTarget, lib/data.mjs): a Windows capture
 // on a non-Windows machine, a POSIX-absolute capture path on Windows.
 // Plugins install from the captured lockfile with `bun install --frozen-lockfile` in ~/.omp/plugins, the
@@ -33,7 +41,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { assertSourceInside, checkDestination, cleanupData, fingerprint, forTarget, nextLayerCounter, parseArgs, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend, writeProvisionResults } from './lib/data.mjs';
 
 const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home'], ['--force', '--skip-plugins', '--layer']);
 const home = args.values['--home'] ?? homedir();
@@ -82,9 +90,10 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
 // its bytes: the snapshot always wins, --force or not.
 const pluginInstallFile = rel =>
   rel === 'omp/plugins/package.json' || rel === 'omp/plugins/bun.lock' || rel.startsWith('omp/plugins/patches/');
-// A skill snapshot is executable agent content, so install-user scans each one statically
-// (fail-closed: findings, a missing scanner, or a crashed scan refuse the whole restore before the
-// first write) before anything lands in the home. The scan applies the snapshot's own shipped
+// A skill snapshot is executable agent content, so install-user scans each one statically before
+// anything lands in the home (or, in layer mode, before the layer goes live): findings reject
+// that one skill (left out, reported), while a missing scanner or a crashed scan refuse the whole
+// restore before the first write. The scan applies the snapshot's own shipped
 // `.skillspector-baseline.yaml` — its accepted findings are review records committed to the data
 // repo, the same file the data repo's pre-push gate accepts. The upstream build is
 // pinned to a tag on purpose:
@@ -175,9 +184,10 @@ const collectSkillDirs = dir => {
 
 // Fail-closed gate: every skill snapshot is scanned before anything lands on disk (or, in
 // layer mode, before the layer goes live). Each scan's report is buffered and printed as one
-// block, so parallel scans never interleave lines; any non-zero exit — findings (1) or a
-// scanner error (2) — refuses the whole run with a non-zero exit, and the refusal names the
-// skill folder on its own line so the tail of a deploy log shows it. A scan costs ~15 s per
+// block, so parallel scans never interleave lines. Exit 1 (findings) rejects that one skill:
+// it is left out of the install and reported; any other non-zero exit, a signal kill, or a
+// spawn error is a broken scanner, which cannot produce verdicts, so the whole run refuses. A
+// skill whose own bytes cannot be hashed is rejected as unreadable rather than scanned. A scan costs ~15 s per
 // skill, which made a 57-skill deploy seed wait ~14 minutes even when one file changed, so
 // the gate re-scans only what changed: it hashes the exact bytes of each skill folder itself
 // (never a hash the data repo ships — .skill-lock.json is data, not proof), one framed digest
@@ -252,7 +262,9 @@ const recordPass = passes => {
 };
 
 // The pinned build's verdict for these exact bytes, printed as one block so a tail of the
-// output always shows a whole report.
+// output always shows a whole report. Exit 0 resolves clean, exit 1 resolves with the findings
+// report (a per-skill rejection); any other outcome rejects with an error, which the caller
+// turns into a whole-run refusal.
 const scanOne = (scanner, dir, total) => new Promise((resolve, reject) => {
   const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: scannerEnv() });
   const out = [], errOut = [];
@@ -262,8 +274,9 @@ const scanOne = (scanner, dir, total) => new Promise((resolve, reject) => {
   child.on('close', (code, signal) => {
     const report = `${Buffer.concat(out).toString('utf8')}${Buffer.concat(errOut).toString('utf8')}`.trimEnd();
     console.log(`--- SkillSpector report: ${dir}${report ? `\n${report}` : ''}`);
-    if (code === 0) resolve();
-    else reject(new Error(`SkillSpector rejected ${dir} (exit ${code ?? `signal ${signal}`}); nothing was installed. Review the report above, then fix or drop the skill in the data repo.`));
+    if (code === 0) resolve({ report: null });
+    else if (code === 1) resolve({ report });
+    else reject(new Error(`SkillSpector scan of ${dir} failed (exit ${code ?? `signal ${signal}`}); refusing to install ${total} skill snapshot(s).`));
   });
 });
 
@@ -337,32 +350,52 @@ const runScan = async skillDirs => {
     throw new Error(`skillspector not found; refusing to install ${skillDirs.length} skill snapshot(s).${refused} Remediation: set SKILLSPECTOR_BIN to an absolute scanner outside the home install-user writes into (${trustHome}), point SKILLSPECTOR_VENV at a root-owned venv outside that home, or install the pinned build (Python 3.12+) on PATH. To rebuild the venv (it must be root-owned and live outside the home): rm -rf "${venvRoot}" && python3 -m venv "${venvRoot}" && "${join(venvRoot, 'bin', 'pip')}" install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}", or install the pinned build, then retry: pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"`);
   }
   const passes = readPasses();
-  const keys = new Map(skillDirs.map(dir => [dir, `${SCAN_CACHE_FORMAT} ${hashSkillDir(dir)} ${SKILLSPECTOR_REF} ${reported} scan ${SCAN_ARGS.join(' ')}`]));
-  const pending = skillDirs.filter(dir => passes[keys.get(dir)] !== true);
-  console.log(`Scanning ${pending.length} of ${skillDirs.length} skill snapshot(s) (${skillDirs.length - pending.length} cached) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied)...`);
-  if (!pending.length) return;
-  // One rejection or scanner error stops the install (nothing is written past this gate):
-  // stop scheduling, let the in-flight scans finish, then refuse with the first failure.
-  const failures = [];
+  // An unreadable skill dir cannot be hashed, so it cannot be keyed or cached: reject it
+  // without scanning (rule `unreadable skill files`) instead of letting one bad dir stop
+  // every other skill.
+  const rejected = new Map();
+  const keys = new Map();
+  for (const dir of skillDirs) {
+    try {
+      keys.set(dir, `${SCAN_CACHE_FORMAT} ${hashSkillDir(dir)} ${SKILLSPECTOR_REF} ${reported} scan ${SCAN_ARGS.join(' ')}`);
+    } catch (err) {
+      rejected.set(dir, { rule: 'unreadable skill files', report: `${dir}: ${err.message}` });
+    }
+  }
+  const scanList = skillDirs.filter(dir => keys.has(dir));
+  const pending = scanList.filter(dir => passes[keys.get(dir)] !== true);
+  console.log(`Scanning ${pending.length} of ${scanList.length} skill snapshot(s) (${scanList.length - pending.length} cached) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied)...`);
+  if (!pending.length) return { rejected };
+  // Findings (exit 1) reject their own skill only; any other non-zero exit, a signal kill, or
+  // a spawn error is a broken scanner: stop scheduling, let the in-flight scans finish, then
+  // refuse the whole run — a broken scanner cannot produce verdicts.
+  let fatal = null;
   let next = 0;
   const worker = async () => {
-    while (!failures.length && next < pending.length) {
+    while (fatal === null && next < pending.length) {
       const dir = pending[next++];
       try {
-        await scanOne(scanner, dir, skillDirs.length);
-        passes[keys.get(dir)] = true;
-        recordPass(passes);
+        const res = await scanOne(scanner, dir, skillDirs.length);
+        if (res.report === null) {
+          passes[keys.get(dir)] = true;
+          recordPass(passes);
+        } else {
+          rejected.set(dir, { report: res.report });
+          // Stdout too: the deploy log's tail must name the rejected skill folder.
+          console.log(`SkillSpector rejected ${dir} (exit 1); the skill is left out of this install.`);
+        }
       } catch (err) {
-        if (!failures.length) failures.push(err);
+        fatal = err;
       }
     }
   };
   await Promise.all(Array.from({ length: Math.min(8, availableParallelism(), pending.length) }, worker));
-  if (failures.length) {
-    // Stdout too: the deploy log's tail must end on the line naming the rejected skill.
-    console.log(failures[0].message);
-    throw failures[0];
+  if (fatal !== null) {
+    // Stdout too: the deploy log's tail must end on the line naming the broken scan.
+    console.log(fatal.message);
+    throw fatal;
   }
+  return { rejected };
 };
 
 const validateTools = (bytes, path) => {
@@ -425,6 +458,31 @@ const validateRequirements = (bytes, path) => {
   });
 };
 
+// Per-item results (specs/provision-item-by-item.md): the gates push failed items as they
+// judge them, the plan's surviving items aggregate at the end of the try, and the finally
+// below writes the results file when the server asked for one. fatal/error describe a
+// whole-run refusal; every pre-existing throw class stays fatal.
+const items = [];
+let fatal = false;
+let error = null;
+let nestedFailed = false;
+// A failed item's report is diagnostics with a bound, like every stored report.
+const capReport = report => report.length > 4000 ? `${report.slice(0, 4000)}…` : report;
+const failItem = (item, status, rule, at, report) =>
+  items.push({ item, status, rule: rule ?? null, at: at ?? null, ...(report == null ? {} : { report: capReport(report) }) });
+// A scan rejection carries the first SkillSpector finding as rule and position; the hash-error
+// rejection carries its own rule. `key` is the item key of the skill dir.
+const addScanRejection = (key, info) => {
+  if (info.rule !== undefined) failItem(key, 'rejected', info.rule, null, info.report);
+  else {
+    const d = describeScanReport(info.report);
+    failItem(key, 'rejected', d.rule, d.at, info.report);
+  }
+};
+// The item key of a skill dir: snapshot-relative under userRoot; in a fresh layer the top-level
+// dir is a dot-dir (.omp), so the leading dot drops out for the snapshot spelling.
+const skillKey = (root, dir) => `user/${relative(root, dir).split(sep).join('/')}`.replace(/^user\/\./, 'user/');
+
 try {
   if (!existsSync(userRoot)) {
     throw new Error(`No user/ snapshot in ${data.dir}; run sync-user.mjs first.`);
@@ -434,24 +492,57 @@ try {
   assertSourceInside(data.dir, userRoot);
   // Check source bytes on every install, before target reads, scanner calls, or layer creation.
   const skillDirs = collectSkillDirs(userRoot);
+  // Origin gate (upstreams.json): fatal problems mean the gate itself is broken, so no origin
+  // verdict is possible and the run refuses. An uncovered skill dir is excluded (failed item
+  // `no origin`) before the walk; an uncovered MCP server is only reported — one uncovered
+  // server never disconnects the other servers on the machine. Bare keys are data-root rules,
+  // which sync.mjs installs, so they are not this script's business.
+  const gate = originGate(data.dir);
+  if (gate.fatal.length) throw new Error(`Nothing installed. Fix:\n  ${gate.fatal.join('\n  ')}`);
+  const dirByKey = new Map(skillDirs.map(dir => [`user/${relative(userRoot, dir).split(sep).join('/')}`, dir]));
+  const rejectedSkills = new Set();
+  for (const key of gate.uncovered) {
+    const dir = dirByKey.get(key);
+    if (dir) {
+      failItem(key, 'no-origin', null, null, gate.hints?.[key] ?? null);
+      rejectedSkills.add(dir);
+    }
+    else if (/^user\/omp\/agent\/mcp\.json "/.test(key)) failItem(key, 'no-origin', null, null, gate.hints?.[key] ?? null);
+  }
+  // Structure gate per skill: a skill with problems is rejected (failed item with the first
+  // problem split into rule and position, the full report attached) and excluded, so its own
+  // SKILL.md problems never gate any other skill.
   const skillEntrypoints = new Set();
-  const skillGate = [];
   for (const dir of skillDirs) {
     const entrypoint = join(dir, 'SKILL.md');
     const label = `user/${relative(userRoot, entrypoint).split(sep).join('/')}`;
     skillEntrypoints.add(entrypoint);
+    const problems = [];
     let text;
     try {
       assertSourceInside(userRoot, entrypoint);
       if (!statSync(entrypoint).isFile()) throw new Error('SKILL.md must be a regular file');
       text = readFileSync(entrypoint, 'utf8');
     } catch (err) {
-      skillGate.push(`${label}: cannot read SKILL.md (${err.message})`);
-      continue;
+      problems.push(`${label}: cannot read SKILL.md (${err.message})`);
     }
-    skillGate.push(...skillProblems(label, text));
+    if (text !== undefined) problems.push(...skillProblems(label, text));
+    if (problems.length) {
+      const first = describeProblem(problems[0]);
+      failItem(`user/${relative(userRoot, dir).split(sep).join('/')}`, 'rejected', first.rule, first.at, problems.join('\n'));
+      rejectedSkills.add(dir);
+    }
   }
-  if (skillGate.length) throw new Error(`Nothing installed. Fix:\n  ${skillGate.join('\n  ')}`);
+  // Skills left out by the origin or structure gate: their snapshot rels never enter the plan,
+  // the manifest, or the conflicts below, so the existing deletion path removes a previously
+  // installed, record-matching copy and keeps a copy that changed on the machine.
+  const inRejected = (rel, dirs) => {
+    for (const dir of dirs) {
+      const p = relative(userRoot, dir).split(sep).join('/');
+      if (rel === p || rel.startsWith(`${p}/`)) return true;
+    }
+    return false;
+  };
   const walk = (dir, sub = '') => readdirSync(dir, { withFileTypes: true }).flatMap(e =>
     SKIP_DIRS.has(e.name) ? []
       : e.isDirectory() ? walk(join(dir, e.name), sub ? `${sub}/${e.name}` : e.name)
@@ -490,10 +581,10 @@ try {
   }
 
   const plan = [];
-  const conflicts = [];
+  let conflicts = [];
   const notes = [];
-  // Content-gate problems for the snapshot's rules, collected during the walk and refused before any write.
-  const ruleGate = [];
+  // Content-gate problems for the snapshot's rules are now judged per file during the walk:
+  // a failing Markdown item is rejected (failed item) and skipped, never a whole-run refusal.
   // Snapshot path -> fingerprint of the content alate last installed (or found already in place).
   // The record rides in the layer it describes; the previous install's record is read through
   // the live layer. A first layer over an in-place home has no layer record yet, so the
@@ -557,6 +648,9 @@ try {
 
   const current = {};
   for (const rel of walk(userRoot)) {
+    // A skill left out by a gate contributes nothing: no plan entry, no manifest record, no
+    // conflict, so its installed copy is deleted later like any path the snapshot dropped.
+    if (inRejected(rel, rejectedSkills)) continue;
     // Snapshot content must resolve inside the snapshot; links escaping it, or cyclic
     // ones, refuse the restore instead of being followed.
     const srcPath = join(userRoot, rel);
@@ -614,7 +708,15 @@ try {
     // description. omp loads agent-context Markdown elsewhere in the snapshot as always-on
     // instructions too (AGENTS.md, RULES.md, SYSTEM.md, CLAUDE.md), so every .md/.mdc gets the
     // hidden-character scan; only the snapshot's own rules dir is a rule and needs the frontmatter.
-    if (/\.(md|mdc)$/.test(rel) && !skillEntrypoints.has(srcPath)) ruleGate.push(...ruleProblems(`user/${rel}`, src.toString('utf8'), { frontmatter: /^omp\/agent\/rules\/[^/]+\.mdc?$/.test(rel) }));
+    // A file with problems is rejected per item: no plan entry, no manifest record, no conflict.
+    if (/\.(md|mdc)$/.test(rel) && !skillEntrypoints.has(srcPath)) {
+      const problems = ruleProblems(`user/${rel}`, src.toString('utf8'), { frontmatter: /^omp\/agent\/rules\/[^/]+\.mdc?$/.test(rel) });
+      if (problems.length) {
+        const first = describeProblem(problems[0]);
+        failItem(`user/${rel}`, 'rejected', first.rule, first.at, problems.join('\n'));
+        continue;
+      }
+    }
     // The machine text minus its deployment blocks (lib/data.mjs keeps the last kept line's
     // terminator). `dropped` holds credentials: never log it.
     const have = machineFingerprint(rel, readDest);
@@ -622,8 +724,10 @@ try {
     // legacy form above (records a pre-strip alate wrote, entry included). A matched file was
     // not changed on the machine since the install, so the snapshot may replace it.
     const record = have !== null && (have === last[rel] || legacyFingerprint(rel, readDest) === last[rel]);
-    if (have === want && !layerMode) plan.push(['unchanged', dest, null]);
-    else if (layerMode && have === want) plan.push(['installed', dest, src]);
+    // The item key rides on every plan entry, so the per-item results can aggregate by key.
+    const itemKey = `user/${rel}`;
+    if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey]);
+    else if (layerMode && have === want) plan.push(['installed', dest, src, itemKey]);
     else if (layerMode && have !== null && !record) {
       // A machine change beyond the deployment blocks is never a refusal in layer mode:
       // machine state wins and rides into the new layer, --force takes the snapshot instead.
@@ -632,11 +736,11 @@ try {
       // over them, so a turn-edited copy must never ride into the new layer. The snapshot
       // wins, --force or not; a deliberate change goes through a data-repo commit.
       if (pluginInstallFile(rel)) {
-        plan.push(['installed', dest, src]);
+        plan.push(['installed', dest, src, itemKey]);
         notes.push(`plugin install file takes the snapshot, machine change ignored: ${readDest}`);
       }
       else if (force) {
-        plan.push(['installed', dest, src]);
+        plan.push(['installed', dest, src, itemKey]);
         notes.push(`machine change overridden by --force: ${readDest}`);
       } else {
         // A kept file can hold paths re-rooted into the live layer at its install, so they
@@ -647,16 +751,13 @@ try {
         // snapshot does above, so the choice never rides along with the machine part.
         if (rel === 'omp/agent/config.yml') keptBytes = Buffer.from(withoutMemoryBackend(keptBytes.toString('utf8')), 'utf8');
         if (/\.(?:json|ya?ml)$/.test(rel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, newLayerDir), 'utf8');
-        plan.push(['installed', dest, keptBytes]);
+        plan.push(['installed', dest, keptBytes, itemKey]);
         notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
       }
     }
-    else if (have === null || record || force) plan.push(['installed', dest, src]);
+    else if (have === null || record || force) plan.push(['installed', dest, src, itemKey]);
     else conflicts.push(dest);
     current[rel] = want;
-  }
-  if (ruleGate.length) {
-    throw new Error(`Nothing installed. Fix:\n  ${ruleGate.join('\n  ')}`);
   }
   const workersRoot = join(data.dir, 'workers');
   const shipped = new Set();
@@ -674,9 +775,31 @@ try {
         shipped.add(`${project}/${file}`);
         const dest = join(writeRoot, '.ottr', 'workers', project, file);
         checkDestination(writeRoot, dest);
-        plan.push(existsSync(dest) && sameContent('', readFileSync(dest), src) ? ['unchanged', dest, null] : ['installed', dest, src]);
+        plan.push(existsSync(dest) && sameContent('', readFileSync(dest), src) ? ['unchanged', dest, null, `workers/${project}/${file}`] : ['installed', dest, src, `workers/${project}/${file}`]);
       }
     }
+  }
+  // In-place scan gate: before any write, and before the deletions are computed, so a skill
+  // the scan rejects is dropped from the plan, the manifest, and the conflicts first — its
+  // installed record-matching copy then flows into the deletion loop below, and its own
+  // changed copy never blocks the conflicts refusal. Skills already recorded as unchanged are
+  // scanned again too: a copy a pre-gate alate installed was never scanned, and the manifest
+  // cannot prove it was. Layer mode scans the installed layer after the writes instead.
+  if (!layerMode && skillDirs.length) {
+    const scan = await runScan(skillDirs.filter(dir => !rejectedSkills.has(dir)));
+    for (const [dir, info] of scan.rejected) {
+      addScanRejection(skillKey(userRoot, dir), info);
+      rejectedSkills.add(dir);
+    }
+    // Drop every rel inside a rejected skill from the plan, the manifest, and the conflicts.
+    const prefixes = [...rejectedSkills].map(dir => relative(userRoot, dir).split(sep).join('/'));
+    const relRejected = rel => prefixes.some(p => rel === p || rel.startsWith(`${p}/`));
+    for (let i = plan.length - 1; i >= 0; i--) if (relRejected(plan[i][3].slice('user/'.length))) plan.splice(i, 1);
+    for (const rel of Object.keys(current)) if (relRejected(rel)) delete current[rel];
+    conflicts = conflicts.filter(dest => !prefixes.some(p => {
+      const guard = join(home, `.${p}`);
+      return dest === guard || dest.startsWith(`${guard}${sep}`);
+    }));
   }
   // A path the snapshot dropped: delete the machine copy when it still holds what alate last
   // installed (nobody changed it since), keep it with a note when it changed here, and drop
@@ -710,13 +833,6 @@ try {
     throw new Error(`Refusing to overwrite files that hold neither the snapshot nor what alate last installed here (machine state wins: commit the change to the data repo, or --force overrides):\n  ${conflicts.join('\n  ')}`);
   }
 
-  // Fail-closed gate: every directory named skills/ or managed-skills/ in the snapshot
-  // holds executable agent content, so each skill in it is scanned before any write, deletion,
-  // or record update below (layer mode scans the installed layer after the writes, before the
-  // switch). Skills already recorded as unchanged are scanned again too: a copy a pre-gate
-  // alate installed was never scanned, and the manifest cannot prove it was.
-  if (!layerMode && skillDirs.length) await runScan(skillDirs);
-
   // Layer mode: everything from here to the switch is disposable. Any failure before the
   // rename deletes the fresh layer and leaves current — and with it every running turn —
   // untouched; the switch itself is one atomic rename.
@@ -727,10 +843,28 @@ try {
       // The layer dir exists only after every content gate passed (rule gate, worker validation).
       mkdirSync(newLayerDir, { recursive: true });
       // The data-root rules install straight into the layer, through the same sync.mjs and its
-      // fail-closed gates the server-side provision uses.
+      // per-item gates the server-side provision uses. When the server asked for per-item
+      // results, sync.mjs writes its own file beside ours: its fatal refusal aborts the layer,
+      // a per-item failure only merges into this run's items and marks the run failed, so the
+      // good rules stay installed. Without the results env (a plain CLI layer run) a non-zero
+      // sync still aborts the layer, as before.
       const toolDir = dirname(fileURLToPath(import.meta.url));
-      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), join(newLayerDir, '.omp', 'agent', 'rules'), '--data', data.dir], { encoding: 'utf8', env: childEnv(['ALATE_TEST_SCRIPT_GATE']) });
-      if (rules.error || rules.status !== 0) throw new Error(`rules install failed:\n${rules.stderr || rules.stdout}`);
+      const resultsPath = process.env[PROVISION_ENV] ? `${process.env[PROVISION_ENV]}.rules.json` : null;
+      const rulesEnv = childEnv(['ALATE_TEST_SCRIPT_GATE']);
+      if (resultsPath) rulesEnv[PROVISION_ENV] = resultsPath;
+      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), join(newLayerDir, '.omp', 'agent', 'rules'), '--data', data.dir], { encoding: 'utf8', env: rulesEnv });
+      let nested = null;
+      if (resultsPath) {
+        try { nested = JSON.parse(readFileSync(resultsPath, 'utf8')); } catch { nested = null; }
+      }
+      if (!nested || nested.fatal === true) {
+        // Unreadable results file, or the server never asked for one: the old all-or-nothing
+        // contract applies.
+        if (rules.error || rules.status !== 0) throw new Error(`rules install failed:\n${rules.stderr || rules.stdout}`);
+      } else {
+        for (const item of Array.isArray(nested.items) ? nested.items : []) items.push(item);
+        if (rules.status !== 0) nestedFailed = true;
+      }
       if (rules.stdout) console.log(rules.stdout);
     }
     let installed = 0, unchanged = 0;
@@ -747,19 +881,37 @@ try {
       pruneEmptyDirs(dest, root);
       deleted++;
     }
-    // The record the snapshot dropped is written as gone: if the path returns, an untouched
-    // copy is freshly installed, and a changed copy wins as a plain conflict.
-    mkdirSync(dirname(manifest), { recursive: true });
-    writeFileSync(manifest, `${JSON.stringify(current, null, 2)}\n`);
     console.log(`${installed} installed, ${unchanged} unchanged, ${deleted} deleted in ${writeRoot}`);
     for (const note of notes) console.log(note);
 
     if (layerMode) {
       const layerSkillDirs = collectSkillDirs(newLayerDir);
-      if (layerSkillDirs.length) await runScan(layerSkillDirs);
+      if (layerSkillDirs.length) {
+        const scan = await runScan(layerSkillDirs);
+        for (const [dir, info] of scan.rejected) {
+          // The manifest must never name a file the layer lacks: the rejected skill dir is
+          // removed from the fresh layer, and its rels from the record, before the switch.
+          rmSync(dir, { recursive: true, force: true });
+          addScanRejection(skillKey(newLayerDir, dir), info);
+          // The layer mirrors the home in dot-dirs (.omp); the record keys use the snapshot
+          // spelling (omp), so the leading dot drops out of the top-level segment.
+          const layerRel = relative(newLayerDir, dir).split(sep).join('/');
+          const prefix = layerRel.startsWith('.') ? layerRel.slice(1) : layerRel;
+          for (const rel of Object.keys(current)) {
+            if (rel === prefix || rel.startsWith(`${prefix}/`)) delete current[rel];
+          }
+        }
+      }
     }
+    // The record the snapshot dropped is written as gone: if the path returns, an untouched
+    // copy is freshly installed, and a changed copy wins as a plain conflict. In layer mode
+    // the write sits after the layer scan, so a scan-rejected skill never enters the record.
+    mkdirSync(dirname(manifest), { recursive: true });
+    writeFileSync(manifest, `${JSON.stringify(current, null, 2)}\n`);
 
-    if (!skipPlugins && existsSync(join(userRoot, 'omp', 'plugins', 'package.json'))) {
+    let pluginsStatus = null;
+    const pluginsInSnapshot = existsSync(join(userRoot, 'omp', 'plugins', 'package.json'));
+    if (!skipPlugins && pluginsInSnapshot) {
       const pluginsDir = join(writeRoot, '.omp', 'plugins');
       // copyfile, never bun's hardlink default: a file: dep's snapshot source would end up
       // with a second link, and the alias guards on machine reads and writes would refuse
@@ -775,8 +927,10 @@ try {
       if (bun.error || bun.status !== 0) {
         throw new Error(bun.error?.code === 'ENOENT' ? 'bun not found; cannot install plugins.' : `bun install failed in ${pluginsDir}`);
       }
-    } else if (skipPlugins) {
+      pluginsStatus = 'installed';
+    } else if (skipPlugins && pluginsInSnapshot) {
       console.log('plugins skipped');
+      pluginsStatus = 'unchanged';
     }
 
     if (layerMode) {
@@ -828,6 +982,38 @@ try {
         console.log(`deleted layer ${name}`);
       }
     }
+
+    // One result per item key: the plan aggregates (any write wins over all-unchanged), the
+    // plugin install adds its entry, and the failed items the gates collected join in. Skill
+    // files aggregate to their skill-dir key and the plugin files to the one plugins key,
+    // matching the shared item-key table. The block prints at the end, so a deploy log's
+    // tail names every failure.
+    const itemKeyOf = key => {
+      const m = /^user\/((?:omp\/agent\/(?:skills|managed-skills)|agents\/skills)\/[^/]+)\//.exec(key);
+      if (m) return `user/${m[1]}`;
+      if (key.startsWith('user/omp/plugins')) return 'user/omp/plugins';
+      return key;
+    };
+    const statuses = new Map();
+    for (const [kind, , , key] of plan) {
+      const item = itemKeyOf(key);
+      const prev = statuses.get(item);
+      statuses.set(item, kind === 'installed' || prev === 'installed' ? 'installed' : 'unchanged');
+    }
+    if (pluginsStatus) statuses.set('user/omp/plugins', pluginsStatus);
+    for (const [key, status] of statuses) items.push({ item: key, status, rule: null, at: null });
+    items.sort((a, b) => (a.item < b.item ? -1 : a.item > b.item ? 1 : 0));
+    const failed = items.filter(i => i.status === 'rejected' || i.status === 'no-origin');
+    if (failed.length) {
+      console.log('Failed items:');
+      for (const f of failed) {
+        console.log(`  ${f.item} — ${f.status === 'no-origin' ? 'no origin' : `rejected: ${f.rule}${f.at ? ` at ${f.at}` : ''}`}`);
+        // Rejected skills already printed their full scan report block above; only the short
+        // origin hints (for example the pinned-Python remediation) ride on the status line.
+        if (f.status === 'no-origin' && f.report) console.log(`    ${f.report}`);
+      }
+    }
+    if (failed.length || nestedFailed) process.exitCode = 1;
   } catch (err) {
     // A layer that never went live must not survive its own failed install.
     if (layerMode && !switched) rmSync(newLayerDir, { recursive: true, force: true });
@@ -836,7 +1022,12 @@ try {
   }
 } catch (err) {
   console.error(err.message);
+  fatal = true;
+  error = err.message;
   process.exitCode = 1; // not process.exit: finally below must still remove a cloned temp dir
 } finally {
+  // The server's per-item results, whatever the run's outcome; a refusal carries
+  // fatal: true and the items the gates judged before it.
+  if (process.env[PROVISION_ENV]) writeProvisionResults(process.env[PROVISION_ENV], { fatal, error, items });
   cleanupData(data);
 }

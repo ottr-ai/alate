@@ -239,30 +239,39 @@ test('sync: valid install mirrors exact bytes, idempotent, keeps stale files', (
   present(join(target, 'stale.md'));
 });
 
-test('sync: blank description installs nothing', () => {
+test('sync: blank description rejects only that rule', () => {
   const c = freshCase('sync-blank-desc');
   const data = dataWithRules(c, { 'a.md': ruleMd(OK_DESC), 'z.md': ruleMd('description:') });
   const target = join(c.dir, 'rules');
-  refused(runCli(c, 'sync.mjs', [target, '--data', data]), 'blank description must refuse');
-  absent(join(target, 'a.md'));
+  const r = runCli(c, 'sync.mjs', [target, '--data', data]);
+  refused(r, 'a rejected rule must fail the run');
+  assert.strictEqual(r.stderr, '', 'a per-item failure is not a refusal');
+  sameBytes(join(data, 'a.md'), join(target, 'a.md'), 'the clean rule still installs');
+  assert(r.stdout.includes('Failed items:\n  z.md — rejected: needs frontmatter with a description at z.md'), r.stdout);
   absent(join(target, 'z.md'));
 });
 
-test('sync: comment-only description installs nothing', () => {
+test('sync: comment-only description rejects only that rule', () => {
   const c = freshCase('sync-comment-desc');
   const data = dataWithRules(c, { 'a.md': ruleMd(OK_DESC), 'z.md': ruleMd('description: # see docs') });
   const target = join(c.dir, 'rules');
-  refused(runCli(c, 'sync.mjs', [target, '--data', data]), 'comment-only description must refuse');
-  absent(join(target, 'a.md'));
+  const r = runCli(c, 'sync.mjs', [target, '--data', data]);
+  refused(r, 'a rejected rule must fail the run');
+  assert.strictEqual(r.stderr, '', 'a per-item failure is not a refusal');
+  sameBytes(join(data, 'a.md'), join(target, 'a.md'), 'the clean rule still installs');
+  assert(r.stdout.includes('Failed items:\n  z.md — rejected: needs frontmatter with a description at z.md'), r.stdout);
   absent(join(target, 'z.md'));
 });
 
-test('sync: empty-quoted description installs nothing', () => {
+test('sync: empty-quoted description rejects only that rule', () => {
   const c = freshCase('sync-quoted-desc');
   const data = dataWithRules(c, { 'a.md': ruleMd(OK_DESC), 'z.md': ruleMd('description: ""') });
   const target = join(c.dir, 'rules');
-  refused(runCli(c, 'sync.mjs', [target, '--data', data]), 'empty quoted description must refuse');
-  absent(join(target, 'a.md'));
+  const r = runCli(c, 'sync.mjs', [target, '--data', data]);
+  refused(r, 'a rejected rule must fail the run');
+  assert.strictEqual(r.stderr, '', 'a per-item failure is not a refusal');
+  sameBytes(join(data, 'a.md'), join(target, 'a.md'), 'the clean rule still installs');
+  assert(r.stdout.includes('Failed items:\n  z.md — rejected: needs frontmatter with a description at z.md'), r.stdout);
   absent(join(target, 'z.md'));
 });
 
@@ -318,8 +327,11 @@ test('sync: quoted meaningful description with # is valid; empty quoted with tra
   const c2 = freshCase('sync-desc-quotes-bad');
   const data2 = dataWithRules(c2, { 'a.md': ruleMd(OK_DESC), 'z.md': ruleMd(`description: '' # note`) });
   const target2 = join(c2.dir, 'rules');
-  refused(runCli(c2, 'sync.mjs', [target2, '--data', data2]), 'empty quoted with trailing comment must refuse');
-  absent(join(target2, 'a.md'));
+  const r2 = runCli(c2, 'sync.mjs', [target2, '--data', data2]);
+  refused(r2, 'a rejected rule must fail the run');
+  assert.strictEqual(r2.stderr, '', 'a per-item failure is not a refusal');
+  present(join(target2, 'a.md')); // the clean rule still installs
+  assert(r2.stdout.includes('Failed items:\n  z.md — rejected: needs frontmatter with a description at z.md'), r2.stdout);
   absent(join(target2, 'z.md'));
 });
 

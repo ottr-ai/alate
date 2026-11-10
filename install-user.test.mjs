@@ -60,8 +60,12 @@ const run = (extra, h = home, env, cwd) => {
 const stubDir = join(tmp, 'stub');
 const callsLog = join(stubDir, 'calls.log');
 const scanned = process.platform !== 'win32';
-const writeStub = (exit, version = 'SkillSpector v2.13.0') => {
-  writeFileSync(join(stubDir, 'skillspector'), `#!/bin/sh\n[ "$1" = scan ] && printf '%s\\n' "$*" >> '${callsLog}'\nif [ "$1" = "--version" ]; then echo '${version}'; exit 0; fi\nexit ${exit}\n`);
+const writeStub = (exit, version = 'SkillSpector v2.13.0', rejectNames = []) => {
+  // rejectNames holds skill-dir basenames the stub rejects: it prints a findings-shaped
+  // report (a HIGH SC2 finding plus its Location line, the pinned scanner's real format)
+  // and exits 1 for those dirs only, so one named skill can fail while the others pass.
+  writeFileSync(join(stubDir, 'reject.list'), rejectNames.length ? `${rejectNames.join('\n')}\n` : '');
+  writeFileSync(join(stubDir, 'skillspector'), `#!/bin/sh\n[ "$1" = scan ] && printf '%s\\n' "$*" >> '${callsLog}'\nif [ "$1" = "--version" ]; then echo '${version}'; exit 0; fi\nif [ "$1" = scan ] && grep -qx "$(basename "$2")" '${stubDir}/reject.list' 2>/dev/null; then\n  printf '  HIGH: SC2 - External Script Fetching...\\n    Location: SKILL.md:7\\n'\n  exit 1\nfi\nexit ${exit}\n`);
   chmodSync(join(stubDir, 'skillspector'), 0o755);
 };
 if (scanned) {
@@ -185,27 +189,39 @@ try {
       writeFileSync(cachePath, `${JSON.stringify(passes, null, 2)}\n`);
       gatePut('omp/agent/config.yml', 'modelRoles:\n  default: changed/model\n');
       rmSync(join(gateData, 'user/omp/agent/AUX.md'));
-      const before = snapshot(target);
-      const childBefore = snapshot(childHome);
       const callsBefore = readFileSync(callsLog, 'utf8');
       result = run([...extra, '--force'], target);
-      assert.equal(result.status, 1, `invalid skills refuse ${layer ? 'layer' : 'normal'} installs`);
+      assert.equal(result.status, 1, `invalid skills fail the run but the good ones install (${layer ? 'layer' : 'normal'})`);
+      assert.ok(result.stdout.includes('Failed items:'), 'the failed items print as one stdout block');
       for (const [name] of malformedSkills) {
-        assert.ok(result.stderr.includes(`user/${malformedRel(name)}/SKILL.md`), `the refusal aggregates ${name}: ${result.stderr}`);
+        assert.ok(result.stdout.includes(`user/${malformedRel(name)}`), `the run reports ${name}: ${result.stdout}`);
+        assert.ok(result.stdout.includes('rejected:'), `the report carries the rule and position for ${name}: ${result.stdout}`);
       }
       for (const value of ['Private body sentinel.', 'Prefix sentinel.', 'Comment sentinel.', 'bad_name', 'café']) {
-        assert.ok(!result.stderr.includes(value), 'diagnostics do not print field or body text');
+        assert.ok(!result.stdout.includes(value) && !result.stderr.includes(value), 'diagnostics do not print field or body text');
       }
-      assert.deepEqual(snapshot(target), before, 'refusal changes no target file, manifest, cache, directory, or layer');
-      assert.deepEqual(snapshot(childHome), childBefore, 'refusal leaves the child home untouched');
-      assert.equal(readFileSync(callsLog, 'utf8'), callsBefore, 'structure refusal precedes every scanner invocation');
-      assert.ok(!/\d+ installed/.test(result.stdout), 'refusal has no install summary');
+      assert.match(result.stdout, /\d+ installed/, 'the surviving items still install');
+      // Layer mode writes into the new layer; in-place mode into the home itself.
+      const runRoot = layer ? realpathSync(join(target, '.alate', 'current')) : target;
+      assert.ok(readFileSync(join(runRoot, '.omp/agent/config.yml'), 'utf8').includes('changed/model'), 'the good snapshot change lands');
+      assert.ok(!existsSync(join(runRoot, '.omp/agent/skills/missing-entrypoint')), 'an excluded skill never lands');
+      // In layer mode the record rides in the layer it describes.
+      const recordPath = join(runRoot, '.alate', 'installed.json');
+      const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+      for (const [name] of malformedSkills) {
+        assert.ok(!Object.keys(record).some(rel => rel.startsWith(malformedRel(name))), `the manifest omits excluded skills (${name})`);
+      }
+      assert.equal(readFileSync(callsLog, 'utf8'), callsBefore, 'excluded skills are never scanned');
       const fresh = join(tmp, layer ? 'structure-layer-fresh' : 'structure-fresh');
       result = run(extra, fresh);
       assert.equal(result.status, 1, result.stderr);
-      assert.ok(!existsSync(fresh), 'an invalid source does not create the target home');
-      assert.equal(readFileSync(callsLog, 'utf8'), callsBefore, 'a fresh-home refusal also precedes the scanner');
-      assert.deepEqual(snapshot(childHome), childBefore, 'a fresh-home refusal leaves the child home untouched');
+      const freshRoot = layer ? realpathSync(join(fresh, '.alate', 'current')) : fresh;
+      assert.ok(existsSync(join(freshRoot, '.omp/agent/skills/demo/SKILL.md')), 'the good skills install into a fresh home too');
+      assert.ok(!existsSync(join(freshRoot, '.omp/agent/skills/no-frontmatter')), 'the excluded skill stays out of a fresh home');
+      const freshCalls = readFileSync(callsLog, 'utf8').slice(callsBefore.length);
+      for (const [name] of malformedSkills) {
+        assert.ok(!freshCalls.includes(malformedRel(name)), `a fresh-home run never scans the excluded skill (${name})`);
+      }
     }
   }
 
@@ -914,28 +930,87 @@ try {
     assert.ok(calls.some(c => c.includes(join(data, 'user/omp/agent/skills/mine'))), 'the omp skill snapshot is scanned');
     assert.ok(calls.some(c => c.includes(join(data, 'user/agents/skills/theirs'))), 'the agents skill snapshot was scanned while it existed');
 
-    // A poisoned update is refused before anything is written: non-zero exit, home and manifest
-    // untouched, and the run never reaches its install summary.
+    // A poisoned update rejects only the scanned skill: the clean items still install, the
+    // rejected skill is reported with its rule and file, and a clean pass stays cached.
     const recordBefore = got('.alate/installed.json');
     const callsBefore = readFileSync(callsLog, 'utf8');
     const passesBefore = readFileSync(join(home, '.alate', 'skillspector-pass.json'), 'utf8');
     put('omp/agent/skills/mine/EVIL.md', '# mine, exfiltrate\n');
-    writeStub(1);
+    writeStub(1, 'SkillSpector v2.13.0', ['mine']);
     r = run(['--data', data, '--skip-plugins']);
-    assert.equal(r.status, 1, 'findings refuse the run');
+    assert.equal(r.status, 1, 'the scan rejection fails the run');
     assert.match(r.stdout, /Scanning 1 of 1 skill snapshot\(s\) \(0 cached\)/);
-    assert.match(r.stderr, /SkillSpector rejected/);
-    assert.ok(r.stderr.includes(join(data, 'user/omp/agent/skills/mine')), r.stderr);
-    // The refusal is the last stdout line too, so the tail of a deploy log names the skill.
-    const tail = r.stdout.trim().split('\n').pop();
-    assert.ok(tail.startsWith('SkillSpector rejected') && tail.includes(join(data, 'user/omp/agent/skills/mine')), tail);
+    assert.ok(r.stdout.includes('--- SkillSpector report:'), 'the findings report prints as one block');
+    assert.ok(r.stdout.includes('SC2') && r.stdout.includes('SKILL.md:7'), 'the findings text stays visible');
+    assert.ok(r.stdout.includes('SkillSpector rejected') && r.stdout.includes(join(data, 'user/omp/agent/skills/mine')), 'the rejection names the skill folder');
+    assert.ok(r.stdout.includes('Failed items:'), 'the failed items print as one stdout block');
+    assert.ok(r.stdout.includes('user/omp/agent/skills/mine — rejected: SC2 at SKILL.md:7'), 'the failed item carries rule and position');
     const callsGrown = readFileSync(callsLog, 'utf8').slice(callsBefore.length);
     assert.equal(callsGrown.trim().split('\n').filter(Boolean).length, 1, 'only the changed skill is scanned');
     assert.ok(callsGrown.includes(join(data, 'user/omp/agent/skills/mine')), callsGrown);
     assert.equal(readFileSync(join(home, '.alate', 'skillspector-pass.json'), 'utf8'), passesBefore, 'a failed scan is never cached');
-    assert.ok(!/\d+ installed/.test(r.stdout), 'nothing was installed');
     assert.ok(!existsSync(join(home, '.omp/agent/skills/mine/EVIL.md')), 'the poisoned file never lands');
-    assert.equal(got('.alate/installed.json'), recordBefore, 'the manifest is untouched');
+    assert.ok(!existsSync(join(home, '.omp/agent/skills/mine')), 'the installed record-matching copy of the rejected skill is deleted');
+    const recordAfter = JSON.parse(readFileSync(join(home, '.alate/installed.json'), 'utf8'));
+    assert.ok(!Object.keys(recordAfter).some(rel => rel.startsWith('omp/agent/skills/mine')), 'the manifest drops the rejected skill');
+    assert.ok(Object.keys(JSON.parse(recordBefore)).some(rel => rel.startsWith('omp/agent/skills/mine')), 'the fixture had mine installed');
+
+    // A copy that changed on the machine stays when its scan rejects it: the deletion rule
+    // keeps a changed copy with the existing note, and EVIL.md still never lands.
+    rmSync(join(data, 'user/omp/agent/skills/mine/EVIL.md'));
+    writeStub(0);
+    put('omp/agent/skills/mine/SKILL.md', skillText('mine', '# mine, scan-clean\n'));
+    r = run(['--data', data, '--skip-plugins']);
+    assert.equal(r.status, 0, r.stderr);
+    const live = '# mine, edited on the machine\n';
+    writeFileSync(join(home, '.omp/agent/skills/mine/SKILL.md'), live);
+    put('omp/agent/skills/mine/EVIL.md', '# mine, exfiltrate\n');
+    writeStub(1, 'SkillSpector v2.13.0', ['mine']);
+    r = run(['--data', data, '--skip-plugins']);
+    assert.equal(r.status, 1, 'the rejection still fails the run');
+    assert.equal(got('.omp/agent/skills/mine/SKILL.md'), live, 'a machine-changed copy of a rejected skill stays');
+    assert.ok(r.stdout.includes('changed here, kept:'), 'the kept copy carries the existing note');
+    assert.ok(!existsSync(join(home, '.omp/agent/skills/mine/EVIL.md')), 'the poisoned file never lands');
+
+    // Restore a clean, installed state for the scanner-resolution blocks below.
+    writeStub(0);
+    rmSync(join(data, 'user/omp/agent/skills/mine/EVIL.md'));
+    rmSync(join(home, '.omp/agent/skills/mine'), { recursive: true, force: true });
+    put('omp/agent/skills/mine/SKILL.md', skillText('mine', '# mine, v6\n'));
+    r = run(['--data', data, '--skip-plugins']);
+    assert.equal(r.status, 0, r.stderr);
+
+    // Acceptance (a): one bad skill among good ones. Nine good skills install; the bad one
+    // is reported with its rule and file; the run still exits 1.
+    const scanAData = join(tmp, 'data-scan-a');
+    const scanAHome = join(tmp, 'home-scan-a');
+    const putA = (rel, text) => { mkdirSync(dirname(join(scanAData, 'user', rel)), { recursive: true }); writeFileSync(join(scanAData, 'user', rel), text); };
+    putA('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    for (let i = 0; i < 9; i++) putA(`omp/agent/skills/good-${i}/SKILL.md`, skillText(`good-${i}`));
+    putA('omp/agent/skills/bad-one/SKILL.md', skillText('bad-one'));
+    writeStub(0, 'SkillSpector v2.13.0', ['bad-one']);
+    r = run(['--data', scanAData, '--skip-plugins'], scanAHome);
+    assert.equal(r.status, 1, 'the bad skill fails the run');
+    for (let i = 0; i < 9; i++) {
+      assert.equal(readFileSync(join(scanAHome, `.omp/agent/skills/good-${i}/SKILL.md`), 'utf8'), skillText(`good-${i}`), `good-${i} installs beside a rejected skill`);
+    }
+    assert.ok(!existsSync(join(scanAHome, '.omp/agent/skills/bad-one')), 'the bad skill never lands');
+    assert.ok(r.stdout.includes('user/omp/agent/skills/bad-one — rejected: SC2 at SKILL.md:7'), 'the bad skill is reported with its rule and file');
+    assert.ok(r.stdout.includes('Failed items:'), 'the failed items print as one stdout block');
+
+    // A scanner error (exit 2) is a broken scanner: it cannot produce verdicts, so the whole
+    // run refuses and nothing is written.
+    putA('omp/agent/skills/good-0/SKILL.md', skillText('good-0', '# good-0, v2\n'));
+    writeStub(2);
+    const aHomeBefore = (() => { const entries = []; const visit = p => { for (const e of readdirSync(p, { withFileTypes: true })) { entries.push(join(p, e.name)); if (e.isDirectory()) visit(join(p, e.name)); } }; visit(scanAHome); return entries.sort().join('\n'); })();
+    const aPassesBefore = readFileSync(join(scanAHome, '.alate', 'skillspector-pass.json'), 'utf8');
+    r = run(['--data', scanAData, '--skip-plugins'], scanAHome);
+    assert.equal(r.status, 1, 'a scanner error refuses the run');
+    assert.match(r.stderr, /SkillSpector scan of .* failed \(exit 2\)/);
+    assert.ok(!/\d+ installed/.test(r.stdout), 'a scanner error installs nothing');
+    const aHomeAfter = (() => { const entries = []; const visit = p => { for (const e of readdirSync(p, { withFileTypes: true })) { entries.push(join(p, e.name)); if (e.isDirectory()) visit(join(p, e.name)); } }; visit(scanAHome); return entries.sort().join('\n'); })();
+    assert.equal(aHomeAfter, aHomeBefore, 'a scanner error changes no target file');
+    assert.equal(readFileSync(join(scanAHome, '.alate', 'skillspector-pass.json'), 'utf8'), aPassesBefore, 'a scanner error writes no cache entry');
 
     // A missing scanner refuses too: fail closed, and the error names the pinned build.
     r = run(['--data', data, '--skip-plugins'], home, { ...process.env, SKILLSPECTOR_VENV: join(tmp, 'no-venv') });
@@ -957,15 +1032,6 @@ try {
     assert.match(r.stderr, /SkillSpector@v2\.13\.0/);
     assert.ok(!/\d+ installed/.test(r.stdout), 'nothing was installed');
     assert.ok(!existsSync(join(home, '.omp/agent/skills/mine/EVIL.md')));
-
-    // A clean snapshot installs as before, and the blocked state carried no damage.
-    writeStub(0);
-    rmSync(join(data, 'user/omp/agent/skills/mine/EVIL.md'));
-    put('omp/agent/skills/mine/SKILL.md', skillText('mine', '# mine, v6\n'));
-    r = run(['--data', data, '--skip-plugins']);
-    assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /1 installed/);
-    assert.equal(got(mine), skillText('mine', '# mine, v6\n'));
 
     // The pinned venv is preferred over PATH, but only when the trust gate passes: it must
     // be root-owned on POSIX and live outside the home install-user writes into, because the
@@ -1322,14 +1388,24 @@ try {
     const passFile = join(cacheHome, '.alate', 'skillspector-pass.json');
     const cachePassesBefore = readFileSync(passFile, 'utf8');
     writeFileSync(join(cacheData, 'user/omp/agent/skills/beta/SKILL.md'), skillText('beta', '# beta, v3\n'));
-    writeStub(1);
+    writeStub(1, 'SkillSpector v2.13.0', ['beta']);
     r = run(['--data', cacheData, '--skip-plugins'], cacheHome);
-    assert.equal(r.status, 1, 'findings refuse the run');
-    assert.match(r.stderr, /SkillSpector rejected/);
-    assert.ok(r.stderr.includes(join(cacheData, 'user/omp/agent/skills/beta')), r.stderr);
+    assert.equal(r.status, 1, 'findings fail the run');
+    assert.ok(r.stdout.includes('SkillSpector rejected') && r.stdout.includes(join(cacheData, 'user/omp/agent/skills/beta')), r.stdout);
     assert.equal(readFileSync(passFile, 'utf8'), cachePassesBefore, 'a failed scan is never cached');
     const failTail = r.stdout.trim().split('\n').pop();
-    assert.ok(failTail.startsWith('SkillSpector rejected') && failTail.includes(join(cacheData, 'user/omp/agent/skills/beta')), failTail);
+    assert.ok(failTail.includes('user/omp/agent/skills/beta — rejected: SC2 at SKILL.md:7'), failTail);
+    // The other eight skills still install and cache while beta alone is rejected.
+    const cacheRecord = JSON.parse(readFileSync(join(cacheHome, '.alate/installed.json'), 'utf8'));
+    assert.ok(!Object.keys(cacheRecord).some(rel => rel.startsWith('omp/agent/skills/beta')), 'the rejected skill leaves the manifest');
+    assert.ok(Object.keys(cacheRecord).filter(rel => rel.startsWith('omp/agent/skills/')).length >= 8, 'the other skills stay recorded');
+    // A later clean run rescans beta (no negative caching) and installs it.
+    writeStub(0);
+    writeFileSync(join(cacheData, 'user/omp/agent/skills/beta/SKILL.md'), skillText('beta', '# beta, v4\n'));
+    r = run(['--data', cacheData, '--skip-plugins'], cacheHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Scanning 1 of 9 skill snapshot\(s\) \(8 cached\)/);
+    assert.equal(readFileSync(join(cacheHome, '.omp/agent/skills/beta/SKILL.md'), 'utf8'), skillText('beta', '# beta, v4\n'));
 
     // A scanner-version change rescans everything: the same bytes under a different pin are
     // different keys, proved through a copy of the script pinned one version higher.
@@ -1374,14 +1450,18 @@ try {
     assert.equal(readFileSync(join(linkHome, '.omp/agent/skills/mine/run.sh'), 'utf8'), 'echo ok\n', 'the install copies the resolved target bytes');
     const linkPasses = readFileSync(join(linkHome, '.alate', 'skillspector-pass.json'), 'utf8');
     writeFileSync(join(linkData, 'user/omp/agent/notes/run.sh'), 'EVIL\n');
-    writeStub(1);
+    writeStub(1, 'SkillSpector v2.13.0', ['mine']);
     r = run(['--data', linkData, '--skip-plugins'], linkHome);
-    assert.equal(r.status, 1, 'a poisoned link target refuses the run');
+    assert.equal(r.status, 1, 'a poisoned link target fails the run');
     assert.match(r.stdout, /Scanning 1 of 1 skill snapshot\(s\) \(0 cached\)/, 'the changed target bytes miss the cache');
-    assert.match(r.stderr, /SkillSpector rejected/);
-    assert.ok(r.stderr.includes(join(linkData, 'user/omp/agent/skills/mine')), r.stderr);
+    assert.ok(r.stdout.includes('SkillSpector rejected') && r.stdout.includes(join(linkData, 'user/omp/agent/skills/mine')), r.stdout);
     assert.equal(readFileSync(join(linkHome, '.alate', 'skillspector-pass.json'), 'utf8'), linkPasses, 'a failed scan is never cached');
-    assert.equal(readFileSync(join(linkHome, '.omp/agent/skills/mine/run.sh'), 'utf8'), 'echo ok\n', 'the poisoned bytes never land');
+    assert.ok(!existsSync(join(linkHome, '.omp/agent/skills/mine')), 'the poisoned skill is deleted like any rejected one');
+    // Restore the clean state the version-pin blocks below count on.
+    writeStub(0);
+    writeFileSync(join(linkData, 'user/omp/agent/notes/run.sh'), 'echo ok\n');
+    r = run(['--data', linkData, '--skip-plugins'], linkHome);
+    assert.equal(r.status, 0, r.stderr);
 
     // Repro 2 (framing): a.bin holding "X" plus "f\0z.sh\0EVIL\n" must not key the same as a
     // re-split {a.bin: X, z.sh: EVIL}; the rel\0size\0sha256 framing keeps every entry
@@ -1401,15 +1481,14 @@ try {
     const framePasses = readFileSync(join(frameHome, '.alate', 'skillspector-pass.json'), 'utf8');
     writeFileSync(join(frameData, 'user/omp/agent/skills/mine/a.bin'), 'X');
     writeFileSync(join(frameData, 'user/omp/agent/skills/mine/z.sh'), 'EVIL\n');
-    writeStub(1);
+    writeStub(1, 'SkillSpector v2.13.0', ['mine']);
     r = run(['--data', frameData, '--skip-plugins'], frameHome);
-    assert.equal(r.status, 1, 'the re-split tree refuses the run');
+    assert.equal(r.status, 1, 'the re-split tree fails the run');
     assert.match(r.stdout, /Scanning 1 of 1 skill snapshot\(s\) \(0 cached\)/, 'the re-split bytes miss the cache');
-    assert.match(r.stderr, /SkillSpector rejected/);
-    assert.ok(r.stderr.includes(join(frameData, 'user/omp/agent/skills/mine')), r.stderr);
+    assert.ok(r.stdout.includes('SkillSpector rejected') && r.stdout.includes(join(frameData, 'user/omp/agent/skills/mine')), r.stdout);
     assert.equal(readFileSync(join(frameHome, '.alate', 'skillspector-pass.json'), 'utf8'), framePasses, 'a failed scan is never cached');
     assert.ok(!existsSync(join(frameHome, '.omp/agent/skills/mine/z.sh')), 'the split-out file never lands');
-    assert.equal(readFileSync(join(frameHome, '.omp/agent/skills/mine/a.bin'), 'utf8'), fused, 'the installed bytes are untouched');
+    assert.ok(!existsSync(join(frameHome, '.omp/agent/skills/mine')), 'the rejected skill is deleted like any rejected one');
 
     // A pre-token entry misses exactly once: stripping the key's format token (the only
     // difference an older alate's pass file has) forces one rescan, and the rewritten pass
@@ -1808,31 +1887,34 @@ try {
       `modelRoles:\n  default: mine\n${blocksL}`, 'a changed pre-strip home keeps the machine edit, the entry still goes');
     putL('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm-5.3\n');
 
-    // A failed scan deletes the failed layer folder and keeps the old current: a busy board
-    // provisions while turns run, and a bad skill must not take the live layer down.
+    // A layer scan rejection removes the rejected skill from the fresh layer and from its
+    // manifest, and the layer still goes live; the run exits 1 and reports the item.
     const layerHome2 = join(tmpReal, 'layer-home-2');
     r = runL(layerHome2, ['--skip-plugins', '--layer']);
     assert.equal(r.status, 0, r.stderr);
     const base2 = join(layerHome2, '.alate');
     putL('omp/agent/skills/mine/EVIL.md', '# evil\n');
-    writeStub(1);
+    writeStub(1, 'SkillSpector v2.13.0', ['mine']);
     r = runL(layerHome2, ['--skip-plugins', '--layer']);
-    assert.equal(r.status, 1, 'a failed scan refuses the run');
-    assert.match(r.stderr, /SkillSpector rejected/);
-    assert.equal(realpathSync(join(base2, 'current')), join(base2, 'layers', 'nogit-1'), 'a failed scan keeps the old current');
-    assert.deepEqual(readdirSync(join(base2, 'layers')), ['nogit-1'], 'the failed layer folder is gone');
-    assert.equal(lgot(join(base2, 'layers', 'nogit-1'), '.omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm-5.3\n');
+    assert.equal(r.status, 1, 'the rejected skill fails the run');
+    const live2 = realpathSync(join(base2, 'current'));
+    assert.notEqual(live2, join(base2, 'layers', 'nogit-1'), 'the new layer still goes live');
+    assert.equal(lgot(live2, '.omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm-5.3\n', 'the clean items land');
+    assert.ok(!existsSync(join(live2, '.omp/agent/skills/mine')), 'the rejected skill is removed from the fresh layer');
+    assert.ok(r.stdout.includes('user/omp/agent/skills/mine — rejected:'), r.stdout);
+    const layerRecord2 = JSON.parse(readFileSync(join(live2, '.alate', 'installed.json'), 'utf8'));
+    assert.ok(!Object.keys(layerRecord2).some(rel => rel.startsWith('omp/agent/skills/mine')), 'the manifest never names a file the layer lacks');
     writeStub(0);
     rmSync(join(ldata, 'user/omp/agent/skills/mine/EVIL.md'));
 
-    // A failed rules install behaves the same: fail closed, old current stays, no layer left.
+    // A nested sync fatal refusal still aborts the layer: old current stays, no layer left.
     writeFileSync(join(ldata, 'bad-rule.md'), 'no frontmatter\n');
     r = runL(layerHome2, ['--skip-plugins', '--layer']);
-    assert.equal(r.status, 1, 'a failed rules install refuses the run');
+    assert.equal(r.status, 1, 'a fatal rules refusal aborts the layer');
     assert.match(r.stderr, /rules install failed/);
     assert.match(r.stderr, /needs frontmatter with a description/);
-    assert.equal(realpathSync(join(base2, 'current')), join(base2, 'layers', 'nogit-1'));
-    assert.deepEqual(readdirSync(join(base2, 'layers')), ['nogit-1']);
+    assert.equal(realpathSync(join(base2, 'current')), live2);
+    assert.deepEqual(readdirSync(join(base2, 'layers')).sort(), ['nogit-1', live2.split(sep).pop()].sort());
     rmSync(join(ldata, 'bad-rule.md'));
 
     // current is a real directory: refuse before any write, migration is out of scope.
@@ -1939,8 +2021,9 @@ try {
   // instructions past human review (the U+202E bidi override below). omp loads agent-context
   // Markdown elsewhere in the snapshot as always-on instructions too (AGENTS.md, RULES.md,
   // SYSTEM.md, CLAUDE.md), so every .md/.mdc gets the hidden-character scan; only the
-  // snapshot's own rules dir additionally needs the frontmatter description. The refusal
-  // happens before any write, and non-Markdown content stays unscanned.
+  // snapshot's own rules dir additionally needs the frontmatter description. A file with a
+  // hidden character is rejected per item — left out, reported — while the clean files
+  // still install. Non-Markdown content stays unscanned.
   const backdoorData = join(tmp, 'data-backdoor');
   const backdoorHome = join(tmp, 'home-backdoor');
   const putRule = (rel, text) => { mkdirSync(dirname(join(backdoorData, 'user', rel)), { recursive: true }); writeFileSync(join(backdoorData, 'user', rel), text); };
@@ -1952,13 +2035,16 @@ try {
   putRule('omp/agent/RULES.md', 'Rule\u202Eoverride\n');
   putRule('notes/hidden.md', 'notes\u202Efile\n');
   r = runBackdoor(['--skip-plugins']);
-  assert.equal(r.status, 1, 'a hidden character in any snapshot Markdown refuses the restore');
-  assert.match(r.stderr, /Nothing installed\. Fix:/);
-  assert.match(r.stderr, /user\/omp\/agent\/rules\/backdoor\.md:5:10: hidden character U\+202E/);
-  assert.match(r.stderr, /user\/omp\/agent\/AGENTS\.md:1:8: hidden character U\+202E/);
-  assert.match(r.stderr, /user\/omp\/agent\/RULES\.md:1:5: hidden character U\+202E/);
-  assert.match(r.stderr, /user\/notes\/hidden\.md:1:6: hidden character U\+202E/);
-  assert.ok(!existsSync(backdoorHome), 'the refusal happens before any write');
+  assert.equal(r.status, 1, 'a hidden character in any snapshot Markdown fails the run');
+  assert.ok(r.stdout.includes('Failed items:'), 'the failed items print as one stdout block');
+  for (const item of ['user/omp/agent/rules/backdoor.md:5:10', 'user/omp/agent/AGENTS.md:1:8', 'user/omp/agent/RULES.md:1:5', 'user/notes/hidden.md:1:6']) {
+    assert.ok(r.stdout.includes(item) && r.stdout.includes('rejected: hidden character U+202E'), `the rejected file is reported with rule and position: ${item}`);
+  }
+  assert.equal(gotRule('.omp/agent/rules/clean.md'), '---\ndescription: clean rule\n---\n\nClean body\n', 'the clean rule installs beside the rejected ones');
+  assert.ok(!existsSync(join(backdoorHome, '.omp/agent/rules/backdoor.md')), 'the rejected rule never lands');
+  assert.ok(!existsSync(join(backdoorHome, '.omp/agent/AGENTS.md')), 'the rejected AGENTS.md never lands');
+  assert.ok(!existsSync(join(backdoorHome, '.omp/agent/RULES.md')), 'the rejected RULES.md never lands');
+  assert.ok(!existsSync(join(backdoorHome, '.notes/hidden.md')), 'the rejected note never lands');
   rmSync(join(backdoorData, 'user/omp/agent/rules/backdoor.md'));
   rmSync(join(backdoorData, 'user/omp/agent/AGENTS.md'));
   rmSync(join(backdoorData, 'user/omp/agent/RULES.md'));
@@ -1966,21 +2052,153 @@ try {
   putRule('notes/hidden.txt', 'notes\u202Efile\n'); // not Markdown: the gate must not scan it
   r = runBackdoor(['--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /2 installed/);
-  assert.equal(gotRule('.omp/agent/rules/clean.md'), '---\ndescription: clean rule\n---\n\nClean body\n', 'a clean snapshot rule installs');
+  assert.match(r.stdout, /1 installed/);
   assert.equal(gotRule('.notes/hidden.txt'), 'notes\u202Efile\n', 'a non-Markdown file with a hidden character installs unscanned');
   putRule('omp/agent/rules/clean.md', 'no frontmatter\n');
   r = runBackdoor(['--skip-plugins']);
-  assert.equal(r.status, 1, 'a snapshot rule without a description refuses like a data-root rule');
-  assert.match(r.stderr, /user\/omp\/agent\/rules\/clean\.md: needs frontmatter with a description/);
-  assert.equal(gotRule('.omp/agent/rules/clean.md'), '---\ndescription: clean rule\n---\n\nClean body\n', 'the refusal leaves the installed rule alone');
-  // The rule gate covers .mdc too (omp loads rules/*.mdc): the hidden-character refusal
-  // names the snapshot path like the .md case above.
+  assert.equal(r.status, 1, 'a snapshot rule without a description is rejected like a data-root rule');
+  assert.ok(r.stdout.includes('user/omp/agent/rules/clean.md — rejected: needs frontmatter with a description'), r.stdout);
+  assert.ok(!existsSync(join(backdoorHome, '.omp/agent/rules/clean.md')), 'the installed record-matching copy of the rejected rule is deleted');
+  putRule('omp/agent/rules/clean.md', '---\ndescription: clean rule\n---\n\nClean body\n');
+  // The rule gate covers .mdc too (omp loads rules/*.mdc): the hidden-character rejection
+  // names the snapshot path like the .md case above, and the clean rule still installs.
   putRule('omp/agent/rules/backdoor.mdc', '---\ndescription: mdc rule\n---\n\nFlip\u202Eit\n');
   r = runBackdoor(['--skip-plugins']);
-  assert.equal(r.status, 1, 'a hidden character in a .mdc snapshot rule refuses the restore');
-  assert.match(r.stderr, /user\/omp\/agent\/rules\/backdoor\.mdc:5:5: hidden character U\+202E/);
-  assert.equal(gotRule('.omp/agent/rules/clean.md'), '---\ndescription: clean rule\n---\n\nClean body\n', 'the .mdc refusal leaves the installed rule alone');
+  assert.equal(r.status, 1, 'a hidden character in a .mdc snapshot rule is rejected per item');
+  assert.ok(r.stdout.includes('user/omp/agent/rules/backdoor.mdc — rejected: hidden character U+202E at user/omp/agent/rules/backdoor.mdc:5:5'), r.stdout);
+  assert.equal(gotRule('.omp/agent/rules/clean.md'), '---\ndescription: clean rule\n---\n\nClean body\n', 'the clean rule installs beside the rejected .mdc');
+  assert.ok(!existsSync(join(backdoorHome, '.omp/agent/rules/backdoor.mdc')), 'the rejected .mdc never lands');
+
+  // The origin gate (upstreams.json) is judged per item: a skill with no recorded origin is
+  // left out and reported, the covered items install, an uncovered MCP server is only a
+  // report (mcp.json itself still installs), and a broken gate refuses the whole run.
+  if (scanned) {
+    const ogData = join(tmp, 'data-origin');
+    const ogHome = join(tmp, 'home-origin');
+    const putO = (rel, text) => { mkdirSync(dirname(join(ogData, 'user', rel)), { recursive: true }); writeFileSync(join(ogData, 'user', rel), text); };
+    putO('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putO('omp/agent/skills/covered/SKILL.md', skillText('covered'));
+    putO('omp/agent/skills/orphan/SKILL.md', skillText('orphan'));
+    putO('omp/agent/mcp.json', JSON.stringify({ mcpServers: { mystery: { command: 'unknown-mcp-server' } } }));
+    const writeUpstreams = payload => writeFileSync(join(ogData, 'upstreams.json'), `${JSON.stringify(payload, null, 2)}\n`);
+    writeUpstreams({ items: [{ name: 'skills', kind: 'skill', origin: 'https://github.com/example/repo', paths: ['user/omp/agent/skills/covered'] }], own: [] });
+    writeStub(0);
+    r = run(['--data', ogData, '--skip-plugins'], ogHome);
+    assert.equal(r.status, 1, 'an uncovered origin fails the run but not the install');
+    assert.ok(existsSync(join(ogHome, '.omp/agent/skills/covered/SKILL.md')), 'the covered skill installs');
+    assert.ok(!existsSync(join(ogHome, '.omp/agent/skills/orphan')), 'the uncovered skill never lands');
+    assert.ok(r.stdout.includes('user/omp/agent/skills/orphan — no origin'), 'the uncovered skill is reported');
+    assert.ok(r.stdout.includes('user/omp/agent/mcp.json "mystery" — no origin'), 'the uncovered MCP server is reported');
+    assert.ok(existsSync(join(ogHome, '.omp/agent/mcp.json')), 'mcp.json itself still installs');
+    // Losing coverage deletes a previously installed, record-matching copy.
+    writeUpstreams({ items: [{ name: 'skills', kind: 'skill', origin: 'https://github.com/example/repo', paths: [] }], own: [] });
+    r = run(['--data', ogData, '--skip-plugins'], ogHome);
+    assert.equal(r.status, 1);
+    assert.ok(!existsSync(join(ogHome, '.omp/agent/skills/covered')), 'the now-uncovered installed copy is deleted');
+    assert.ok(r.stdout.includes('user/omp/agent/skills/covered — no origin'), 'the lost coverage is reported');
+    // An unreadable upstreams.json refuses the whole run: no origin verdict is possible.
+    writeFileSync(join(ogData, 'upstreams.json'), '{');
+    const ogFatalHome = join(tmp, 'home-origin-fatal');
+    r = run(['--data', ogData, '--skip-plugins'], ogFatalHome);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /Nothing installed\. Fix:/);
+    assert.ok(!existsSync(ogFatalHome), 'a broken origin gate writes nothing');
+    // A structurally broken entry refuses too.
+    writeUpstreams({ items: [{ name: 'x', kind: 'no-such-kind', origin: 'https://github.com/a/b' }] });
+    r = run(['--data', ogData, '--skip-plugins'], ogFatalHome);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /unknown kind/);
+    assert.ok(!existsSync(ogFatalHome), 'a structurally broken gate writes nothing');
+  }
+
+  // The machine-readable results file: with ALATE_PROVISION_RESULTS set, every run writes
+  // one JSON payload — success, per-item failures, and fatal refusals alike.
+  if (scanned) {
+    const rfData = join(tmp, 'data-results');
+    const rfHome = join(tmp, 'home-results');
+    const putR = (rel, text) => { mkdirSync(dirname(join(rfData, 'user', rel)), { recursive: true }); writeFileSync(join(rfData, 'user', rel), text); };
+    putR('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putR('omp/agent/skills/fine/SKILL.md', skillText('fine'));
+    putR('omp/plugins/package.json', '{"dependencies":{}}\n');
+    putR('omp/plugins/bun.lock', '{}\n');
+    mkdirSync(join(rfData, 'workers', 'web'), { recursive: true });
+    writeFileSync(join(rfData, 'workers', 'web', 'apt.txt'), 'libnss3\n');
+    const resultsPath = join(tmp, 'results-user.json');
+    const withResults = { ALATE_PROVISION_RESULTS: resultsPath };
+    writeStub(0);
+    // Success: fatal false, one entry per item, worker and plugin entries included.
+    r = run(['--data', rfData, '--skip-plugins'], rfHome, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ...withResults });
+    assert.equal(r.status, 0, r.stderr);
+    let results = JSON.parse(readFileSync(resultsPath, 'utf8'));
+    assert.equal(results.fatal, false);
+    assert.equal(results.error, null);
+    const byKey = Object.fromEntries(results.items.map(i => [i.item, i.status]));
+    assert.equal(byKey['user/omp/agent/config.yml'], 'installed');
+    assert.equal(byKey['user/omp/agent/skills/fine'], 'installed');
+    assert.equal(byKey['user/omp/plugins'], 'unchanged', 'skipped plugins report unchanged');
+    assert.equal(byKey['workers/web/apt.txt'], 'installed');
+    // Per-item failure: fatal stays false, the rejected item carries rule, position, report.
+    putR('omp/agent/skills/bad-r/SKILL.md', skillText('bad-r'));
+    writeStub(0, 'SkillSpector v2.13.0', ['bad-r']);
+    rmSync(resultsPath, { force: true });
+    r = run(['--data', rfData, '--skip-plugins'], rfHome, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ...withResults });
+    assert.equal(r.status, 1);
+    results = JSON.parse(readFileSync(resultsPath, 'utf8'));
+    assert.equal(results.fatal, false);
+    const bad = results.items.find(i => i.item === 'user/omp/agent/skills/bad-r');
+    assert.equal(bad.status, 'rejected');
+    assert.equal(bad.rule, 'SC2');
+    assert.equal(bad.at, 'SKILL.md:7');
+    assert.ok(bad.report.includes('SC2'), 'the report text travels with the item');
+    assert.equal(results.items.find(i => i.item === 'user/omp/agent/skills/fine').status, 'unchanged');
+    // Fatal refusal: fatal true with the error, items from before the refusal.
+    rmSync(resultsPath, { force: true });
+    r = run(['--data', rfData, '--skip-plugins'], rfHome, { PATH: '/usr/bin:/bin', SKILLSPECTOR_VENV: join(tmp, 'no-venv'), SKILLSPECTOR_BIN: '', ALATE_DATA: join(tmp, 'no-aldata'), ALATE_PROVISION_RESULTS: resultsPath, HOME: childHome, USERPROFILE: childHome });
+    assert.equal(r.status, 1);
+    results = JSON.parse(readFileSync(resultsPath, 'utf8'));
+    assert.equal(results.fatal, true);
+    assert.match(results.error, /skillspector not found/);
+  }
+
+  // Layer mode per item: a skill the layer scan rejects is removed from the fresh layer and
+  // from the manifest before the switch, and the layer still goes live; a nested sync
+  // per-item failure keeps the layer but marks the run failed.
+  if (scanned) {
+    const lData = join(tmp, 'data-layer-item');
+    const lHome = join(tmp, 'home-layer-item');
+    const putL = (rel, text) => { mkdirSync(dirname(join(lData, 'user', rel)), { recursive: true }); writeFileSync(join(lData, 'user', rel), text); };
+    putL('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putL('omp/agent/skills/good-l/SKILL.md', skillText('good-l'));
+    putL('omp/agent/skills/bad-l/SKILL.md', skillText('bad-l'));
+    writeStub(0, 'SkillSpector v2.13.0', ['bad-l']);
+    r = run(['--data', lData, '--skip-plugins', '--layer'], lHome);
+    assert.equal(r.status, 1, 'the layer rejection fails the run');
+    const lLayer = realpathSync(join(lHome, '.alate', 'current'));
+    assert.ok(existsSync(join(lLayer, '.omp/agent/skills/good-l/SKILL.md')), 'the good skill installs into the layer');
+    assert.ok(!existsSync(join(lLayer, '.omp/agent/skills/bad-l')), 'the rejected skill is removed from the fresh layer');
+    const lRecord = JSON.parse(readFileSync(join(lLayer, '.alate', 'installed.json'), 'utf8'));
+    assert.ok(!Object.keys(lRecord).some(rel => rel.startsWith('omp/agent/skills/bad-l')), 'the manifest never names a file the layer lacks');
+    assert.ok(r.stdout.includes('user/omp/agent/skills/bad-l — rejected: SC2 at SKILL.md:7'), 'the layer rejection is reported');
+    assert.ok(r.stdout.includes('switched'), 'the layer still switches');
+    // A nested sync per-item failure (a hidden-character rule in the data root) does not
+    // abort the layer: the good rules stay, the bad one is reported, the run exits 1.
+    const lResults = join(tmp, 'results-layer.json');
+    writeFileSync(join(lData, 'oops.md'), 'Bad\u202Erule\n');
+    rmSync(lResults, { force: true });
+    r = run(['--data', lData, '--skip-plugins', '--layer'], lHome, {
+      ...process.env,
+      PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`,
+      SKILLSPECTOR_VENV: join(tmp, 'no-venv'),
+      ALATE_PROVISION_RESULTS: lResults,
+    });
+    assert.equal(r.status, 1, 'a nested per-item failure keeps the run failed');
+    const lLayer2 = realpathSync(join(lHome, '.alate', 'current'));
+    assert.ok(existsSync(join(lLayer2, '.omp/agent/rules/zai-glm.md')) || readdirSync(join(lLayer2, '.omp/agent/rules')).length > 0, 'the good rules still land in the layer');
+    const nested = JSON.parse(readFileSync(lResults, 'utf8'));
+    assert.equal(nested.fatal, false);
+    assert.ok(nested.items.some(i => i.item === 'oops.md' && i.status === 'rejected'), 'the nested rejection merges into the results items');
+  }
+
 
   // The server image must carry the scanner the gate refuses to run without; the two pins
   // must not drift (an unpinned image made every containerized provision fail). Under the

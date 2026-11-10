@@ -2,6 +2,8 @@
 // Installs the data repo's rule files into omp's user rules dir. The tool checkout ships no rules.
 // A rule the data repo drops is deleted from the target when it still holds the recorded content;
 // a rule alate never installed is only reported.
+// Per-item contract (specs/provision-item-by-item.md): one rejected rule or one uncovered origin
+// stays out and is reported; every item that passed still installs. Global refusals stay fatal.
 // Usage: node sync.mjs [targetDir] [--data <dir>|--repo <owner/name[@ref]>]
 //   targetDir default: $PI_CODING_AGENT_DIR/rules, else ~/.omp/agent/rules
 //   data dir: --data <dir>, else --repo (shallow clone), else $ALATE_DATA, else ../agent-data beside this checkout
@@ -9,12 +11,15 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkS
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { assertSourceInside, checkDestination, cleanupData, die, fingerprint, parseArgs, resolveDataDir, ruleProblems, SNAP_AGENTS_DIR, unwrapCmd } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, cleanupData, describeProblem, die, fingerprint, NOT_RULES, originGate, parseArgs, PROVISION_ENV, resolveDataDir, ruleProblems, writeProvisionResults } from './lib/data.mjs';
 
 const args = parseArgs(process.argv.slice(2), ['--data', '--repo'], [], true);
 if (args.positional.length > 1) die('Usage: node sync.mjs [targetDir] [--data <dir>|--repo <owner/name[@ref]>]');
 const data = resolveDataDir(args, { allowClone: true });
 const target = args.positional[0] ?? join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.omp', 'agent'), 'rules');
+let fatal = false;
+let error = null;
+let items = [];
 try {
   // Test-only file gate (the server-side twin is ALATE_TEST_PROVISION_GATE in server.ts):
   // lets a server test hold this script before any write and kill it, so provision's
@@ -27,108 +32,43 @@ try {
   if (existsSync(target) && realpathSync.native(target) === realpathSync.native(data.dir)) {
     throw new Error(`Target resolves to the data dir (${target}); refusing to install into itself.`);
   }
-  const NOT_RULES = new Set(['AGENTS.md', 'README.md']);
   const isMd = name => /\.mdc?$/.test(name); // omp loads <agentDir>/rules/*.{md,mdc}, top level only
 
   const rules = new Map();
-  const problems = [];
+  const failItem = (item, status, rule = null, at = null, report = null) => {
+    const entry = { item, status, rule, at };
+    if (report !== null) entry.report = report.length > 4000 ? `${report.slice(0, 4000)}…` : report;
+    items.push(entry);
+  };
   for (const entry of readdirSync(data.dir, { withFileTypes: true })) {
     if (!entry.isFile() || !isMd(entry.name)) continue;
     const file = join(data.dir, entry.name);
     assertSourceInside(data.dir, file);
     const bytes = readFileSync(file);
     // AGENTS.md is agent context too, so it gets the hidden-character scan, never the rule frontmatter gate.
-    problems.push(...ruleProblems(entry.name, bytes.toString('utf8'), { frontmatter: !NOT_RULES.has(entry.name) }));
+    const problems = ruleProblems(entry.name, bytes.toString('utf8'), { frontmatter: !NOT_RULES.has(entry.name) });
+    if (problems.length) {
+      // Per item: a rejected rule stays out; NOT_RULES files are not installed by sync at
+      // all, so a problem there is only a rejected report and never stops the other rules.
+      const first = describeProblem(problems[0]);
+      failItem(entry.name, 'rejected', first.rule, first.at, problems.join('\n'));
+      continue;
+    }
     if (NOT_RULES.has(entry.name)) continue;
     rules.set(entry.name, bytes);
   }
   // Origin gate: when the data repo ships upstreams.json, every public item needs a recorded origin there.
-  const upFile = join(data.dir, 'upstreams.json');
-  if (existsSync(upFile)) {
-    let up = null;
-    let parsed = false;
-    try { up = JSON.parse(readFileSync(upFile, 'utf8')); parsed = true; }
-    catch (err) { problems.push(`upstreams.json: ${err.message}`); }
-    if (parsed) {
-      const KINDS = new Set(['image-pin', 'mcp', 'rule-set', 'skill', 'plugin']);
-      const CHECKS = new Set(['github-release', 'github-path', 'npm', 'node-dist', 'chrome-for-testing', 'pypi']);
-      const items = Array.isArray(up.items) ? up.items : [];
-      const own = Array.isArray(up.own) ? up.own : [];
-      items.forEach((item, i) => {
-        const label = item?.name ? `item "${item.name}"` : `item "#${i}"`;
-        if (!KINDS.has(item?.kind)) problems.push(`upstreams.json: ${label}: unknown kind ${item?.kind ?? '(missing)'}`);
-        if (typeof item?.origin !== 'string' || !/^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/?$/.test(item.origin))
-          problems.push(`upstreams.json: ${label}: origin is not a GitHub repo URL`);
-        if (item?.check !== undefined && !CHECKS.has(item.check?.type))
-          problems.push(`upstreams.json: ${label}: unknown check type ${item.check?.type ?? '(missing)'}`);
-        if (item?.pin !== undefined && !(typeof item.pin === 'object' && item.pin && [item.pin.repo, item.pin.file, item.pin.key].every(v => typeof v === 'string' && v)))
-          problems.push(`upstreams.json: ${label}: pin needs repo, file and key`);
-      });
-      // ponytail: hand-rolled glob, only **, *, ? (no {} alternation / character classes); switch to a glob lib if upstreams.json ever needs them.
-      const globRe = pat => new RegExp('^' + pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('**', '\0').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]').replaceAll('\0', '.*') + '$');
-      const covered = p => own.some(g => globRe(g).test(p)) || items.some(it => (Array.isArray(it?.paths) ? it.paths : []).some(g => globRe(g).test(p)));
-      const uncovered = [];
-      for (const name of rules.keys()) if (!covered(name)) uncovered.push(name);
-      const readJson = rel => {
-        try { return JSON.parse(readFileSync(join(data.dir, rel), 'utf8')); }
-        catch (err) {
-          if (err.code !== 'ENOENT') problems.push(`${rel}: ${err.message}`); // a missing file means nothing to check
-          return null;
-        }
-      };
-      const skillLock = readJson(`user/${SNAP_AGENTS_DIR}/.skill-lock.json`);
-      const lockDir = join(data.dir, 'user', SNAP_AGENTS_DIR, 'skills');
-      if (existsSync(lockDir)) for (const d of readdirSync(lockDir, { withFileTypes: true })) {
-        if (!d.isDirectory()) continue;
-        const rel = `user/${SNAP_AGENTS_DIR}/skills/${d.name}`;
-        if (!skillLock?.skills?.[d.name] && !covered(rel)) uncovered.push(rel);
-      }
-      for (const sub of ['user/omp/agent/skills', 'user/omp/agent/managed-skills']) {
-        const dir = join(data.dir, sub);
-        if (!existsSync(dir)) continue;
-        for (const d of readdirSync(dir, { withFileTypes: true })) {
-          if (!d.isDirectory()) continue;
-          if (!covered(`${sub}/${d.name}`)) uncovered.push(`${sub}/${d.name}`);
-        }
-      }
-      const mcp = readJson('user/omp/agent/mcp.json');
-      const serverArgs = cfg => (Array.isArray(cfg?.args) ? cfg.args : []).filter(a => typeof a === 'string');
-      // A concrete PEP 440 pin is "<name>==<final/prerelease/post/dev version>"; an empty version,
-      // a wildcard or a range leaves the release open and does not count as pinned.
-      const pyPin = spec => {
-        const at = spec.indexOf('==');
-        return at >= 0 && /^\d+(?:\.\d+)*(?:(?:a|b|rc)\d+|\.(?:post|dev)\d+)?$/i.test(spec.slice(at + 2)) ? spec.slice(0, at) : undefined;
-      };
-      // Own-glob coverage only reaches self-written servers inside the running machine's home;
-      // a vendor path or another user's file is foreign, and a bare program name is never a home path.
-      const home = homedir();
-      const inHome = cmd => {
-        if (typeof cmd !== 'string' || !isAbsolute(cmd)) return false;
-        const rel = relative(home, cmd);
-        return !!rel && !rel.startsWith('..') && !isAbsolute(rel);
-      };
-      for (const [name, cfg] of Object.entries(mcp?.mcpServers ?? {})) {
-        const bare = unwrapCmd(cfg) ?? cfg ?? {}; // a Windows capture wraps npx in cmd /c; judge the real program
-        const strs = [bare.command, ...serverArgs(bare)].filter(s => typeof s === 'string');
-        const firstArg = serverArgs(bare).find(a => !a.startsWith('-'));
-        const pySpec = bare.command === 'uvx' ? firstArg
-          : (bare.command === 'pipx' && firstArg === 'run') ? serverArgs(bare).slice(1).find(a => !a.startsWith('-')) : undefined;
-        const ok = strs.some(s => /(^|[\\/])plugins[\\/]/.test(s))
-          || (inHome(bare.command) && own.some(g => globRe(g).test(bare.command)))
-          || ((bare.command === 'npx' || bare.command === 'bunx') && items.some(it => it?.kind === 'mcp'
-            && typeof it.check?.package === 'string' && (firstArg === it.check.package || firstArg?.startsWith(`${it.check.package}@`))))
-          || (typeof pySpec === 'string' && items.some(it => it?.kind === 'mcp' && it.check?.type === 'pypi'
-            && typeof it.check?.package === 'string' && it.check.package && pyPin(pySpec) === it.check.package));
-        if (!ok && typeof pySpec === 'string' && pyPin(pySpec) === undefined) {
-          const pyName = pySpec.split('==')[0];
-          problems.push(`user/omp/agent/mcp.json "${name}": ${bare.command === 'pipx' ? 'pipx run' : bare.command} package "${pyName}" is not pinned to a version — pin it in mcp.json args as "${pyName}==<version>" and add an upstreams.json item with check {"type":"pypi","package":"${pyName}"}`);
-        }
-        else if (!ok) uncovered.push(`user/omp/agent/mcp.json "${name}"`);
-      }
-      uncovered.sort().forEach(p => problems.push(`${p}: no recorded origin — add an item to upstreams.json or an own entry`));
-    }
+  // Fatal problems mean the gate itself is broken: no origin verdict is possible, so the run refuses.
+  // An uncovered item fails alone: an uncovered rule is excluded (a record-matching installed copy
+  // is then deleted below); keys without '/' are always rules, keys with '/' belong to other scripts
+  // and are reported only. A hint carries the gate's per-item remediation text (for example the
+  // pinned-Python message for an unpinned uvx/pipx server) and travels with the item's report.
+  const gate = originGate(data.dir);
+  if (gate.fatal.length) throw new Error(`Nothing installed. Fix:\n  ${gate.fatal.join('\n  ')}`);
+  for (const p of gate.uncovered) {
+    failItem(p, 'no-origin', null, null, gate.hints?.[p] ?? null);
+    if (rules.has(p)) rules.delete(p);
   }
-  if (problems.length) throw new Error(`Nothing installed. Fix:\n  ${problems.join('\n  ')}`);
 
   // alate records the fingerprints of the rules it installs (target/.alate-installed.json),
   // so a rule the data repo drops is deleted when nobody edited it here. A rule with no
@@ -161,10 +101,12 @@ try {
   for (const [name, bytes] of rules) {
     if (old.get(name)?.equals(bytes)) {
       unchanged++;
+      failItem(name, 'unchanged');
       continue;
     }
     writeFileSync(join(target, name), bytes);
     console.log(`${old.get(name) ? 'updated' : 'added'}  ${name}`);
+    failItem(name, 'installed');
   }
   let deleted = 0;
   const gone = new Set();
@@ -185,9 +127,26 @@ try {
   const stale = readdirSync(target).filter(name => isMd(name) && !rules.has(name) && !gone.has(name));
   if (stale.length) console.log(`Not from the data repo, left in place: ${stale.join(', ')}`);
   writeFileSync(manifestFile, `${JSON.stringify(Object.fromEntries([...rules.keys()].map(name => [name, fingerprint(name, rules.get(name))])), null, 2)}\n`);
+  items.sort((a, b) => (a.item < b.item ? -1 : a.item > b.item ? 1 : 0));
+  const failed = items.filter(it => it.status === 'rejected' || it.status === 'no-origin');
+  if (failed.length) {
+    console.log('Failed items:');
+    for (const it of failed) {
+      console.log(`  ${it.item} — ${it.status === 'no-origin' ? 'no origin' : `rejected: ${it.rule} at ${it.at}`}`);
+      // A rejected rule's problem lines are already on the status line; only the origin
+      // hints (for example the pinned-Python remediation) add new information here.
+      if (it.status === 'no-origin' && it.report) console.log(`    ${it.report}`);
+    }
+    process.exitCode = 1;
+  }
+  fatal = false;
+  error = null;
 } catch (err) {
+  fatal = true;
+  error = err.message;
   console.error(err.message);
   process.exitCode = 1; // not process.exit: finally below must still remove a cloned temp dir
 } finally {
+  if (process.env[PROVISION_ENV]) writeProvisionResults(process.env[PROVISION_ENV], { fatal, error, items });
   cleanupData(data);
 }

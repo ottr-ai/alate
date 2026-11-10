@@ -73,21 +73,24 @@ try {
   put('AGENTS.md', 'Bidi\u202Eoverride\n');
   r = run(target, ['--data', data]);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /b\.md:6:5: hidden character U\+200B/);
-  assert.match(r.stderr, /b\.md:7:4: hidden character U\+E0041/);
-  assert.match(r.stderr, /b\.md:8:4: hidden character U\+001B/);
-  assert.match(r.stderr, /b\.md:9:4: hidden character U\+E0101/);
-  assert.match(r.stderr, /c\.md: needs frontmatter/);
-  assert.match(r.stderr, /AGENTS\.md:1:5: hidden character U\+202E/);
-  assert.equal(installed(target, 'a.md'), rule, 'a failed check installs nothing');
-  assert.ok(!existsSync(join(target, 'b.md')));
+  assert.equal(r.stderr, '', 'a per-item failure is not a refusal: stderr stays empty');
+  assert.equal(installed(target, 'a.md'), rule.replace('Body', 'New body'), 'a clean rule installs beside the failures');
+  assert.ok(!existsSync(join(target, 'b.md')), 'a rejected rule never lands');
+  assert.ok(!existsSync(join(target, 'c.md')));
+  assert.ok(r.stdout.includes([
+    'Failed items:',
+    '  AGENTS.md — rejected: hidden character U+202E at AGENTS.md:1:5',
+    '  b.md — rejected: hidden character U+200B at b.md:6:5',
+    '  c.md — rejected: needs frontmatter with a description at c.md',
+  ].join('\n')), r.stdout);
+  assert.ok(!existsSync(join(target, 'AGENTS.md')), 'AGENTS.md is not installed by sync, problem or not');
 
   rmSync(join(data, 'b.md'));
   rmSync(join(data, 'c.md'));
   put('AGENTS.md', agents);
   r = run(target, ['--data', data]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /updated\s+a\.md/);
+  assert.match(r.stdout, /^1 unchanged/m, 'a.md already installed beside the failures');
   assert.equal(installed(target, 'a.md'), rule.replace('Body', 'New body'));
 
   // Rules alate installs are recorded; a rule the data repo drops is deleted when its copy
@@ -97,6 +100,35 @@ try {
   const record = JSON.parse(readFileSync(join(target, '.alate-installed.json'), 'utf8'));
   assert.equal(record['a.md'], fingerprint('a.md', Buffer.from(rule.replace('Body', 'New body'))));
   assert.ok(!('mine.md' in record), 'a rule alate did not install is not recorded');
+
+  // A rule that turns bad after it was installed: the record-matching copy of the now
+  // rejected rule is deleted; a machine-changed copy stays, loses its record, and the
+  // run exits 1 either way.
+  put('a.md', 'bad\u200Brule\n');
+  r = run(target, ['--data', data]);
+  assert.equal(r.status, 1);
+  assert.ok(r.stdout.includes('deleted  a.md'), r.stdout);
+  assert.ok(!existsSync(join(target, 'a.md')), 'the stale record-matching copy is deleted');
+  assert.ok(r.stdout.includes('  a.md — rejected: hidden character U+200B at a.md:1:4'), r.stdout);
+
+  put('a.md', rule.replace('Body', 'New body'));
+  r = run(target, ['--data', data]); // reinstall so the manifest records a.md again
+  assert.equal(r.status, 0, r.stderr);
+  writeFileSync(join(target, 'a.md'), 'machine edit\n');
+  put('a.md', 'bad\u200Brule\n');
+  r = run(target, ['--data', data]);
+  assert.equal(r.status, 1);
+  assert.ok(r.stdout.includes(`changed here, kept: ${join(target, 'a.md')}`), r.stdout);
+  assert.ok(!r.stdout.includes('deleted  '), 'a machine-changed copy is never deleted');
+  assert.equal(installed(target, 'a.md'), 'machine edit\n');
+  const recordBad = JSON.parse(readFileSync(join(target, '.alate-installed.json'), 'utf8'));
+  assert.ok(!('a.md' in recordBad), 'the record of the rejected rule is dropped');
+
+  // Restore a clean rule set for the later scenarios.
+  put('a.md', rule.replace('Body', 'New body'));
+  r = run(target, ['--data', data]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /updated  a\.md/);
 
   rmSync(join(data, 'a.md'));
   put('g.md', rule);
@@ -176,12 +208,17 @@ try {
   r = run(join(tmp, 'rules3'), ['--data', data2]);
   assert.equal(r.status, 0, r.stderr);
 
-  // Uncovered: drop the covers, gate fails with the exact hint and installs nothing.
+  // Uncovered: drop the covers. The uncovered items fail alone (acceptance c): a covered
+  // rule still installs, the uncovered rule stays out, and the failures move from the
+  // stderr refusal block to the stdout Failed items block.
   rmSync(join(data2, 'user/agents/skills/locked'), { recursive: true });
   rmSync(join(data2, 'user/agents/.skill-lock.json'));
   mkdirSync(join(data2, 'user/agents/skills/orphan'), { recursive: true });
   put2('user/agents/skills/orphan/SKILL.md', '# orphan\n');
-  put2('upstreams.json', JSON.stringify({ _doc: 'x', own: [], items: [] }));
+  put2('covered.md', rule);
+  put2('upstreams.json', JSON.stringify({ _doc: 'x', own: [], items: [
+    { name: 'cov', kind: 'rule-set', origin: 'https://github.com/x/y', paths: ['covered.md'] },
+  ] }));
   put2('user/omp/agent/mcp.json', JSON.stringify({ mcpServers: {
     foo: { command: 'npx', args: ['foo-mcp2@1.0.0'] },
     bar: { command: 'cmd', args: ['/c', 'npx', '-y', 'foo-mcp2@1.0.0'] },
@@ -189,13 +226,17 @@ try {
   const fresh = join(tmp, 'rules4');
   r = run(fresh, ['--data', data2]);
   assert.equal(r.status, 1);
-  const hint = 'no recorded origin — add an item to upstreams.json or an own entry';
-  assert.match(r.stderr, new RegExp(`a\\.md: ${hint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
-  assert.match(r.stderr, /user\/agents\/skills\/orphan: no recorded origin/);
-  assert.match(r.stderr, /user\/omp\/agent\/managed-skills\/m1: no recorded origin/);
-  assert.match(r.stderr, /user\/omp\/agent\/mcp\.json "foo": no recorded origin/);
-  assert.match(r.stderr, /user\/omp\/agent\/mcp\.json "bar": no recorded origin/);
-  assert.ok(!existsSync(join(fresh, 'a.md')), 'an uncovered path installs nothing');
+  assert.equal(r.stderr, '', 'uncovered origins are per-item failures, not a refusal');
+  assert.equal(installed(fresh, 'covered.md'), rule, 'one uncovered origin does not stop the other items');
+  assert.ok(!existsSync(join(fresh, 'a.md')), 'an uncovered rule never lands');
+  assert.ok(r.stdout.includes([
+    'Failed items:',
+    '  a.md — no origin',
+    '  user/agents/skills/orphan — no origin',
+    '  user/omp/agent/managed-skills/m1 — no origin',
+    '  user/omp/agent/mcp.json "bar" — no origin',
+    '  user/omp/agent/mcp.json "foo" — no origin',
+  ].join('\n')), r.stdout);
 
   // Validation: parse errors and all item problems in one run.
   put2('upstreams.json', '{ not json');
@@ -268,8 +309,9 @@ try {
     '  upstreams.json: item "n2": pin needs repo, file and key',
     '  upstreams.json: item "n4": unknown check type (missing)',
     '  upstreams.json: item "p1": pin needs repo, file and key',
-    '  u1.md: no recorded origin — add an item to upstreams.json or an own entry',
   ].join('\n') + '\n');
+  assert.equal(r.stdout, '', 'a fatal gate refuses the run before any item is installed');
+  assert.ok(!existsSync(join(tmp, 'rules7', 'u1.md')), 'the uncovered rule never lands');
 
   // Origin-URL regex edges (trailing path, leading junk, whitespace in owner), item paths
   // covering a rule, and a corrupt user/agents/mcp.json surfacing as a parse problem.
@@ -296,18 +338,19 @@ try {
   assert.match(gateLines[4], /^  user\/omp\/agent\/mcp\.json: /);
   const mcpMsg = (() => { try { JSON.parse('{'); } catch (e) { return e.message; } })();
   assert.equal(gateLines[4], `  user/omp/agent/mcp.json: ${mcpMsg}`);
-  assert.deepEqual(gateLines.slice(5), [
-    '  c2.md: no recorded origin — add an item to upstreams.json or an own entry',
-    '',
-  ], r.stderr);
+  assert.deepEqual(gateLines.slice(5), [''], r.stderr);
+  assert.equal(r.stdout, '', 'a fatal gate refuses the run before any item is installed');
 
-  // No items and no own entries: the fallbacks are empty and the only rule is uncovered.
+  // No items and no own entries: the fallbacks are empty and the only rule is uncovered —
+  // a per-item failure now, not a refusal.
   reset2();
   put2('z.md', rule);
   put2('upstreams.json', '{}');
   r = run(freshTarget('rules9'), ['--data', data2]);
   assert.equal(r.status, 1);
-  assert.equal(r.stderr, 'Nothing installed. Fix:\n  z.md: no recorded origin — add an item to upstreams.json or an own entry\n');
+  assert.equal(r.stderr, '');
+  assert.ok(!existsSync(join(tmp, 'rules9', 'z.md')), 'the uncovered rule never lands');
+  assert.ok(r.stdout.includes('Failed items:\n  z.md — no origin'), r.stdout);
 
   // Glob patterns are fully anchored: a name that merely contains or extends a pattern is
   // still uncovered and named exactly.
@@ -318,12 +361,45 @@ try {
   put2('upstreams.json', JSON.stringify({ own: ['a+b.md'], items: [] }));
   r = run(freshTarget('rules10'), ['--data', data2]);
   assert.equal(r.status, 1);
-  assert.equal(r.stderr, [
-    'Nothing installed. Fix:',
-    '  a+b.md2.md: no recorded origin — add an item to upstreams.json or an own entry',
-    '  qa+b.md: no recorded origin — add an item to upstreams.json or an own entry',
-    '  xa+b.md: no recorded origin — add an item to upstreams.json or an own entry',
-  ].join('\n') + '\n');
+  assert.equal(r.stderr, '');
+  assert.ok(r.stdout.includes([
+    'Failed items:',
+    '  a+b.md2.md — no origin',
+    '  qa+b.md — no origin',
+    '  xa+b.md — no origin',
+  ].join('\n')), r.stdout);
+
+  // --- machine-readable results file (ALATE_PROVISION_RESULTS) ---
+  const resultsPath = join(tmp, 'results.json');
+  const runRes = (t, extra = []) => spawnSync(process.execPath, [join(scriptDir, 'sync.mjs'), ...(t ? [t] : []), ...extra],
+    { encoding: 'utf8', env: { ...childEnv, ALATE_PROVISION_RESULTS: resultsPath } });
+
+  // One good + one uncovered rule: the run is not fatal, the good rule installs, the
+  // uncovered one is reported no-origin in the file.
+  reset2();
+  put2('g1.md', rule);
+  put2('g2.md', rule);
+  put2('upstreams.json', JSON.stringify({ own: ['g1.md'], items: [] }));
+  rmSync(resultsPath, { force: true });
+  r = runRes(freshTarget('results-ok'), ['--data', data2]);
+  assert.equal(r.status, 1);
+  const okResults = JSON.parse(readFileSync(resultsPath, 'utf8'));
+  assert.equal(okResults.fatal, false);
+  assert.equal(okResults.error, null);
+  assert.deepEqual(okResults.items, [
+    { item: 'g1.md', status: 'installed', rule: null, at: null },
+    { item: 'g2.md', status: 'no-origin', rule: null, at: null },
+  ]);
+
+  // A refused run (upstreams.json not JSON) writes fatal: true with the error message.
+  rmSync(resultsPath, { force: true });
+  put2('upstreams.json', '{ not json');
+  r = runRes(freshTarget('results-fatal'), ['--data', data2]);
+  assert.equal(r.status, 1);
+  const fatalResults = JSON.parse(readFileSync(resultsPath, 'utf8'));
+  assert.equal(fatalResults.fatal, true);
+  assert.match(fatalResults.error, /upstreams\.json: /);
+  assert.deepEqual(fatalResults.items, []);
 
   // Pinned Python MCP servers (uvx / pipx run) and own-glob coverage for self-written servers.
   const pypiItem = pkg => ({ name: 'atl', kind: 'mcp', origin: 'https://github.com/x/y', check: { type: 'pypi', package: pkg } });
@@ -348,7 +424,7 @@ try {
   mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian'] } });
   r = gateRun({ own: ['r.md'], items: [pypiItem('mcp-atlassian')] }, 'rules-py2');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "atl": uvx package "mcp-atlassian" is not pinned to a version — pin it in mcp\.json args as "mcp-atlassian==<version>" and add an upstreams\.json item with check \{"type":"pypi","package":"mcp-atlassian"\}/);
+  assert.match(r.stdout, /uvx package "mcp-atlassian" is not pinned to a version — pin it in mcp\.json args as "mcp-atlassian==<version>" and add an upstreams\.json item with check \{"type":"pypi","package":"mcp-atlassian"\}/);
 
   // 3. pipx run: pinned passes, unpinned gets the pipx run message.
   mcpReset({ sx: { command: 'pipx', args: ['run', 'mcp-server-x==1.2.3'] } });
@@ -357,7 +433,7 @@ try {
   mcpReset({ sx: { command: 'pipx', args: ['run', 'mcp-server-x'] } });
   r = gateRun({ own: ['r.md'], items: [pypiItem('mcp-server-x')] }, 'rules-py4');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /"sx": pipx run package "mcp-server-x" is not pinned to a version/);
+  assert.match(r.stdout, /pipx run package "mcp-server-x" is not pinned to a version/);
 
   // 4. Own glob covers a self-written server under the child's HOME; a non-matching own list leaves it uncovered.
   mcpReset({ mine: { command: join(childHome, 'servers', 'my-mcp.py'), args: [] } });
@@ -365,37 +441,37 @@ try {
   assert.equal(r.status, 0, r.stderr);
   r = gateRun({ own: ['/home/u/other/**', 'r.md'], items: [] }, 'rules-py6');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "mine": no recorded origin — add an item to upstreams\.json or an own entry/);
+  assert.match(r.stdout, /  user\/omp\/agent\/mcp\.json "mine" — no origin/);
 
   // 5. Pinned spec but no pypi item: generic uncovered line with the standard hint.
   mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==0.24.1'] } });
   r = gateRun({ own: ['r.md'], items: [] }, 'rules-py7');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "atl": no recorded origin — add an item to upstreams\.json or an own entry/);
+  assert.match(r.stdout, /  user\/omp\/agent\/mcp\.json "atl" — no origin/);
 
   // 6. Type discrimination: an npm item with the same package never covers a Python server.
   mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==0.24.1'] } });
   r = gateRun({ own: ['r.md'], items: [{ name: 'atl', kind: 'mcp', origin: 'https://github.com/x/y', check: { type: 'npm', package: 'mcp-atlassian' } }] }, 'rules-py8');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "atl": no recorded origin/);
+  assert.match(r.stdout, /  user\/omp\/agent\/mcp\.json "atl" — no origin/);
 
   // 7. A pypi item without a usable package string does not cover.
   mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==0.24.1'] } });
   r = gateRun({ own: ['r.md'], items: [{ name: 'atl', kind: 'mcp', origin: 'https://github.com/x/y', check: { type: 'pypi' } }] }, 'rules-py9');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "atl": no recorded origin/);
+  assert.match(r.stdout, /  user\/omp\/agent\/mcp\.json "atl" — no origin/);
 
   // 8. An empty version is not a concrete pin: the unpinned refusal fires despite the `==`.
   mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian=='] } });
   r = gateRun({ own: ['r.md'], items: [pypiItem('mcp-atlassian')] }, 'rules-py10');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /^  user\/omp\/agent\/mcp\.json "atl": uvx package "mcp-atlassian" is not pinned to a version — pin it in mcp\.json args as "mcp-atlassian==<version>" and add an upstreams\.json item with check \{"type":"pypi","package":"mcp-atlassian"\}$/m);
+  assert.match(r.stdout, /^    uvx package "mcp-atlassian" is not pinned to a version — pin it in mcp\.json args as "mcp-atlassian==<version>" and add an upstreams\.json item with check \{"type":"pypi","package":"mcp-atlassian"\}$/m);
 
   // 9. A PEP 440 wildcard is not a concrete pin: the unpinned refusal fires.
   mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==1.*'] } });
   r = gateRun({ own: ['r.md'], items: [pypiItem('mcp-atlassian')] }, 'rules-py11');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /^  user\/omp\/agent\/mcp\.json "atl": uvx package "mcp-atlassian" is not pinned to a version — pin it in mcp\.json args as "mcp-atlassian==<version>" and add an upstreams\.json item with check \{"type":"pypi","package":"mcp-atlassian"\}$/m);
+  assert.match(r.stdout, /^    uvx package "mcp-atlassian" is not pinned to a version — pin it in mcp\.json args as "mcp-atlassian==<version>" and add an upstreams\.json item with check \{"type":"pypi","package":"mcp-atlassian"\}$/m);
 
   // 10. A concrete prerelease pin is still a pin.
   mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==1.0rc1'] } });
@@ -411,13 +487,13 @@ try {
   mcpReset({ vend: { command: '/opt/vendor/servers/x.py', args: [] } });
   r = gateRun({ own: ['r.md', '**/servers/*.py'], items: [] }, 'rules-py14');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "vend": no recorded origin — add an item to upstreams\.json or an own entry/);
+  assert.match(r.stdout, /  user\/omp\/agent\/mcp\.json "vend" — no origin/);
 
   // 13. A bare runner name never satisfies an own glob; the pin rule still applies.
   mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian'] } });
   r = gateRun({ own: ['r.md', 'uvx'], items: [pypiItem('mcp-atlassian')] }, 'rules-py15');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /uvx package "mcp-atlassian" is not pinned to a version/);
+  assert.match(r.stdout, /uvx package "mcp-atlassian" is not pinned to a version/);
 
   if (process.platform === 'win32') {
     const link = join(tmp, 'rules-link');

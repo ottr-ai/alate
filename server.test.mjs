@@ -248,7 +248,7 @@ assert.equal(git(['-C', ghData, '-c', 'user.email=test@example.com', '-c', 'user
 const ghSha = () => git(['-C', ghData, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
 const sha1 = ghSha();
 
-const serverEnv = { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, TMPDIR: serverTmp, TEMP: serverTmp, TMP: serverTmp, ALATE_KEEP_TEMP: '', ALATE_TEST_PROVISION_GATE: provisionGate, ALATE_TEST_SCRIPT_GATE: scriptGate, ALATE_TEST_GH_BASE: pathToFileURL(join(tmp, 'gh')).href, GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_GLOBAL: 'nul', GIT_CONFIG_SYSTEM: 'nul' };
+const serverEnv = { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, TMPDIR: serverTmp, TEMP: serverTmp, TMP: serverTmp, ALATE_KEEP_TEMP: '', ALATE_TEST_PROVISION_GATE: provisionGate, ALATE_TEST_SCRIPT_GATE: scriptGate, ALATE_TEST_NO_RESULTS_FILE: join(tmp, 'no-results-gate'), ALATE_TEST_GH_BASE: pathToFileURL(join(tmp, 'gh')).href, GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_GLOBAL: 'nul', GIT_CONFIG_SYSTEM: 'nul' };
 // sync.mjs prefers PI_CODING_AGENT_DIR over HOME: an inherited value would install fixture rules into a real agent dir.
 delete serverEnv.PI_CODING_AGENT_DIR;
 // ALATE_API_KEY would seed the first-start key of every fresh-config server this suite boots.
@@ -701,25 +701,67 @@ try {
     assert.equal(typeof item.output, 'string');
     assert.equal(typeof item.truncated, 'boolean');
   }
-  // 4b. A sync.mjs refusal stops the pipeline: install-user.mjs never runs, and the
-  // user/ layer of the refused source stays out of the home. ok stays false (every, not some).
+  // 4b. A per-item failure continues the pipeline: sync.mjs exits 1 over the rejected
+  // bad.md rule (fatal: false in its results file), and install-user.mjs still runs. The
+  // user layer of the mixed source installs cleanly: its config.yml holds the same bytes
+  // the home already carries, so it reports unchanged. ok stays false (every, not some).
   const mixedDir = join(tmp, 'mixed');
   mkdirSync(join(mixedDir, 'user', 'omp', 'agent'), { recursive: true });
   mkdirSync(join(mixedDir, 'projects'), { recursive: true });
-  writeFileSync(join(mixedDir, 'bad.md'), 'no frontmatter\n'); // sync.mjs refuses, exit 1
-  // Bytes the installed home does not carry: if install-user.mjs ran, it would overwrite
-  // the config.yml the earlier origin provision installed (its manifest fingerprint matches).
-  writeFileSync(join(mixedDir, 'user', 'omp', 'agent', 'config.yml'), 'model: hijacked\n');
+  writeFileSync(join(mixedDir, 'bad.md'), 'no frontmatter\n'); // sync.mjs rejects the item, exit 1
+  // Same bytes the home holds, so install-user.mjs accepts the file and stays clean.
+  writeFileSync(join(mixedDir, 'user', 'omp', 'agent', 'config.yml'), 'model: test\n');
   writeFileSync(join(mixedDir, 'projects', 'projects.json'), JSON.stringify({ contextFiles: [], projects: {} })); // sync-projects passes
   r = await postJson('/config', { path: mixedDir }, true);
   assert.equal(r.status, 200);
   r = await postJson('/provision', {}, true);
   assert.equal(r.status, 200);
   body = await r.json();
-  assert.deepEqual(body.results.map(x => x.code), [1]); // only sync.mjs ran; the failed result stays in the response
-  assert.equal(body.ok, false); // one failing script fails the provision
+  assert.deepEqual(body.results.map(x => x.code), [1, 0], 'the pipeline continues past the per-item failure');
+  assert.equal(body.ok, false); // one failing item fails the provision
   assert.ok(body.results[0].output.includes('bad.md'), 'failure reports the rule that needs a fix');
-  assert.equal(readFileSync(join(tmpHome, '.omp', 'agent', 'config.yml'), 'utf8'), 'model: test\n', 'the refused source never reaches install-user, so the home keeps the last installed bytes');
+  assert.equal(readFileSync(join(tmpHome, '.omp', 'agent', 'config.yml'), 'utf8'), 'model: test\n', 'the home keeps the installed bytes');
+
+  // 4b2. GET /api/state carries the stored per-item provision results for the imported
+  // snapshot. A path source has no sha, so sha is null; the items merge from both scripts.
+  body = await (await get('/api/state')).json();
+  assert.ok(body.provision, 'state carries the provision results');
+  assert.equal(body.provision.ok, false, 'the per-item failure keeps ok false');
+  assert.equal(body.provision.sha, null, 'a path source stores no sha');
+  const badItem = body.provision.items.find(i => i.item === 'bad.md');
+  assert.ok(badItem, 'the rejected rule appears as an item');
+  assert.equal(badItem.status, 'rejected');
+  assert.ok(body.provision.items.some(i => i.item === 'user/omp/agent/config.yml' && i.status === 'unchanged'), 'the accepted user-layer file reports unchanged');
+
+  // 4b3. A fatal sync refusal (the origin gate itself broken) fails closed: the pipeline
+  // stops, install-user.mjs never runs, and the home keeps the last installed bytes.
+  const fatalDir = join(tmp, 'fatal');
+  mkdirSync(join(fatalDir, 'user', 'omp', 'agent'), { recursive: true });
+  mkdirSync(join(fatalDir, 'projects'), { recursive: true });
+  writeFileSync(join(fatalDir, 'demo-rule.md'), '---\ndescription: demo rule\n---\n\nBody\n');
+  writeFileSync(join(fatalDir, 'upstreams.json'), 'not json');
+  writeFileSync(join(fatalDir, 'user', 'omp', 'agent', 'config.yml'), 'model: hijacked\n'); // would install if install-user ran
+  writeFileSync(join(fatalDir, 'projects', 'projects.json'), JSON.stringify({ contextFiles: [], projects: {} }));
+  r = await postJson('/config', { path: fatalDir }, true);
+  assert.equal(r.status, 200);
+  r = await postJson('/provision', {}, true);
+  assert.equal(r.status, 200);
+  body = await r.json();
+  assert.deepEqual(body.results.map(x => x.code), [1], 'the fatal refusal stops the pipeline');
+  assert.equal(body.ok, false);
+  assert.equal(readFileSync(join(tmpHome, '.omp', 'agent', 'config.yml'), 'utf8'), 'model: test\n', 'the fatal source never reaches install-user, so the home keeps the last installed bytes');
+
+  // 4b4. A non-zero child that leaves no results file fails closed the same way: the gate
+  // file strips ALATE_PROVISION_RESULTS from the child env, so sync.mjs cannot write
+  // results, and the pipeline stops before install-user.mjs.
+  writeFileSync(serverEnv.ALATE_TEST_NO_RESULTS_FILE, '');
+  r = await postJson('/provision', {}, true);
+  assert.equal(r.status, 200);
+  body = await r.json();
+  assert.deepEqual(body.results.map(x => x.code), [1], 'a non-zero child without a results file stops the pipeline');
+  assert.equal(body.ok, false);
+  rmSync(serverEnv.ALATE_TEST_NO_RESULTS_FILE, { force: true });
+  assert.equal(readFileSync(join(tmpHome, '.omp', 'agent', 'config.yml'), 'utf8'), 'model: test\n', 'install-user never ran without the results file');
 
   // 4c. A provision child killed by a signal closes with a null code: the pipeline still
   // stops (fail closed), so install-user.mjs never runs and the source's user/ layer
@@ -4546,7 +4588,7 @@ try {
       await waitFor(async () => existsSync(capFile), 10_000);
       const child = JSON.parse(readFileSync(capFile, 'utf8'));
       assert.deepEqual(Object.keys(child).sort(), envNames
-        .concat(['ALATE_TEST_CHILD_ENV', 'ALATE_TEST_GH_BASE', 'ALATE_TEST_PROVISION_GATE', 'ALATE_TEST_SCRIPT_GATE'])
+        .concat(['ALATE_TEST_CHILD_ENV', 'ALATE_TEST_GH_BASE', 'ALATE_TEST_NO_RESULTS_FILE', 'ALATE_TEST_PROVISION_GATE', 'ALATE_TEST_SCRIPT_GATE'])
         .sort(), 'the child env carries exactly the allowlisted names plus the ALATE_TEST_ pass-through (no ALATE_LAYER, no secrets)');
       assert.ok(!('ALATE_API_KEY' in child), 'secrets stay outside the child env');
       await mut10Kill(E.p);

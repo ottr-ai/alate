@@ -257,14 +257,35 @@ function overviewView() {
   const projects = inv.projects || { contextFiles: [], named: [] };
   const rules = inv.rules || [];
   const src = state.source;
+  // Per-item provision results apply only to the snapshot they ran against: hide them when a
+  // snapshot sha exists on both sides and the provision ran against an older one. A local
+  // path source has no sha, so its latest results always show (specs/provision-item-by-item.md).
+  const prov = state.provision && !(state.provision.sha && state.provision.sha !== (src ? src.importedSha : undefined)) ? state.provision : null;
+  const provItems = prov ? new Map(prov.items.map((i) => [i.item, i])) : null;
+  const provAside = (key, fallback) => {
+    const it = provItems ? provItems.get(key) : null;
+    if (!it) return { aside: fallback, alert: false, report: null };
+    if (it.status === 'rejected') return { aside: 'rejected: ' + (it.rule || '?') + (it.at ? ' at ' + it.at : ''), alert: true, report: it.report || null };
+    if (it.status === 'no-origin') return { aside: 'no origin', alert: true, report: it.report || null };
+    return { aside: fallback ? fallback + ' · ' + it.status : it.status, alert: false, report: null };
+  };
+  // Same shape as entry(), with the provision status in the aside and the report in a
+  // details block for a failed item.
+  const provEntry = (key, href, name, desc, fallback) => {
+    const p = provAside(key, fallback);
+    const li = entry(href, name, desc, p.aside, p.alert);
+    if (p.report) li.append(h('details', { class: 'report' }, h('summary', { text: 'report' }), h('pre', { text: p.report })));
+    return li;
+  };
   const has = new Set(files.map((f) => f.path));
   const link = (p) => (has.has(p) ? fileHref(p) : null);
 
   const sheet = h('article', { class: 'sheet' });
   const spec = src.kind === 'repo' ? src.name + (src.ref ? '@' + src.ref : '') : src.spec;
+  const provMeta = prov ? ' · provisioned ' + relTime(prov.at) + (prov.items.some((i) => i.status === 'rejected' || i.status === 'no-origin') ? ', ' + prov.items.filter((i) => i.status === 'rejected' || i.status === 'no-origin').length + ' failed' : '') : '';
   sheet.append(h('header', { class: 'sheet-head' },
     h('h1', { text: src.kind === 'repo' ? spec : src.name.split(/[\\/]/).filter(Boolean).pop() || spec }),
-    h('p', { class: 'meta', text: (src.kind === 'repo' ? 'GitHub repo' : 'Local path ' + src.name) + (src.importedSha ? ' · commit ' + src.importedSha.slice(0, 7) : '') + ' · imported ' + relTime(src.importedAt) }),
+    h('p', { class: 'meta', text: (src.kind === 'repo' ? 'GitHub repo' : 'Local path ' + src.name) + (src.importedSha ? ' · commit ' + src.importedSha.slice(0, 7) : '') + ' · imported ' + relTime(src.importedAt) + provMeta }),
     h('p', { class: 'totals' },
       plural(rules.length, 'rule'), ', ', plural(user.skills.length, 'skill'), ', ', plural(user.plugins.length, 'plugin'), ', ',
       plural(projects.named.length, 'project'), ', and ', plural(files.length, 'file'), ' in total. Pick a file in the index to edit it, or ',
@@ -289,19 +310,19 @@ function overviewView() {
   }
 
   sheet.append(part('Rules', String(rules.length),
-    rules.length ? h('ul', { class: 'entries' }, rules.map((r) => entry(link(r.name), r.name, r.description || 'No description in the frontmatter.', bytes(files.find((f) => f.path === r.name)?.bytes))))
+    rules.length ? h('ul', { class: 'entries' }, rules.map((r) => provEntry(r.name, link(r.name), r.name, r.description || 'No description in the frontmatter.', bytes(files.find((f) => f.path === r.name)?.bytes))))
       : h('p', { class: 'note', text: 'No rules in this data repo. A rule is a root *.md or *.mdc file with a description in its frontmatter.' })));
 
   const userRows = [
-    ...user.configFiles.map((f) => entry(link('user/' + f.path), f.path, 'Config file', bytes(f.bytes))),
-    ...(user.others || []).map((f) => entry(link('user/' + f.path), f.path, 'Lock and manifest file', bytes(f.bytes))),
+    ...user.configFiles.map((f) => provEntry('user/' + f.path, link('user/' + f.path), f.path, 'Config file', bytes(f.bytes))),
+    ...(user.others || []).map((f) => provEntry('user/' + f.path, link('user/' + f.path), f.path, 'Lock and manifest file', bytes(f.bytes))),
     ...user.extensions.map((x) => entry(null, x, 'Extension', '')),
   ];
   sheet.append(part('User layer', String(userRows.length),
     userRows.length ? h('ul', { class: 'entries' }, userRows) : h('p', { class: 'note', text: 'No user layer in this data repo.' })));
 
   sheet.append(part('Skills', String(user.skills.length),
-    user.skills.length ? h('ul', { class: 'entries' }, user.skills.map((s) => entry(link(s.path), s.name, s.description || 'No description in SKILL.md.', s.origin)))
+    user.skills.length ? h('ul', { class: 'entries' }, user.skills.map((s) => provEntry(s.path.replace(/\/SKILL\.md$/, ''), link(s.path), s.name, s.description || 'No description in SKILL.md.', s.origin)))
       : h('p', { class: 'note', text: 'No skills in this data repo.' })));
 
   sheet.append(part('Plugins', String(user.plugins.length),
