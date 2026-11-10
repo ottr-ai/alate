@@ -262,6 +262,21 @@ async function dashGuard(req: FastifyRequest, reply: FastifyReply): Promise<void
   if (req.method !== 'GET' && req.method !== 'HEAD' && !sameOrigin(req)) return reply.code(401).send({ error: 'unauthorized' })
 }
 
+// Fastify's default JSON parser refuses a request that carries a JSON content type
+// with no body (FST_ERR_CTP_EMPTY_JSON_BODY), and board clients send exactly that to
+// POST /provision. Parse an empty or whitespace-only JSON body as {} instead:
+// /provision reads no fields, and every other route treats a missing field as absent.
+// A malformed non-empty body fails as FST_ERR_CTP_INVALID_JSON, so the error handler
+// below keeps its 400 `invalid JSON body` answer.
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body: string, done) => {
+  if (body.trim() === '') return done(null, {})
+  try {
+    return done(null, JSON.parse(body) as unknown)
+  } catch {
+    return done(Object.assign(new Error('invalid JSON body'), { code: 'FST_ERR_CTP_INVALID_JSON', statusCode: 400 }), undefined)
+  }
+})
+
 // Auth model: the provisioning API (/config, /provision, /api/updates) always needs
 // the key. Dashboard routes use dashGuard: key-free on a loopback bind, Bearer token
 // or login cookie on any other bind. The static shell and /theme.js stay public so a

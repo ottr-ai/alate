@@ -109,7 +109,7 @@ See the [skill snapshot structure gate specification](docs/specs/skill-structure
 | `GET /health` | none | Server, source, update, and layer-mode status. |
 | `POST /api/login` | none | `{"key": "<app key>"}` sets a session cookie for the dashboard. |
 | `POST /config` | Bearer | Import `{"repo": "owner/name"}` or `{"path": "<dir>"}`. |
-| `POST /provision` | Bearer | Run `sync.mjs` and `install-user.mjs` from the stored snapshot. Both run in order; the pipeline stops early only on a whole-run refusal or a crashed child. `ok` is false when any script exits non-zero (an item failed or the run was refused). `GET /api/state` carries the per-item results under `provision`, pinned to the imported snapshot sha. |
+| `POST /provision` | Bearer | The body can be empty. Run `sync.mjs` and `install-user.mjs` from the stored snapshot. Provision reads the stored snapshot, so a source change outside the server needs `POST /config` again first. Both run in order; the pipeline stops early only on a whole-run refusal or a crashed child. `ok` is false when any script exits non-zero (an item failed or the run was refused). `GET /api/state` carries the per-item results under `provision`, pinned to the imported snapshot sha. |
 | `GET /api/updates` | Bearer | Board contract records only, one record per pinnable upstream. `/api/state` keeps every row. |
 | `POST /api/updates/check` | Bearer | Run the upstream check now and return the fresh list. |
 

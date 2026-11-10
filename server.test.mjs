@@ -602,6 +602,16 @@ try {
   assert.equal(body.ok, true);
   assert.deepEqual(body.results.map(x => x.code), [0, 0]);
   assert.ok(body.results[0].output.includes(join(tmpHome, '.omp', 'agent', 'rules')), 'success reports the installation destination');
+  // P3 (fix list 2026-11-10): a JSON request with no body must provision, not fail
+  // the parse step; a malformed non-empty body keeps the pinned parse error.
+  r = await post('/provision', undefined, { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` });
+  assert.equal(r.status, 200, 'a JSON request with no body provisions');
+  assert.equal((await r.json()).ok, true);
+  r = await post('/provision', '', { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` });
+  assert.equal(r.status, 200, 'a zero-length JSON body provisions');
+  r = await post('/provision', '{oops', { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'invalid JSON body');
   assert.equal(readFileSync(join(tmpHome, '.omp', 'agent', 'rules', 'demo-rule.md'), 'utf8').replaceAll('\r\n', '\n'), '---\ndescription: demo rule\n---\n\nBody\n');
   const snapshot = new DatabaseSync(stateFile, { readOnly: true });
   try {
