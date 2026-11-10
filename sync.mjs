@@ -51,7 +51,7 @@ try {
     catch (err) { problems.push(`upstreams.json: ${err.message}`); }
     if (parsed) {
       const KINDS = new Set(['image-pin', 'mcp', 'rule-set', 'skill', 'plugin']);
-      const CHECKS = new Set(['github-release', 'github-path', 'npm', 'node-dist', 'chrome-for-testing']);
+      const CHECKS = new Set(['github-release', 'github-path', 'npm', 'node-dist', 'chrome-for-testing', 'pypi']);
       const items = Array.isArray(up.items) ? up.items : [];
       const own = Array.isArray(up.own) ? up.own : [];
       items.forEach((item, i) => {
@@ -97,10 +97,17 @@ try {
         const bare = unwrapCmd(cfg) ?? cfg ?? {}; // a Windows capture wraps npx in cmd /c; judge the real program
         const strs = [bare.command, ...serverArgs(bare)].filter(s => typeof s === 'string');
         const firstArg = serverArgs(bare).find(a => !a.startsWith('-'));
+        const pySpec = bare.command === 'uvx' ? firstArg
+          : (bare.command === 'pipx' && firstArg === 'run') ? serverArgs(bare).slice(1).find(a => !a.startsWith('-')) : undefined;
         const ok = strs.some(s => /(^|[\\/])plugins[\\/]/.test(s))
+          || (typeof bare.command === 'string' && own.some(g => globRe(g).test(bare.command)))
           || ((bare.command === 'npx' || bare.command === 'bunx') && items.some(it => it?.kind === 'mcp'
-            && typeof it.check?.package === 'string' && (firstArg === it.check.package || firstArg?.startsWith(`${it.check.package}@`))));
-        if (!ok) uncovered.push(`user/omp/agent/mcp.json "${name}"`);
+            && typeof it.check?.package === 'string' && (firstArg === it.check.package || firstArg?.startsWith(`${it.check.package}@`))))
+          || (typeof pySpec === 'string' && pySpec.includes('==') && items.some(it => it?.kind === 'mcp' && it.check?.type === 'pypi'
+            && typeof it.check?.package === 'string' && it.check.package && (pySpec === it.check.package || pySpec.startsWith(`${it.check.package}==`))));
+        if (!ok && typeof pySpec === 'string' && !pySpec.includes('=='))
+          problems.push(`user/omp/agent/mcp.json "${name}": ${bare.command === 'pipx' ? 'pipx run' : bare.command} package "${pySpec}" is not pinned to a version — pin it in mcp.json args as "${pySpec}==<version>" and add an upstreams.json item with check {"type":"pypi","package":"${pySpec}"}`);
+        else if (!ok) uncovered.push(`user/omp/agent/mcp.json "${name}"`);
       }
       uncovered.sort().forEach(p => problems.push(`${p}: no recorded origin — add an item to upstreams.json or an own entry`));
     }

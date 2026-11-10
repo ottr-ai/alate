@@ -1228,6 +1228,12 @@ try {
       return reply(200, { time: { '1.2.0': T.ctx60, '1.3.0': T.ctx10 }, versions: {} });
     if (url.pathname === '/npm/@xynogen/pix-skills')
       return reply(200, { time: { '0.8.5': T.npm20 }, versions: {} });
+    if (url.pathname === '/pypi/fake-pypi-pkg/json')
+      return reply(200, { info: { version: '1.2.3' }, releases: {
+        '1.2.3': [{ upload_time_iso_8601: T.npm90 }],
+        '1.3.0': [{ upload_time_iso_8601: T.npm20 }],
+        '1.4.0-b1': [{ upload_time: T.npm20 }],
+      } });
     if (url.pathname === '/npm/chrome-devtools-mcp')
       return reply(200, { time: { '1.10.1': T.npm90, '1.11.0': T.npm20 }, versions: {} });
     if (url.pathname === '/dist/index.json')
@@ -1254,6 +1260,7 @@ try {
       { name: 'pin-demo', kind: 'image-pin', origin: 'https://github.com/fake/image', pin: { repo: 'demo/private', file: 'Dockerfile.worker', key: 'DEMO_IMAGE' } },
       { name: 'from-demo', kind: 'image-pin', origin: 'https://github.com/fake/other', pin: { repo: 'demo/updates', file: 'Dockerfile', key: 'ghcr.io/fake/other' }, check: { type: 'npm', package: 'fake-demo-pkg' } },
       { name: 'mcp-demo', kind: 'mcp', origin: 'https://github.com/fake/mcp', check: { type: 'npm', package: 'chrome-devtools-mcp' }, pin: { repo: 'demo/updates', file: 'user/omp/agent/mcp.json', key: 'chrome-devtools-mcp@' } },
+      { name: 'pypi-demo', kind: 'mcp', origin: 'https://github.com/fake/pypi-mcp', check: { type: 'pypi', package: 'fake-pypi-pkg' }, pin: { repo: 'demo/updates', file: 'user/omp/agent/mcp.json', key: 'fake-pypi-pkg' } },
       { name: 'miss-demo', kind: 'image-pin', origin: 'https://github.com/fake/miss', pin: { repo: 'demo/updates', file: 'Dockerfile', key: 'MISSING_PIN' } },
       { name: 'gap-demo', kind: 'skill', origin: 'https://github.com/fake/gap', check: { type: 'github-path', branch: 'main' } },
       { name: 'node-demo', kind: 'mcp', origin: 'https://github.com/fake/node-mcp', version: '22.1.0', check: { type: 'node-dist', major: 22 } },
@@ -1290,7 +1297,7 @@ try {
     writeFileSync(join(upRepo, 'user', 'omp', 'plugins', 'package.json'), JSON.stringify({ dependencies: { 'context-mode': '^1.0.5', 'caveman-installer': 'github:JuliusBrussee/caveman', '@xynogen/pix-optimizer': 'npm:@xynogen/pix-optimizer', '@xynogen/pix-skills': 'npm:@xynogen/pix-skills@^0.8' } }));
     // The real mcp.json shape: the pinned version rides an npx args token.
     mkdirSync(join(upRepo, 'user', 'omp', 'agent'), { recursive: true });
-    writeFileSync(join(upRepo, 'user', 'omp', 'agent', 'mcp.json'), JSON.stringify({ mcpServers: { 'chrome-devtools-mcp': { command: 'cmd', args: ['/c', 'npx', '-y', 'chrome-devtools-mcp@1.10.1', '--no-usage-statistics'] } } }));
+    writeFileSync(join(upRepo, 'user', 'omp', 'agent', 'mcp.json'), JSON.stringify({ mcpServers: { 'chrome-devtools-mcp': { command: 'cmd', args: ['/c', 'npx', '-y', 'chrome-devtools-mcp@1.10.1', '--no-usage-statistics'] }, 'fake-pypi-mcp': { command: 'uvx', args: ['fake-pypi-pkg==1.2.3'] } } }));
     assert.equal(git(['init', upRepo]).status, 0);
     assert.equal(git(['-C', upRepo, 'add', '-A']).status, 0);
     assert.equal(git(['-C', upRepo, '-c', 'user.email=test@example.com', '-c', 'user.name=test', 'commit', '-m', 'updates fixture']).status, 0);
@@ -1313,6 +1320,7 @@ try {
       ...serverEnv, PATH: `${tmpBin}${delimiter}${serverEnv.PATH ?? ''}`,
       ALATE_TEST_GITHUB_API_BASE: `${upBase}/gh`, ALATE_TEST_NPM_BASE: `${upBase}/npm`,
       ALATE_TEST_NODE_DIST_BASE: `${upBase}/dist`, ALATE_TEST_CFT_BASE: `${upBase}/cft`,
+      ALATE_TEST_PYPI_BASE: `${upBase}`,
     });
     let apiKeyUp = '';
     base = await new Promise((resolve, reject) => {
@@ -1342,14 +1350,14 @@ try {
     assert.equal((await postJson('/api/settings', { token: 'updates-gh-token-3f9' })).status, 200);
     r = await postImport(JSON.stringify({ source: 'https://github.com/demo/updates.git', kind: 'repo' }));
     assert.equal(r.status, 200, JSON.stringify(await r.json()));
-    // GET /api/updates serves only records the board accepts; /api/state keeps all 17.
+    // GET /api/updates serves only records the board accepts; /api/state keeps all 18.
     // Capture both views in the same poll that sees them: a bare refetch could read a
     // later tick that carried a lock-lost row forward.
     let stateRows, providerRows;
     await waitFor(async () => {
       const state = (await (await get('/api/state')).json()).updates;
       providerRows = (await (await authed('/api/updates')).json()).updates;
-      if (state?.updates?.length !== 17 || providerRows?.length !== 7) return false;
+      if (state?.updates?.length !== 18 || providerRows?.length !== 8) return false;
       stateRows = Object.fromEntries(state.updates.map(u => [u.name, u]));
       return true;
     }, 20_000);
@@ -1403,6 +1411,16 @@ try {
     assert.equal(mcp.latest, '1.11.0');
     assert.equal(mcp.target, '1.11.0');
     assert.deepEqual(mcp.pin, { file: 'user/omp/agent/mcp.json', key: 'chrome-devtools-mcp@' });
+
+    // A plain key reads the version from a `<package>==<version>` token (a pinned Python
+    // MCP server); the pypi check mirrors the npm stable pick over the releases map.
+    const pypi = rows['pypi-demo'];
+    assert.equal(pypi.current, '1.2.3', 'the pinned version from the mcp.json args token');
+    assert.equal(pypi.latest, '1.3.0', 'prerelease versions stay out');
+    assert.equal(pypi.target, '1.3.0', '1.3.0 is 20 days old, so it qualifies');
+    assert.equal(pypi.publishedAt, T.npm20);
+    assert.equal(pypi.notesUrl, 'https://pypi.org/project/fake-pypi-pkg');
+    assert.deepEqual(pypi.pin, { file: 'user/omp/agent/mcp.json', key: 'fake-pypi-pkg' });
 
     // No pin and no lock entry: the check still runs with an unknown current.
     const gap = stateRows['gap-demo'];
@@ -1487,7 +1505,7 @@ try {
 
     // The dashboard payload carries the same rows on /api/state.
     const state = await (await get('/api/state')).json();
-    assert.equal(state.updates.updates.length, 17);
+    assert.equal(state.updates.updates.length, 18);
     assert.equal(typeof state.updates.checkedAt, 'string');
 
     // The stored GitHub key goes to GitHub endpoints only, never to npm, node or cft.
@@ -1579,6 +1597,7 @@ try {
       ...serverEnv, PATH: `${tmpBin}${delimiter}${serverEnv.PATH ?? ''}`,
       ALATE_TEST_GITHUB_API_BASE: `${upBase}/gh`, ALATE_TEST_NPM_BASE: `${upBase}/npm`,
       ALATE_TEST_NODE_DIST_BASE: `${upBase}/dist`, ALATE_TEST_CFT_BASE: `${upBase}/cft`,
+      ALATE_TEST_PYPI_BASE: `${upBase}`,
     });
     let apiKey2 = '';
     base = await new Promise((resolve, reject) => {
@@ -1602,10 +1621,10 @@ try {
     assert.equal((await postJson('/api/settings', { autoUpdate: true })).status, 200, 'auto-update refresh drives the selectSource trigger');
     r = await postImport(JSON.stringify({ source: 'https://github.com/demo/upd2.git', kind: 'repo' }));
     assert.equal(r.status, 200, JSON.stringify(await r.json()));
-    // Same split as the first server: /api/state keeps all 17 rows, the provider serves 7.
+    // Same split as the first server: /api/state keeps all 18 rows, the provider serves 8.
     const allRows = async () => (await (await get('/api/state')).json()).updates.updates;
-    await waitFor(async () => (await allRows()).length === 17, 20_000);
-    await waitFor(async () => (await updatesBody()).updates.length === 7, 20_000);
+    await waitFor(async () => (await allRows()).length === 18, 20_000);
+    await waitFor(async () => (await updatesBody()).updates.length === 8, 20_000);
     assert.ok((await updatesBody()).updates.every(isValidUpdateRecord), 'every served record passes the board shape');
     let rows2 = await updatesBody();
     const from0 = rows2.updates.find(u => u.name === 'from-demo');
@@ -1734,6 +1753,7 @@ try {
       ...serverEnv, PATH: `${tmpBin}${delimiter}${serverEnv.PATH ?? ''}`,
       ALATE_TEST_GITHUB_API_BASE: `${upBase}/gh`, ALATE_TEST_NPM_BASE: `${upBase}/npm`,
       ALATE_TEST_NODE_DIST_BASE: `${upBase}/dist`, ALATE_TEST_CFT_BASE: `${upBase}/cft`,
+      ALATE_TEST_PYPI_BASE: `${upBase}`,
     });
     let apiKey3 = '';
     base = await new Promise((resolve, reject) => {

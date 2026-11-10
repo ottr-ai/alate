@@ -325,6 +325,66 @@ try {
     '  xa+b.md: no recorded origin — add an item to upstreams.json or an own entry',
   ].join('\n') + '\n');
 
+  // Pinned Python MCP servers (uvx / pipx run) and own-glob coverage for self-written servers.
+  const pypiItem = pkg => ({ name: 'atl', kind: 'mcp', origin: 'https://github.com/x/y', check: { type: 'pypi', package: pkg } });
+  const mcpReset = servers => {
+    reset2();
+    put2('r.md', rule);
+    mkdirSync(join(data2, 'user/omp/agent'), { recursive: true });
+    put2('user/omp/agent/mcp.json', JSON.stringify({ mcpServers: servers }));
+  };
+  const gateRun = (up, tname) => {
+    put2('upstreams.json', JSON.stringify(up));
+    return run(freshTarget(tname), ['--data', data2]);
+  };
+
+  // 1. Pinned uvx + pypi item: covered, installs cleanly.
+  mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==0.24.1'] } });
+  r = gateRun({ own: ['r.md'], items: [pypiItem('mcp-atlassian')] }, 'rules-py1');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stderr, '');
+
+  // 2. Unpinned uvx: the specific unpinned message, not the generic hint.
+  mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian'] } });
+  r = gateRun({ own: ['r.md'], items: [pypiItem('mcp-atlassian')] }, 'rules-py2');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "atl": uvx package "mcp-atlassian" is not pinned to a version — pin it in mcp\.json args as "mcp-atlassian==<version>" and add an upstreams\.json item with check \{"type":"pypi","package":"mcp-atlassian"\}/);
+
+  // 3. pipx run: pinned passes, unpinned gets the pipx run message.
+  mcpReset({ sx: { command: 'pipx', args: ['run', 'mcp-server-x==1.2.3'] } });
+  r = gateRun({ own: ['r.md'], items: [{ name: 'atl', kind: 'mcp', origin: 'https://github.com/x/y', check: { type: 'pypi', package: 'mcp-server-x' } }] }, 'rules-py3');
+  assert.equal(r.status, 0, r.stderr);
+  mcpReset({ sx: { command: 'pipx', args: ['run', 'mcp-server-x'] } });
+  r = gateRun({ own: ['r.md'], items: [pypiItem('mcp-server-x')] }, 'rules-py4');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /"sx": pipx run package "mcp-server-x" is not pinned to a version/);
+
+  // 4. Own glob covers a self-written server; a non-matching own list leaves it uncovered.
+  mcpReset({ mine: { command: '/home/u/.omp/agents/servers/my-mcp.py', args: [] } });
+  r = gateRun({ own: ['r.md', '**/servers/*.py'], items: [] }, 'rules-py5');
+  assert.equal(r.status, 0, r.stderr);
+  r = gateRun({ own: ['/home/u/other/**', 'r.md'], items: [] }, 'rules-py6');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "mine": no recorded origin — add an item to upstreams\.json or an own entry/);
+
+  // 5. Pinned spec but no pypi item: generic uncovered line with the standard hint.
+  mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==0.24.1'] } });
+  r = gateRun({ own: ['r.md'], items: [] }, 'rules-py7');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "atl": no recorded origin — add an item to upstreams\.json or an own entry/);
+
+  // 6. Type discrimination: an npm item with the same package never covers a Python server.
+  mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==0.24.1'] } });
+  r = gateRun({ own: ['r.md'], items: [{ name: 'atl', kind: 'mcp', origin: 'https://github.com/x/y', check: { type: 'npm', package: 'mcp-atlassian' } }] }, 'rules-py8');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "atl": no recorded origin/);
+
+  // 7. A pypi item without a usable package string does not cover.
+  mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==0.24.1'] } });
+  r = gateRun({ own: ['r.md'], items: [{ name: 'atl', kind: 'mcp', origin: 'https://github.com/x/y', check: { type: 'pypi' } }] }, 'rules-py9');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "atl": no recorded origin/);
+
   if (process.platform === 'win32') {
     const link = join(tmp, 'rules-link');
     symlinkSync(data, link, 'junction');

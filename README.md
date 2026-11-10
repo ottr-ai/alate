@@ -69,7 +69,18 @@ With `ALATE_LAYER=1` (compose.yaml sets it), `install-user.mjs` installs each pr
 - `user/`: home-relative snapshot without the leading dot (`~/.omp/agent/config.yml` → `user/omp/agent/config.yml`). Capture strips the `backend:` entry under the top-level `memory:` key, and the emptied `memory:` mapping with it. The memory backend is a deployment setting that the board injects at spawn time, not agent-layer content. A `*.md` or `*.mdc` file directly under `user/omp/agent/rules/` is a rule: it needs the same `description:` frontmatter and clean characters as the root rules. Every other `*.md`/`*.mdc` in the snapshot (agent context such as `AGENTS.md` or `RULES.md`) needs the same clean characters.
 - `projects/projects.json` plus `projects/<name>/`: per-project agent-context snapshots.
 - `workers/<project>/` plus the fleet folder `workers/_all/`: the worker additions Ottr's turns install. `apt.txt` lists Debian packages, one per line, `#` comments. `tools.json` is a JSON array of downloads; each entry has `name`, `url` (`https://` only), `sha256` (64 lowercase hex characters), `unpack` (`zip`, `tar.gz` or `none`), and `bin` (the executable inside the archive; absent when `unpack` is `none`). `env.txt` lists env var names, one per line, `#` comments; names only, never values. `requirements.txt` lists Python packages, one pinned and hashed line per package: `name==version --hash=sha256:<64 hex>`, one or more `--hash` tokens, `#` comments and blank lines, no options, extras, or URL requirements. `install-user.mjs` validates `tools.json`, `env.txt`, and `requirements.txt` before it writes anything.
-- `upstreams.json` (optional): records the origin of each public item. When the file exists, `sync.mjs` refuses items with no recorded origin. The root `own` list holds files you wrote yourself.
+- `upstreams.json` (optional): records the origin of each public item. When the file exists, `sync.mjs` refuses items with no recorded origin. The root `own` list holds files you wrote yourself. `sync.mjs` also checks the MCP servers in `user/omp/agent/mcp.json`: a server that runs a pinned `npx`, `bunx`, `uvx`, or `pipx run` package needs a `kind: "mcp"` item with an `npm` or `pypi` check for that package, and a self-written server needs an `own` entry for its command path.
+
+### MCP servers
+
+When `upstreams.json` exists, `sync.mjs` refuses provision if an `mcp.json` server has no recorded origin. A server counts as covered when one of these holds:
+
+- Its command or args mention a `plugins/` path. These are the bundled plugin servers.
+- It runs `npx` or `bunx`, and a `kind: "mcp"` item has `check: { "type": "npm", "package": ... }` that matches the first non-flag arg as `package` or `package@version`.
+- It runs `uvx`, or `pipx` with first arg `run`, and a `kind: "mcp"` item has `check: { "type": "pypi", "package": ... }` that matches the first non-flag spec as `package` or `package==version` (PEP 440).
+- Its command path matches a glob in the root `own` list. The globs accept only `**`, `*` and `?`. Use this for a server you wrote yourself.
+
+Pin each Python server: a `uvx` or `pipx run` spec without `==version` is an unpinned server. The refusal names the package and tells you to pin it or add the pypi check item. An uncovered server gets a refusal that names the server and tells you to add an item or an `own` entry. All refusals appear in one message, and nothing installs. The machine that runs the server needs `uvx` or `pipx` on its `PATH`; alate records only the origin and does not install uv or pipx. The updates board checks pypi items like npm items, with the PyPI JSON API and the latest stable release by upload time.
 
 ## Scripts
 
