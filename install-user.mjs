@@ -33,7 +33,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { assertSourceInside, checkDestination, cleanupData, fingerprint, forTarget, nextLayerCounter, parseArgs, remapHomePaths, resolveDataDir, ruleProblems, sameContent, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, cleanupData, fingerprint, forTarget, nextLayerCounter, parseArgs, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend } from './lib/data.mjs';
 
 const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home'], ['--force', '--skip-plugins', '--layer']);
 const home = args.values['--home'] ?? homedir();
@@ -432,6 +432,26 @@ try {
   // user/ itself is not a user-chosen root: a junction here would relocate the whole
   // snapshot outside the data dir, so it is pinned to canonical data.dir before walking.
   assertSourceInside(data.dir, userRoot);
+  // Check source bytes on every install, before target reads, scanner calls, or layer creation.
+  const skillDirs = collectSkillDirs(userRoot);
+  const skillEntrypoints = new Set();
+  const skillGate = [];
+  for (const dir of skillDirs) {
+    const entrypoint = join(dir, 'SKILL.md');
+    const label = `user/${relative(userRoot, entrypoint).split(sep).join('/')}`;
+    skillEntrypoints.add(entrypoint);
+    let text;
+    try {
+      assertSourceInside(userRoot, entrypoint);
+      if (!statSync(entrypoint).isFile()) throw new Error('SKILL.md must be a regular file');
+      text = readFileSync(entrypoint, 'utf8');
+    } catch (err) {
+      skillGate.push(`${label}: cannot read SKILL.md (${err.message})`);
+      continue;
+    }
+    skillGate.push(...skillProblems(label, text));
+  }
+  if (skillGate.length) throw new Error(`Nothing installed. Fix:\n  ${skillGate.join('\n  ')}`);
   const walk = (dir, sub = '') => readdirSync(dir, { withFileTypes: true }).flatMap(e =>
     SKIP_DIRS.has(e.name) ? []
       : e.isDirectory() ? walk(join(dir, e.name), sub ? `${sub}/${e.name}` : e.name)
@@ -594,7 +614,7 @@ try {
     // description. omp loads agent-context Markdown elsewhere in the snapshot as always-on
     // instructions too (AGENTS.md, RULES.md, SYSTEM.md, CLAUDE.md), so every .md/.mdc gets the
     // hidden-character scan; only the snapshot's own rules dir is a rule and needs the frontmatter.
-    if (/\.(md|mdc)$/.test(rel)) ruleGate.push(...ruleProblems(`user/${rel}`, src.toString('utf8'), { frontmatter: /^omp\/agent\/rules\/[^/]+\.mdc?$/.test(rel) }));
+    if (/\.(md|mdc)$/.test(rel) && !skillEntrypoints.has(srcPath)) ruleGate.push(...ruleProblems(`user/${rel}`, src.toString('utf8'), { frontmatter: /^omp\/agent\/rules\/[^/]+\.mdc?$/.test(rel) }));
     // The machine text minus its deployment blocks (lib/data.mjs keeps the last kept line's
     // terminator). `dropped` holds credentials: never log it.
     const have = machineFingerprint(rel, readDest);
@@ -695,7 +715,6 @@ try {
   // or record update below (layer mode scans the installed layer after the writes, before the
   // switch). Skills already recorded as unchanged are scanned again too: a copy a pre-gate
   // alate installed was never scanned, and the manifest cannot prove it was.
-  const skillDirs = collectSkillDirs(userRoot);
   if (!layerMode && skillDirs.length) await runScan(skillDirs);
 
   // Layer mode: everything from here to the switch is disposable. Any failure before the

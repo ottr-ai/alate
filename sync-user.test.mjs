@@ -24,6 +24,7 @@ copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(rep
 const put = (rel, text) => { mkdirSync(join(home, rel, '..'), { recursive: true }); writeFileSync(join(home, rel), text); };
 const run = () => spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', home, '--data', data], { encoding: 'utf8' });
 const snap = rel => readFileSync(join(data, 'user', rel), 'utf8');
+const skillText = (name, body = `# ${name}\n`) => `---\nname: ${name}\ndescription: Test skill.\n---\n${body}`;
 // Assembled at runtime so this file never holds a credential-shaped literal.
 const FAKES = {
   'AWS access key': 'AKIA' + 'Z7'.repeat(8),
@@ -40,9 +41,9 @@ try {
   put('.omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\nmaxTokens: 128000000\napiKey: ${ZAI_API_KEY}\n');
   put('.omp/agent/mcp.json', JSON.stringify({ mcpServers: { gh: { env: { GITHUB_TOKEN: '${GITHUB_TOKEN}' }, headers: { Authorization: 'Bearer ${GH_PAT}' } } } }, null, 2));
   // Docs that only mention keys, and secret-named keys outside the hand-edited config, still sync.
-  put('.omp/agent/skills/mine/SKILL.md', '# mine\nKeys look like sk-..., ghp_... or AKIA...; use https://user:${PASS}@host.\napiKey: your-key-goes-here\n');
+  put('.omp/agent/skills/mine/SKILL.md', skillText('mine', '# mine\nKeys look like sk-..., ghp_... or AKIA...; use https://user:${PASS}@host.\napiKey: your-key-goes-here\n'));
   put('.omp/agent/skills/mine/__pycache__/x.pyc', 'cache');
-  put('.omp/agent/managed-skills/learned/SKILL.md', '# learned\n');
+  put('.omp/agent/managed-skills/learned/SKILL.md', skillText('learned'));
   put('.omp/agent/optimizer.json', '{"ponytail":"full"}\n');
   const PIX = '{"optimizer":true,"pretty":true,"gate":true}\n';
   put('.pi/agent/pix.json', PIX);
@@ -54,7 +55,7 @@ try {
   put('.omp/plugins/omp-plugins.lock.json', '{}\n');
   put('.omp/plugins/installed_plugins.json', '{"version":2,"plugins":{}}\n');
   put('.agents/.skill-lock.json', '{"skills":{}}\n');
-  put('.agents/skills/theirs/SKILL.md', '# theirs\n');
+  put('.agents/skills/theirs/SKILL.md', skillText('theirs'));
   put('.agents/skills/theirs/node_modules/dep/index.js', '');
 
   let r = run();
@@ -67,7 +68,7 @@ try {
   assert.ok(!existsSync(join(data, 'user/pi/agent/optimizer.json')), 'pix runtime state stays machine-local');
   assert.match(r.stdout, /14 added, 0 updated, 0 unchanged/);
 
-  writeFileSync(join(data, 'user/agents/skills/theirs/SKILL.md'), '# theirs\r\n'); // line endings only -> not churned
+  writeFileSync(join(data, 'user/agents/skills/theirs/SKILL.md'), skillText('theirs').replaceAll('\n', '\r\n')); // line endings only -> not churned
   rmSync(join(home, '.omp/agent/managed-skills/learned'), { recursive: true });
   r = run();
   assert.equal(r.status, 0, r.stderr);
@@ -81,9 +82,9 @@ try {
     assert.equal(r.status, 1, `${name} must be refused`);
     assert.ok(r.stderr.includes(`~/.agents/skills/theirs/SKILL.md:3: possible ${name}`), r.stderr);
     assert.ok(!r.stderr.includes(fake), 'never prints the secret');
-    assert.equal(snap('agents/skills/theirs/SKILL.md'), '# theirs\r\n', 'a refused run syncs nothing');
+    assert.equal(snap('agents/skills/theirs/SKILL.md'), skillText('theirs').replaceAll('\n', '\r\n'), 'a refused run syncs nothing');
   }
-  put('.agents/skills/theirs/SKILL.md', '# theirs\n');
+  put('.agents/skills/theirs/SKILL.md', skillText('theirs'));
 
   // The new pix.json item goes through the same credential shape scan as any other item.
   put('.pi/agent/pix.json', `{"gate":"${FAKES['GitHub token']}"}\n`);

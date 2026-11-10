@@ -82,6 +82,15 @@ With `ALATE_LAYER=1` (compose.yaml sets it), `install-user.mjs` installs each pr
 
 All install scripts take `--data <dir>` or `--repo <owner/name[@ref]>` (set `GH_TOKEN` for private repos). The repo form also accepts `<host>/owner/name[@ref]` for a GitHub Enterprise Cloud tenant (`acme.ghe.com`) or Enterprise Server host (`git.example.com`), or a full `https://` URL; `ALATE_GITHUB_HOST` is the ambient default host, and the token goes only to the configured host. Capture scripts take `--data <dir>` only.
 
+Before any target write or SkillSpector call, `install-user.mjs` checks every source skill directory for a readable `SKILL.md`.
+Each file needs frontmatter at byte 0, a complete closing marker, a non-empty `name` and `description`, and no forbidden hidden characters.
+The name must match `^[a-z0-9][a-z0-9-]*$`.
+One invalid skill refuses the whole install and lists all invalid skill paths.
+The refusal leaves the home, manifest, scanner cache, and layers unchanged.
+This check runs even when SkillSpector has a cached pass.
+
+See the [skill snapshot structure gate specification](docs/specs/skill-structure-gate.md) for accepted scalar forms and boundaries.
+
 ## API
 
 | Route | Auth | Behavior |

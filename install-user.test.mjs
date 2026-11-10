@@ -4,11 +4,12 @@
 // The examples/data install workflow also skips plugins; neither proves Bun installation.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir, availableParallelism } from 'node:os';
 import { delimiter, dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, remapHomePaths, sameContent, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
+import { fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, remapHomePaths, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
 import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-install-'));
@@ -36,6 +37,7 @@ copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(scr
 // Layer mode spawns the real sync.mjs beside the script for the rules install.
 copyFileSync(fileURLToPath(new URL('./sync.mjs', import.meta.url)), join(scriptDir, 'sync.mjs'));
 const put = (rel, text) => { mkdirSync(join(data, 'user', rel, '..'), { recursive: true }); writeFileSync(join(data, 'user', rel), text); };
+const skillText = (name, body = `# ${name}\n`) => `---\nname: ${name}\ndescription: Test skill.\n---\n${body}`;
 const run = (extra, h = home, env, cwd) => {
   // Neutralize an inherited SKILLSPECTOR_BIN (the container image sets it) unless this call
   // provides one: the tests below manage scanner resolution explicitly.
@@ -97,12 +99,165 @@ try {
   assert.match(r.stderr, /No user\/ snapshot/);
   assert.ok(r.stderr.includes(data), r.stderr);
 
+  // The structure gate checks source bytes before scans, writes, deletions, or layer creation.
+  if (scanned) {
+    const malformedSkills = [
+      ['missing-entrypoint', null],
+      ['unreadable-entrypoint', undefined],
+      ['no-frontmatter', '# Private body sentinel.\n'],
+      ['leading-newline', `\n${skillText('demo')}`],
+      ['leading-space', ` ${skillText('demo')}`],
+      ['leading-comment', `# Prefix sentinel.\n${skillText('demo')}`],
+      ['bom', `\uFEFF${skillText('demo')}`],
+      ['opening-suffix', '---suffix\nname: demo\ndescription: Test.\n---\n'],
+      ['missing-closing', '---\nname: demo\ndescription: Test.\n'],
+      ['closing-suffix', '---\nname: demo\ndescription: Test.\n---suffix\n'],
+      ['closing-indented', '---\nname: demo\ndescription: Test.\n ---\n'],
+      ['missing-name', '---\ndescription: Test.\n---\nname: body-only\n'],
+      ['blank-name', '---\nname: \ndescription: Test.\n---\n'],
+      ['empty-quoted-name', '---\nname: ""\ndescription: Test.\n---\n'],
+      ['comment-name', '---\nname: # Comment sentinel.\ndescription: Test.\n---\n'],
+      ['escaped-invalid-name', '---\nname: "bad\\u0020name"\ndescription: Test.\n---\n'],
+      ['escaped-empty-description', '---\nname: demo\ndescription: "\\n"\n---\n'],
+      ...['Bad', 'bad_name', 'bad.name', '-bad', 'bad/name', 'bad name', 'café'].map((name, i) => [`invalid-name-${i}`, skillText(name)]),
+      ['missing-description', '---\nname: demo\n---\ndescription: body-only\n'],
+      ...['', '   ', "''", '""', '"  "', '# Comment sentinel.', '|', '>', '|-\n  ', '>+\n  ']
+        .map((value, i) => [`empty-description-${i}`, `---\nname: demo\ndescription: ${value}\n---\nBody\n`]),
+      ['indented-comment-description', '---\nname: demo\ndescription:\n  # Comment sentinel.\n---\n'],
+      ['indented-empty-description', '---\nname: demo\ndescription:\n  ""\n---\n'],
+      ['hidden-body', skillText('demo', 'Private\u200Bbody sentinel.\n')],
+      ['hidden-description', '---\nname: demo\ndescription: Private\u202Edescription sentinel.\n---\n'],
+    ];
+    const malformedRel = name => `${['omp/agent/skills', 'omp/agent/managed-skills', 'agents/skills'][malformedSkills.findIndex(([entry]) => entry === name) % 3]}/${name}`;
+    const validSkills = [
+      ['omp/agent/skills/demo', skillText('demo')],
+      ['omp/agent/managed-skills/managed', "---\nname: 'managed'\ndescription: \"Quoted description.\"\nlicense: MIT\n---\nBody\n"],
+      ['agents/skills/agents', '---\r\nname: agents\r\ndescription: Test CRLF.\r\n---\r\nBody\r\n'],
+      ['omp/agent/skills/literal', '---\nname: literal\ndescription: |-\n  First line.\n  Second line.\n---\nBody\n'],
+      ['omp/agent/skills/folded', '---\nname: folded\ndescription: >+\n  First line.\n  Second line.\n---\nBody\n'],
+      ['omp/agent/skills/indented', '---\nname: indented\ndescription:\n  Indented description.\n---\nBody\n'],
+      ['omp/agent/skills/multiline', '---\nname: multiline\ndescription:\n  "First line.\n  Second line."\n---\nBody\n'],
+      ['omp/agent/skills/comment-text', '---\nname: comment-text\ndescription: |\n  # Literal text, not a YAML comment.\n---\nBody\n'],
+      ['omp/agent/skills/emoji', skillText('emoji', 'Normal emoji: 👩‍💻 and ☀️.\n')],
+    ];
+    const snapshot = root => {
+      if (!existsSync(root)) return null;
+      const entries = [];
+      const visit = path => {
+        const stat = lstatSync(path);
+        entries.push([path, stat.mode, stat.mtimeMs, stat.isSymbolicLink() ? readlinkSync(path) : stat.isDirectory() ? null : readFileSync(path).toString('hex')]);
+        if (stat.isDirectory()) for (const entry of readdirSync(path).sort()) visit(join(path, entry));
+      };
+      visit(root);
+      return entries;
+    };
+    for (const layer of [false, true]) {
+      const gateData = join(tmp, layer ? 'structure-layer-data' : 'structure-data');
+      const gatePut = (rel, text) => {
+        const path = join(gateData, 'user', rel);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, text);
+      };
+      gatePut('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+      gatePut('omp/agent/AUX.md', 'A recorded file must survive refusal.\n');
+      for (const [rel, text] of validSkills) gatePut(`${rel}/SKILL.md`, text);
+      const target = join(tmp, layer ? 'structure-layer-home' : 'structure-home');
+      const extra = ['--data', gateData, '--skip-plugins', ...(layer ? ['--layer'] : [])];
+      let result = run(extra, target);
+      assert.equal(result.status, 0, `valid skill metadata installs: ${result.stderr}`);
+      result = run(extra, target);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /0 of 9 skill snapshot\(s\) \(9 cached\)/, 'the fixture starts with a warm scanner cache');
+      for (const [name, text] of malformedSkills) {
+        const rel = malformedRel(name);
+        if (text === undefined) mkdirSync(join(gateData, 'user', rel, 'SKILL.md'), { recursive: true });
+        else if (text === null) gatePut(`${rel}/README.md`, 'Missing entrypoint.\n');
+        else gatePut(`${rel}/SKILL.md`, text);
+      }
+      // A genuine cache-key envelope with a malformed file hash proves that cached passes
+      // cannot replace structural validation. This folder contains one file only.
+      const cachePath = join(target, '.alate/skillspector-pass.json');
+      const passes = JSON.parse(readFileSync(cachePath, 'utf8'));
+      const bytes = Buffer.from(malformedSkills.find(([name]) => name === 'no-frontmatter')[1]);
+      const digest = createHash('sha256').update(`f\0SKILL.md\0${bytes.length}\0${createHash('sha256').update(bytes).digest('hex')}\0`).digest('hex');
+      const cachedKey = Object.keys(passes)[0].replace(/^(skill-pass-fmt-\d+) \S+ /, `$1 ${digest} `);
+      passes[cachedKey] = true;
+      writeFileSync(cachePath, `${JSON.stringify(passes, null, 2)}\n`);
+      gatePut('omp/agent/config.yml', 'modelRoles:\n  default: changed/model\n');
+      rmSync(join(gateData, 'user/omp/agent/AUX.md'));
+      const before = snapshot(target);
+      const childBefore = snapshot(childHome);
+      const callsBefore = readFileSync(callsLog, 'utf8');
+      result = run([...extra, '--force'], target);
+      assert.equal(result.status, 1, `invalid skills refuse ${layer ? 'layer' : 'normal'} installs`);
+      for (const [name] of malformedSkills) {
+        assert.ok(result.stderr.includes(`user/${malformedRel(name)}/SKILL.md`), `the refusal aggregates ${name}: ${result.stderr}`);
+      }
+      for (const value of ['Private body sentinel.', 'Prefix sentinel.', 'Comment sentinel.', 'bad_name', 'café']) {
+        assert.ok(!result.stderr.includes(value), 'diagnostics do not print field or body text');
+      }
+      assert.deepEqual(snapshot(target), before, 'refusal changes no target file, manifest, cache, directory, or layer');
+      assert.deepEqual(snapshot(childHome), childBefore, 'refusal leaves the child home untouched');
+      assert.equal(readFileSync(callsLog, 'utf8'), callsBefore, 'structure refusal precedes every scanner invocation');
+      assert.ok(!/\d+ installed/.test(result.stdout), 'refusal has no install summary');
+      const fresh = join(tmp, layer ? 'structure-layer-fresh' : 'structure-fresh');
+      result = run(extra, fresh);
+      assert.equal(result.status, 1, result.stderr);
+      assert.ok(!existsSync(fresh), 'an invalid source does not create the target home');
+      assert.equal(readFileSync(callsLog, 'utf8'), callsBefore, 'a fresh-home refusal also precedes the scanner');
+      assert.deepEqual(snapshot(childHome), childBefore, 'a fresh-home refusal leaves the child home untouched');
+    }
+  }
+
+  for (const name of ['a', '0', 'a--', '0-9', 'a'.repeat(300)]) {
+    assert.deepEqual(skillProblems('names/SKILL.md', skillText(name)), [], 'the name pattern adds no length or hyphen restriction');
+  }
+  for (const value of ['bad\\u0020name', 'bad\\tname', '\\u0042ad', 'bad\\u005fname']) {
+    const problems = skillProblems('escaped-name/SKILL.md', `---\nname: "${value}"\ndescription: Test.\n---\n`);
+    assert.ok(problems.length > 0, 'decoded invalid name characters refuse the skill');
+    assert.ok(problems.every(problem => problem.includes('escaped-name/SKILL.md')), 'escaped name problems name the source path');
+  }
+  for (const value of ['\\n', '\\t', '\\r', '\\u0020', '\\n\\t\\r\\u0020']) {
+    assert.ok(skillProblems('escaped-description/SKILL.md', `---\nname: demo\ndescription: "${value}"\n---\n`).length > 0, 'decoded blank descriptions refuse the skill');
+  }
+  for (const value of ['\\q', '\\x20', '\\xGG', '\\u12', '\\U00000065', '\\U00110000']) {
+    assert.ok(skillProblems('invalid-escape/SKILL.md', `---\nname: "${value}"\ndescription: Test.\n---\n`).length > 0, 'invalid name escapes refuse the skill');
+    assert.ok(skillProblems('invalid-escape/SKILL.md', `---\nname: demo\ndescription: "${value}"\n---\n`).length > 0, 'invalid description escapes refuse the skill');
+  }
+  for (const [name, description] of [
+    ['"d\\u0065mo"', '"A\\nvalid description."'],
+    ['"demo\\u002dname"', '"A \\"quoted\\" description."'],
+    ['"demo"', '"A \\\\ backslash."'],
+    ["'demo'", "'A ''quoted'' description.'"],
+  ]) {
+    assert.deepEqual(skillProblems('valid-escape/SKILL.md', `---\nname: ${name}\ndescription: ${description}\n---\n`), [], 'supported escaped metadata passes with decoded values');
+  }
+  const choose = (rand, values) => values[Math.floor(rand() * values.length)];
+  forAll((rand, size) => {
+    const first = choose(rand, 'abcdefghijklmnopqrstuvwxyz0123456789');
+    return first + Array.from({ length: Math.floor(rand() * size) }, () => choose(rand, 'abcdefghijklmnopqrstuvwxyz0123456789-')).join('');
+  }, name => {
+    assert.deepEqual(skillProblems('valid/SKILL.md', skillText(name)), []);
+    for (const invalid of [`-${name}`, `${name}_x`, `${name}X`, `${name}.x`, `${name}/x`, `${name}é`]) {
+      const problems = skillProblems('invalid/SKILL.md', skillText(invalid));
+      assert.ok(problems.length > 0, 'invalid name characters refuse the skill');
+      assert.ok(problems.every(problem => problem.includes('invalid/SKILL.md')), 'every problem names its path');
+    }
+  });
+  forAll(rand => choose(rand, ['\n', '\r\n', ' ', '\t', '\uFEFF', '# Prefix\n', 'body\n']), prefix => {
+    assert.ok(skillProblems('prefix/SKILL.md', prefix + skillText('demo')).length > 0, 'frontmatter must start at byte zero');
+  });
+  forAll(rand => choose(rand, [0, 1, 8, 11, 12, 14, 31, 127, 133, 159, 0x200b, 0x200d, 0x202e, 0x2066, 0xfe00, 0xfe0f, 0xfeff, 0xe0100]), cp => {
+    const problems = skillProblems('hidden/SKILL.md', skillText('demo', `Before${String.fromCodePoint(cp)}after.\n`));
+    assert.ok(problems.some(problem => problem.includes('hidden/SKILL.md') && /hidden character/.test(problem)), 'forbidden hidden characters refuse skill bodies');
+  });
+
   put('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
-  put('omp/agent/skills/mine/SKILL.md', '# mine\n');
+  put('omp/agent/skills/mine/SKILL.md', skillText('mine'));
   put('omp/plugins/package.json', '{"dependencies":{}}\n');
   put('omp/plugins/bun.lock', '{}\n');
   put('agents/.skill-lock.json', '{"skills":{}}\n');
-  put('agents/skills/theirs/SKILL.md', '# theirs\n');
+  put('agents/skills/theirs/SKILL.md', skillText('theirs'));
 
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
@@ -118,10 +273,10 @@ try {
 
   // A CRLF copy of the same bytes counts as unchanged, so autocrlf checkouts never churn a live home.
   mkdirSync(join(home, '.agents/skills/theirs'), { recursive: true });
-  writeFileSync(join(home, '.agents/skills/theirs/SKILL.md'), '# theirs\r\n');
+  writeFileSync(join(home, '.agents/skills/theirs/SKILL.md'), skillText('theirs').replaceAll('\n', '\r\n'));
   r = run(['--data', data, '--skip-plugins']);
   assert.match(r.stdout, /0 installed, 6 unchanged/);
-  assert.equal(got('.agents/skills/theirs/SKILL.md'), '# theirs\r\n', 'line-ending-only drift is not rewritten');
+  assert.equal(got('.agents/skills/theirs/SKILL.md'), skillText('theirs').replaceAll('\n', '\r\n'), 'line-ending-only drift is not rewritten');
 
   const live = '# mine, edited on the machine\n';
   writeFileSync(join(home, '.omp/agent/skills/mine/SKILL.md'), live);
@@ -132,18 +287,18 @@ try {
 
   r = run(['--data', data, '--force', '--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(got('.omp/agent/skills/mine/SKILL.md'), '# mine\n', '--force restores the snapshot');
+  assert.equal(got('.omp/agent/skills/mine/SKILL.md'), skillText('mine'), '--force restores the snapshot');
 
   // alate remembers what it installed: a newer snapshot replaces a file nobody changed since...
   const mine = '.omp/agent/skills/mine/SKILL.md';
-  put('omp/agent/skills/mine/SKILL.md', '# mine, v2\n');
+  put('omp/agent/skills/mine/SKILL.md', skillText('mine', '# mine, v2\n'));
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 0, `an untouched install takes the newer snapshot: ${r.stderr}`);
   assert.match(r.stdout, /1 installed, 5 unchanged/);
-  assert.equal(got(mine), '# mine, v2\n');
+  assert.equal(got(mine), skillText('mine', '# mine, v2\n'));
   // ...but not one changed on the machine since,
   writeFileSync(join(home, mine), live);
-  put('omp/agent/skills/mine/SKILL.md', '# mine, v3\n');
+  put('omp/agent/skills/mine/SKILL.md', skillText('mine', '# mine, v3\n'));
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 1, 'a file changed after the install is refused');
   assert.match(r.stderr, /commit the change to the data repo/);
@@ -151,11 +306,11 @@ try {
   // ...nor one it cannot vouch for: an unreadable record proves nothing.
   r = run(['--data', data, '--force', '--skip-plugins']);
   writeFileSync(join(home, '.alate/installed.json'), '{');
-  put('omp/agent/skills/mine/SKILL.md', '# mine, v4\n');
+  put('omp/agent/skills/mine/SKILL.md', skillText('mine', '# mine, v4\n'));
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 1, 'an unreadable record never licenses an overwrite');
   assert.match(r.stderr, /Ignoring unreadable/);
-  assert.equal(got(mine), '# mine, v3\n');
+  assert.equal(got(mine), skillText('mine', '# mine, v3\n'));
   r = run(['--data', data, '--force', '--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
   assert.ok(JSON.parse(got('.alate/installed.json'))['omp/agent/skills/mine/SKILL.md'], '--force writes a fresh record');
@@ -551,21 +706,27 @@ try {
   // and a rename lands as one install plus one delete in a single run.
   // Bring `home` up to the current snapshot first: the sections above changed config.yml,
   // mcp.json, marketplaces.json and the worker list in other homes, so this home has drifted.
+  put('omp/agent/skills/mine/AUX.md', '# auxiliary\n');
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
-  rmSync(join(data, 'user/omp/agent/skills/mine/SKILL.md'));
+  rmSync(join(data, 'user/omp/agent/skills/mine/AUX.md'));
   const renamed = '# mine, v5\n'; // hoisted so the zero-deps import scan (keyword + quote) never matches
   put('omp/agent/skills/mine/RENAME.md', renamed);
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /1 installed, 8 unchanged, 1 deleted/);
-  assert.match(r.stdout, /deleted  \.omp[/\\]agent[/\\]skills[/\\]mine[/\\]SKILL\.md/);
-  assert.ok(!existsSync(join(home, '.omp/agent/skills/mine/SKILL.md')));
+  assert.match(r.stdout, /1 installed, 9 unchanged, 1 deleted/);
+  assert.match(r.stdout, /deleted  \.omp[/\\]agent[/\\]skills[/\\]mine[/\\]AUX\.md/);
+  assert.ok(!existsSync(join(home, '.omp/agent/skills/mine/AUX.md')));
   assert.equal(got('.omp/agent/skills/mine/RENAME.md'), renamed);
   const record = JSON.parse(got('.alate/installed.json'));
-  assert.ok(!('omp/agent/skills/mine/SKILL.md' in record), 'the dropped file\'s record is gone');
+  assert.ok(!('omp/agent/skills/mine/AUX.md' in record), 'the dropped file\'s record is gone');
   assert.equal(record['omp/agent/skills/mine/RENAME.md'], fingerprint('omp/agent/skills/mine/RENAME.md', Buffer.from(renamed)));
   assert.ok(existsSync(join(home, '.omp/agent/skills/mine')), 'the folder with a surviving file stays');
+  assert.equal(got(mine), skillText('mine', '# mine, v4\n'), 'the skill entrypoint stays valid');
+  rmSync(join(data, 'user/omp/agent/skills/mine/RENAME.md'));
+  r = run(['--data', data, '--skip-plugins']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /0 installed, 9 unchanged, 1 deleted/);
 
   // A skill folder the snapshot drops completely goes with its empty directories.
   rmSync(join(data, 'user/agents/skills/theirs'), { recursive: true });
@@ -800,11 +961,11 @@ try {
     // A clean snapshot installs as before, and the blocked state carried no damage.
     writeStub(0);
     rmSync(join(data, 'user/omp/agent/skills/mine/EVIL.md'));
-    put('omp/agent/skills/mine/RENAME.md', '# mine, v6\n');
+    put('omp/agent/skills/mine/SKILL.md', skillText('mine', '# mine, v6\n'));
     r = run(['--data', data, '--skip-plugins']);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /1 installed/);
-    assert.equal(got('.omp/agent/skills/mine/RENAME.md'), '# mine, v6\n');
+    assert.equal(got(mine), skillText('mine', '# mine, v6\n'));
 
     // The pinned venv is preferred over PATH, but only when the trust gate passes: it must
     // be root-owned on POSIX and live outside the home install-user writes into, because the
@@ -1088,7 +1249,7 @@ try {
 
     // The managed-skills root is a skill snapshot too: the gate must scan it like the
     // other roots, else a poisoned managed skill would install unscanned.
-    put('omp/agent/managed-skills/garded/SKILL.md', '# garded\n');
+    put('omp/agent/managed-skills/garded/SKILL.md', skillText('garded'));
     r = run(['--data', data, '--skip-plugins']);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Scanning 1 of 2 skill snapshot\(s\) \(1 cached\)/);
@@ -1107,7 +1268,7 @@ try {
     writeFileSync(join(cacheData, 'user/omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
     for (const skill of cacheSkills) {
       mkdirSync(join(cacheData, 'user/omp/agent/skills', skill), { recursive: true });
-      writeFileSync(join(cacheData, 'user/omp/agent/skills', skill, 'SKILL.md'), `# ${skill}\n`);
+      writeFileSync(join(cacheData, 'user/omp/agent/skills', skill, 'SKILL.md'), skillText(skill));
     }
     const writeTimingStub = () => {
       writeFileSync(join(stubDir, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi\nprintf 'start %s %s\\n' "$2" "$(date +%s%N)" >> '${cacheCalls}'\nsleep 0.3\nprintf 'end %s %s\\n' "$2" "$(date +%s%N)" >> '${cacheCalls}'\nexit 0\n`);
@@ -1147,7 +1308,7 @@ try {
     assert.equal(scanCalls(), warmBefore, 'a cache hit runs no scanner');
 
     // One changed byte in one skill rescans exactly that skill.
-    writeFileSync(join(cacheData, 'user/omp/agent/skills/beta/SKILL.md'), '# beta, v2\n');
+    writeFileSync(join(cacheData, 'user/omp/agent/skills/beta/SKILL.md'), skillText('beta', '# beta, v2\n'));
     r = run(['--data', cacheData, '--skip-plugins'], cacheHome);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Scanning 1 of 9 skill snapshot\(s\) \(8 cached\)/);
@@ -1160,7 +1321,7 @@ try {
     // Beta's new bytes miss the cache, the scan rejects them, and nothing is recorded.
     const passFile = join(cacheHome, '.alate', 'skillspector-pass.json');
     const cachePassesBefore = readFileSync(passFile, 'utf8');
-    writeFileSync(join(cacheData, 'user/omp/agent/skills/beta/SKILL.md'), '# beta, v3\n');
+    writeFileSync(join(cacheData, 'user/omp/agent/skills/beta/SKILL.md'), skillText('beta', '# beta, v3\n'));
     writeStub(1);
     r = run(['--data', cacheData, '--skip-plugins'], cacheHome);
     assert.equal(r.status, 1, 'findings refuse the run');
@@ -1203,7 +1364,7 @@ try {
     mkdirSync(join(linkData, 'user/omp/agent/notes'), { recursive: true });
     mkdirSync(join(linkData, 'user/omp/agent/skills/mine'), { recursive: true });
     writeFileSync(join(linkData, 'user/omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
-    writeFileSync(join(linkData, 'user/omp/agent/skills/mine/SKILL.md'), '# mine\n');
+    writeFileSync(join(linkData, 'user/omp/agent/skills/mine/SKILL.md'), skillText('mine'));
     writeFileSync(join(linkData, 'user/omp/agent/notes/run.sh'), 'echo ok\n');
     symlinkSync('../../notes/run.sh', join(linkData, 'user/omp/agent/skills/mine/run.sh'));
     writeStub(0);
@@ -1229,7 +1390,7 @@ try {
     const frameHome = join(tmp, 'frame-home');
     mkdirSync(join(frameData, 'user/omp/agent/skills/mine'), { recursive: true });
     writeFileSync(join(frameData, 'user/omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
-    writeFileSync(join(frameData, 'user/omp/agent/skills/mine/SKILL.md'), '# mine\n');
+    writeFileSync(join(frameData, 'user/omp/agent/skills/mine/SKILL.md'), skillText('mine'));
     const fused = 'X' + 'f\0z.sh\0EVIL\n';
     writeFileSync(join(frameData, 'user/omp/agent/skills/mine/a.bin'), fused);
     writeStub(0);
@@ -1257,7 +1418,7 @@ try {
     const verHome = join(tmp, 'ver-home');
     mkdirSync(join(verData, 'user/omp/agent/skills/solo'), { recursive: true });
     writeFileSync(join(verData, 'user/omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
-    writeFileSync(join(verData, 'user/omp/agent/skills/solo/SKILL.md'), '# solo\n');
+    writeFileSync(join(verData, 'user/omp/agent/skills/solo/SKILL.md'), skillText('solo'));
     writeStub(0);
     r = run(['--data', verData, '--skip-plugins'], verHome);
     assert.equal(r.status, 0, r.stderr);
@@ -1341,7 +1502,7 @@ try {
       { name: 'm', catalogPath: `${layerHome}/.omp/marketplaces/catalog.json` },
       { name: 'w', catalogPath: 'C:\\Users\\me\\.omp\\marketplaces\\win.json' },
     ] }, null, 2)}\n`);
-    putL('omp/agent/skills/mine/SKILL.md', '# mine\n');
+    putL('omp/agent/skills/mine/SKILL.md', skillText('mine'));
     mkdirSync(join(ldata, 'workers', 'web'), { recursive: true });
     writeFileSync(join(ldata, 'workers', 'web', 'apt.txt'), 'libnss3\n');
     writeFileSync(join(ldata, 'layer-rule.md'), '---\ndescription: layer test rule\n---\n\nBody\n');
