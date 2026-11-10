@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { forAll, keepTemp } from './lib/data.mjs';
 
 import { diffLines } from './web/diff.mjs';
-import { checkUpdates, cmpVer, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs';
+import { checkUpdates, cmpVer, initUpdates, isValidUpdateRecord, loadUpdates, rowErrorText } from './lib/updates.mjs';
 
 // Proof-mark diff: change, pure addition, pure deletion, and no change.
 assert.deepEqual(diffLines(['a', 'b', 'c'], ['a', 'B', 'c']), [{ start: 1, count: 1, old: ['b'] }]);
@@ -2521,7 +2521,11 @@ try {
     const r = handler ? handler(url) : null;
     // [code, body, 'abort']: send headers and part of the body, then cut the connection.
     if (r?.[2] === 'abort') { res.writeHead(r[0], { 'content-length': '1000' }); return void res.write(String(r[1]), () => setTimeout(() => res.destroy(), 20)); }
-    res.writeHead(r ? r[0] : 404, { 'content-type': typeof r?.[1] === 'string' ? 'application/xml' : 'application/json' });
+    // [code, body, { header: value ]: extra response headers (rate-limit fixtures).
+    res.writeHead(r ? r[0] : 404, {
+      'content-type': typeof r?.[1] === 'string' ? 'application/xml' : 'application/json',
+      ...(r && typeof r[2] === 'object' ? r[2] : null),
+    });
     res.end(typeof r?.[1] === 'string' ? r[1] : JSON.stringify(r ? r[1] : { message: 'no fixture' }));
   });
   await new Promise(resolve => fakeUp.listen(0, '127.0.0.1', resolve));
@@ -3941,6 +3945,83 @@ try {
       assert.match(px.error, /failed: HTTP 404$/);
       assert.ok(px.checkedAt > '2020-01-01T00:00:00.000Z');
       assert.ok(!rawRows(db).some(v => v.name === 'px2'), 'each run replaces the stored rows');
+    }
+
+    // A network-level failure names its cause: Node's fetch wraps the OS error in err.cause,
+    // so the row shows "fetch failed (CODE)" and, when the code is ETIMEDOUT/ECONNREFUSED
+    // while a proxy env var is set, the "proxy?" hint. The proxy URL itself, often carrying
+    // credentials, is never printed.
+    {
+      const proxyKeys = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'];
+      const savedProxy = proxyKeys.map(k => process.env[k]);
+      const realFetch = globalThis.fetch;
+      const failFetch = code => {
+        globalThis.fetch = () => Promise.reject(new TypeError('fetch failed',
+          { cause: Object.assign(new Error(`connect ${code} 1.2.3.4:443`), { code }) }));
+      };
+      const db = mkDb({ 'upstreams.json': UP([item('n1', { version: '0.0.1', check: { type: 'npm', package: 'n1' } })]) });
+      try {
+        proxyKeys.forEach(k => { delete process.env[k]; });
+        process.env.HTTPS_PROXY = 'https://user:sekrit@proxy.corp.example:3128';
+        failFetch('ETIMEDOUT');
+        await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+        assert.equal(rows(db).n1.error, 'fetch failed (ETIMEDOUT; proxy?)', 'the cause code and the proxy hint show next to fetch failed');
+        assert.ok(!rows(db).n1.error.includes('proxy.corp.example') && !rows(db).n1.error.includes('sekrit'), 'the proxy URL and its credentials never show');
+        failFetch('ECONNREFUSED');
+        await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+        assert.equal(rows(db).n1.error, 'fetch failed (ECONNREFUSED; proxy?)', 'ECONNREFUSED gets the hint too');
+        failFetch('ENOTFOUND');
+        await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+        assert.equal(rows(db).n1.error, 'fetch failed (ENOTFOUND)', 'a code outside the proxy pair shows bare');
+        proxyKeys.forEach(k => { delete process.env[k]; });
+        failFetch('ETIMEDOUT');
+        await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+        assert.equal(rows(db).n1.error, 'fetch failed (ETIMEDOUT)', 'no proxy env var, no hint');
+      } finally {
+        globalThis.fetch = realFetch;
+        proxyKeys.forEach((k, i) => { if (savedProxy[i] == null) delete process.env[k]; else process.env[k] = savedProxy[i]; });
+        db.close();
+      }
+    }
+
+    // GitHub 403/429 with x-ratelimit-remaining: 0 names the shared rate limit, the reset
+    // time and the token fix: 60 unauthenticated requests per hour per egress IP means a
+    // company NAT exhausts the budget for everyone, and a bare "HTTP 403" says nothing.
+    {
+      const reset = Math.floor(Date.now() / 1000) + 1800;
+      handler = url => url.pathname === '/gh/repos/fake/rl/releases'
+        ? [403, { message: 'API rate limit exceeded' }, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset) }]
+        : null;
+      const r = rows(await run({ 'upstreams.json': UP([item('rl', { check: { type: 'github-release' } })]) }));
+      assert.equal(r.rl.error, `GitHub rate limit, resets at ${new Date(reset * 1000).toISOString()}; add a github.com token in Settings`);
+      handler = url => url.pathname === '/gh/repos/fake/rl/releases' ? [403, { message: 'plain forbidden' }] : null;
+      const bare = rows(await run({ 'upstreams.json': UP([item('rl', { check: { type: 'github-release' } })]) }));
+      assert.equal(bare.rl.error, `GET ${upBase}/gh/repos/fake/rl/releases?per_page=100 failed: HTTP 403`, 'a 403 without the exhausted budget stays a bare HTTP error');
+    }
+
+    // Property: the row error text never leaks the proxy URL or its userinfo, whatever the
+    // proxy env holds, and shows the cause code with the hint exactly for the proxy pair.
+    // Gate: 200 runs, fixed seed 42; PROP_RUNS=<n> re-seeds randomly for the review deep tier.
+    {
+      const savedProxy = ['HTTPS_PROXY', 'https_proxy'].map(k => process.env[k]);
+      try {
+        const proxyUrl = rand => `http://${rand() < 0.7 ? 'user' : 'u2'}:${['sekrit', 'p@ss:w0rd', 'x'][Math.floor(rand() * 3)]}@proxy.corp.example:${3000 + Math.floor(rand() * 2000)}`;
+        const code = rand => ['ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'ECONNRESET', 'UND_ERR_CONNECT_TIMEOUT'][Math.floor(rand() * 5)];
+        forAll(rand => [['fetch failed', 'GET http://x failed: HTTP 503'][Math.floor(rand() * 2)], code(rand), proxyUrl(rand), rand() < 0.5],
+          ([msg, c, proxy, withProxy]) => {
+            for (const k of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy']) {
+              if (withProxy && (k === 'HTTPS_PROXY' || k === 'https_proxy')) process.env[k] = proxy; else delete process.env[k];
+            }
+            const err = new TypeError(msg, { cause: Object.assign(new Error(`connect ${c} 1.2.3.4:443`), { code: c }) });
+            const text = rowErrorText(err);
+            assert.ok(text.startsWith(msg), `keeps the original message first: ${text}`);
+            assert.ok(!text.includes('proxy.corp.example') && !text.includes('@'), `never leaks the proxy URL or its userinfo: ${text}`);
+            if (withProxy && (c === 'ETIMEDOUT' || c === 'ECONNREFUSED')) assert.ok(text.endsWith(`(${c}; proxy?)`), `the proxy pair gets the hint: ${text}`);
+            else assert.ok(text.endsWith(`(${c})`), `the code shows bare otherwise: ${text}`);
+          });
+      } finally {
+        ['HTTPS_PROXY', 'https_proxy'].forEach((k, i) => { if (savedProxy[i] == null) delete process.env[k]; else process.env[k] = savedProxy[i]; });
+      }
     }
 
     // managedBy rows never target; checkUpdates defaults; the transaction rollback keeps nothing.

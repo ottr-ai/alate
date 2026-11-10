@@ -26,4 +26,8 @@ COPY . .
 EXPOSE 4570
 # The default bind is loopback, which a published container port cannot reach.
 ENV ALATE_HOST=0.0.0.0
+# Node's built-in fetch honors HTTP_PROXY/HTTPS_PROXY/NO_PROXY only when this is set
+# (Node 24): behind a proxy-only corporate egress, every update check otherwise goes
+# direct and times out. NO_PROXY keeps internal hosts on the direct route.
+ENV NODE_USE_ENV_PROXY=1
 CMD ["node", "server.ts"]
