@@ -1971,10 +1971,16 @@ try {
     r = runL(join(tmpReal, 'layer-home-commit-40'), ['--skip-plugins', '--layer', '--commit', commit40]);
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(readdirSync(join(tmpReal, 'layer-home-commit-40', '.alate', 'layers')), ['123456789abc-1'], 'a 40-hex --commit names the layer');
-    // A malformed --commit refuses the run before any write.
+    // A malformed --commit refuses the run before any write: junk, and every hex length
+    // that is neither exactly 40 nor exactly 64.
     r = runL(commitHome, ['--skip-plugins', '--layer', '--commit', 'not-a-sha']);
     assert.equal(r.status, 1, 'a malformed --commit refuses the run');
     assert.match(r.stderr, /--commit must be 40 or 64 hex characters/);
+    for (const bad of ['e'.repeat(41), 'e'.repeat(63)]) {
+      r = runL(commitHome, ['--skip-plugins', '--layer', '--commit', bad]);
+      assert.equal(r.status, 1, `a ${bad.length}-hex --commit refuses the run`);
+      assert.match(r.stderr, /--commit must be 40 or 64 hex characters/);
+    }
     assert.deepEqual(readdirSync(join(commitHome, '.alate', 'layers')), ['123456789abc-1'], 'the refusal happens before any write');
 
     // A --home through a symlink must behave exactly like the real path: preflight, live-layer

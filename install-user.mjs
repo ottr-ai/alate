@@ -45,8 +45,9 @@ import { assertSourceInside, checkDestination, cleanupData, describeProblem, des
 
 const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home', '--commit'], ['--force', '--skip-plugins', '--layer']);
 // The imported commit names the layer id in layer mode: the server passes it for a repo
-// source (specs/agent-layer-switch.md). 40 hex is a git SHA-1, 64 a SHA-256 repository.
-const COMMIT_RE = /^[0-9a-f]{40,64}$/;
+// source (specs/agent-layer-switch.md). Exactly 40 hex is a git SHA-1, exactly 64 a
+// SHA-256 repository; anything between is malformed and refuses the run.
+const COMMIT_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const home = args.values['--home'] ?? homedir();
 const force = args.flags.has('--force');
 const skipPlugins = args.flags.has('--skip-plugins');

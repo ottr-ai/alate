@@ -143,7 +143,7 @@ async function provision(): Promise<ProvisionResult[]> {
       // instead of "nogit" (specs/agent-layer-switch.md). A path source gets no --commit,
       // so the git probe in install-user.mjs keeps its nogit fallback.
       const importedSha = dashState.source?.kind === 'repo' ? dashState.source.importedSha ?? '' : ''
-      const commitArg = script === 'install-user.mjs' && /^[0-9a-f]{40,64}$/.test(importedSha) ? ['--commit', importedSha] : []
+      const commitArg = script === 'install-user.mjs' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(importedSha) ? ['--commit', importedSha] : []
       const child = spawn(process.execPath, [join(repoRoot, script), '--data', data.dir, ...commitArg], {
         cwd: repoRoot,
         env,
