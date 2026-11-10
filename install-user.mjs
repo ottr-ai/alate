@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Restores the data repo's captured user/ layer onto a machine: the inverse of sync-user.mjs.
-// Usage: node install-user.mjs [--home <dir>] [--force] [--skip-plugins] [--layer] [--data <dir>|--repo <owner/name[@ref]>]
+// Usage: node install-user.mjs [--home <dir>] [--force] [--skip-plugins] [--layer] [--commit <sha>] [--data <dir>|--repo <owner/name[@ref]>]
 // --layer (or ALATE_LAYER=1) installs into a fresh <home>/.alate/layers/<commit>-<n> and atomically
 // switches the <home>/.alate/current symlink to it, so a provision never rewrites files a running
 // turn reads; see specs/agent-layer-switch.md for the layout, link set, and cleanup rules.
@@ -43,7 +43,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { assertSourceInside, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend, writeProvisionResults } from './lib/data.mjs';
 
-const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home'], ['--force', '--skip-plugins', '--layer']);
+const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home', '--commit'], ['--force', '--skip-plugins', '--layer']);
+// The imported commit names the layer id in layer mode: the server passes it for a repo
+// source (specs/agent-layer-switch.md). 40 hex is a git SHA-1, 64 a SHA-256 repository.
+const COMMIT_RE = /^[0-9a-f]{40,64}$/;
 const home = args.values['--home'] ?? homedir();
 const force = args.flags.has('--force');
 const skipPlugins = args.flags.has('--skip-plugins');
@@ -493,6 +496,11 @@ const addScanRejection = (key, info) => {
 const skillKey = (root, dir) => `user/${relative(root, dir).split(sep).join('/')}`.replace(/^user\/\./, 'user/');
 
 try {
+  // A malformed --commit refuses the run before anything else, any mode: the refusal goes
+  // through the standard catch (fatal results file, non-zero exit, no writes).
+  if (args.values['--commit'] !== undefined && !COMMIT_RE.test(args.values['--commit'])) {
+    throw new Error(`refusing: --commit must be 40 or 64 hex characters (got "${args.values['--commit']}")`);
+  }
   if (!existsSync(userRoot)) {
     throw new Error(`No user/ snapshot in ${data.dir}; run sync-user.mjs first.`);
   }
@@ -573,8 +581,16 @@ try {
     // an in-place migration of a real directory is out of scope.
     const st = lstatSync(currentLink, { throwIfNoEntry: false });
     if (st && !st.isSymbolicLink()) throw new Error(`refusing: ${currentLink} exists and is not a symlink; remove or migrate it by hand`);
-    const gitHead = spawnSync('git', ['-C', data.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: childEnv() });
-    const commit = gitHead.status === 0 && /^[0-9a-f]{40,64}$/.test((gitHead.stdout ?? '').trim()) ? gitHead.stdout.trim().slice(0, 12) : 'nogit';
+    // The layer id names the installed commit: --commit (the server passes the imported
+    // commit of a repo source) wins; without it the data dir's git HEAD decides, and a
+    // dir without git is "nogit".
+    let commit;
+    if (args.values['--commit'] !== undefined) {
+      commit = args.values['--commit'].slice(0, 12);
+    } else {
+      const gitHead = spawnSync('git', ['-C', data.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: childEnv() });
+      commit = gitHead.status === 0 && COMMIT_RE.test((gitHead.stdout ?? '').trim()) ? gitHead.stdout.trim().slice(0, 12) : 'nogit';
+    }
     newLayerDir = join(layersDir, `${commit}-${nextLayerCounter(existsSync(layersDir) ? readdirSync(layersDir) : [], commit)}`);
     writeRoot = newLayerDir;
     // Machine state lives in the live layer when there is one: the new layer reads it there,

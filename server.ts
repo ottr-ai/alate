@@ -138,7 +138,13 @@ async function provision(): Promise<ProvisionResult[]> {
       // exit non-zero with no results file, exercising the pipeline's fail-closed branch.
       const noResultsGate = process.env.ALATE_TEST_NO_RESULTS_FILE
       if (!(noResultsGate && existsSync(noResultsGate))) env[PROVISION_ENV] = resultsFile
-      const child = spawn(process.execPath, [join(repoRoot, script), '--data', data.dir], {
+      // The snapshot dir has no .git, so install-user.mjs cannot read the imported commit
+      // itself: the server passes it for a repo source, and a layer id then carries it
+      // instead of "nogit" (specs/agent-layer-switch.md). A path source gets no --commit,
+      // so the git probe in install-user.mjs keeps its nogit fallback.
+      const importedSha = dashState.source?.kind === 'repo' ? dashState.source.importedSha ?? '' : ''
+      const commitArg = script === 'install-user.mjs' && /^[0-9a-f]{40,64}$/.test(importedSha) ? ['--commit', importedSha] : []
+      const child = spawn(process.execPath, [join(repoRoot, script), '--data', data.dir, ...commitArg], {
         cwd: repoRoot,
         env,
       })

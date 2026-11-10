@@ -2,7 +2,7 @@
 // Hermetic: a fixture origin repo, config file and HOME all live in a temp dir; the server runs on an ephemeral port.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, request } from 'node:http';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -379,19 +379,41 @@ try {
   // The layers flag is the provisioning contract with Ottr: the board drops its idle
   // wait only when the health body carries layers: true (specs/agent-layer-switch.md).
   {
-    const layerChild = spawnServer(['--port', '0', '--config', join(tmp, 'server-config-layers.json')], { ...serverEnv, ALATE_LAYER: '1' });
-    const layerBase = await new Promise((resolve, reject) => {
-      let buf = '';
-      layerChild.stdout.on('data', chunk => {
-        buf += chunk;
-        const line = /alate server on (http:\/\/127\.0\.0\.1:\d+)\n/.exec(buf);
-        if (line) resolve(line[1]);
+    // Layer mode with a repo source: the provisioned layer id carries the imported commit
+    // (<first 12 hex>-<n>), never "nogit" — the snapshot dir has no .git, so the server
+    // passes --commit to install-user.mjs (specs/agent-layer-switch.md).
+    const layerHome = join(tmp, 'layer-home');
+    const layerChild = spawnServer(['--port', '0', '--config', join(tmp, 'server-config-layers.json')], { ...serverEnv, ALATE_LAYER: '1', HOME: layerHome, USERPROFILE: layerHome });
+    try {
+      const { base: layerBase, apiKey: layerKey } = await new Promise((resolve, reject) => {
+        let buf = '';
+        const out = {};
+        layerChild.stdout.on('data', chunk => {
+          buf += chunk;
+          const k = /alate API key: (\S+)\n/.exec(buf);
+          const l = /alate server on (http:\/\/127\.0\.0\.1:\d+)\n/.exec(buf);
+          if (k) out.apiKey = k[1];
+          if (l) out.base = l[1];
+          if (k && l) resolve(out);
+        });
+        layerChild.once('exit', code => reject(new Error(`layer-mode server exited early (${code})`)));
+        setTimeout(() => reject(new Error('layer-mode server did not start')), 10_000).unref();
       });
-      layerChild.once('exit', code => reject(new Error(`layer-mode server exited early (${code})`)));
-      setTimeout(() => reject(new Error('layer-mode server did not start')), 10_000).unref();
-    });
-    const layerBody = await (await fetch(new URL('/health', layerBase))).json();
-    assert.equal(layerBody.layers, true, 'health reports layers true with ALATE_LAYER=1');
+      const layerBody = await (await fetch(new URL('/health', layerBase))).json();
+      assert.equal(layerBody.layers, true, 'health reports layers true with ALATE_LAYER=1');
+      const layerAuth = { Authorization: `Bearer ${layerKey}`, 'Content-Type': 'application/json' };
+      r = await fetch(new URL('/config', layerBase), { method: 'POST', headers: layerAuth, body: JSON.stringify({ repo: origin }) });
+      assert.equal(r.status, 200, 'layer-mode server accepts the repo source');
+      const provBody = await (await fetch(new URL('/provision', layerBase), { method: 'POST', headers: layerAuth, body: '{}' })).json();
+      assert.equal(provBody.ok, true, 'layer-mode provision succeeds');
+      const originSha = git(['-C', origin, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+      const layersDir = join(layerHome, '.alate', 'layers');
+      const layerId = `${originSha.slice(0, 12)}-1`;
+      assert.deepEqual(readdirSync(layersDir), [layerId], `the layer id carries the imported commit, got ${JSON.stringify(readdirSync(layersDir))}`);
+      assert.equal(realpathSync(join(layerHome, '.alate', 'current')), join(realpathSync(layersDir), layerId), 'current points at the commit-named layer');
+    } finally {
+      await new Promise(resolve => { layerChild.once('close', resolve); layerChild.kill(); });
+    }
   }
 
   // Child env allowlist: provision script children see only documented keys plus the

@@ -21,9 +21,12 @@ running turn reads: it installs into a new folder, then one atomic rename makes 
   links carry absolute targets under the resolved home, and clean-up keys its keep set by
   layer id. Non-layer mode keeps the home as given.
 - Layers: `<home>/.alate/layers/<id>`
-- Layer id: `<commit>-<n>`. `<commit>` is the first 12 hex characters of `git -C <data-dir>
-  rev-parse HEAD`; a data dir without git uses `nogit`. `<n>` continues the highest counter
-  already on disk for that commit, starting at 1.
+- Layer id: `<commit>-<n>`. `<commit>` is the first 12 hex characters of the installed
+  commit: `install-user.mjs` uses `--commit <sha>` when given — the server passes the
+  imported commit of a repo source, and a value that is not 40 or 64 hex characters
+  refuses the run before any write — else `git -C <data-dir> rev-parse HEAD`. A data dir
+  without git, a path-source provision, and a CLI run without `--commit` use `nogit`. `<n>`
+  continues the highest counter already on disk for that commit, starting at 1.
 - Switch link: `<home>/.alate/current`, a symlink with an absolute target. It exists only as
   absent or as a symlink; anything else refuses the run before any write.
 - In-use record: `<home>/.alate/in-use.json`, shape `{"layers": ["<id>", ...]}`. The turn

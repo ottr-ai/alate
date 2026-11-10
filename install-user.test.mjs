@@ -1958,6 +1958,25 @@ try {
     assert.match(r.stderr, /exists and is not a symlink/);
     assert.ok(!existsSync(join(layerHome3, '.alate', 'layers')), 'the refusal happens before any write');
 
+    // --commit names the layer id: the server passes the imported commit of a repo source,
+    // so a layer from POST /provision carries it instead of "nogit". 40 and 64 hex are both
+    // valid (git and future SHA-256 repos); the id is the first 12 characters.
+    const commitHome = join(tmpReal, 'layer-home-commit');
+    const commit64 = '123456789abc' + 'd'.repeat(52);
+    const commit40 = '123456789abc' + 'd'.repeat(28);
+    r = runL(commitHome, ['--skip-plugins', '--layer', '--commit', commit64]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(join(commitHome, '.alate', 'layers')), ['123456789abc-1'], 'a 64-hex --commit names the layer');
+    assert.equal(realpathSync(join(commitHome, '.alate', 'current')), join(realpathSync(join(commitHome, '.alate', 'layers')), '123456789abc-1'));
+    r = runL(join(tmpReal, 'layer-home-commit-40'), ['--skip-plugins', '--layer', '--commit', commit40]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(join(tmpReal, 'layer-home-commit-40', '.alate', 'layers')), ['123456789abc-1'], 'a 40-hex --commit names the layer');
+    // A malformed --commit refuses the run before any write.
+    r = runL(commitHome, ['--skip-plugins', '--layer', '--commit', 'not-a-sha']);
+    assert.equal(r.status, 1, 'a malformed --commit refuses the run');
+    assert.match(r.stderr, /--commit must be 40 or 64 hex characters/);
+    assert.deepEqual(readdirSync(join(commitHome, '.alate', 'layers')), ['123456789abc-1'], 'the refusal happens before any write');
+
     // A --home through a symlink must behave exactly like the real path: preflight, live-layer
     // detection, clean-up and the switch link all compare full paths, and a non-canonical home
     // once made them disagree (clean-up deleted the layer current pointed at, machine state
