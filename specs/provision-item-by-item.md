@@ -34,7 +34,9 @@ Every item gets exactly one result:
   never disconnects the other servers on the machine.
 
 `rejected` carries the first finding as `rule` and `at`, plus the full report text
-(scan reports capped at 4000 characters).
+(scan reports capped at 4000 characters). A scan gate error carries
+`rule: "scan error"` and no position; its report starts with the failure line and
+carries the scanner output.
 
 ## Exit codes and output
 
@@ -76,14 +78,19 @@ results and fails closed.
 A refusal is per script; nothing is written by that script when it refuses:
 
 - missing scanner, wrong scanner version, `SKILLSPECTOR_BIN` inside the home;
-- a scanner error while scanning (exit code other than 0/1, or a killed scan) — a
-  broken scanner cannot produce verdicts, so the run refuses;
+- a scanner that cannot run at all (spawn error, probe failure) — no verdict is
+  possible, so the run refuses;
 - invalid `tools.json`, `env.txt`, `requirements.txt`;
 - unreadable or structurally broken `upstreams.json` (the coverage gate itself is
   broken, so no origin verdict is possible);
 - destination alias guards, machine-changed copies (conflicts), unreadable source
-  aliases inside the snapshot;
-- a scan child that the scanner cannot run.
+  aliases inside the snapshot.
+
+A scan failure of one skill folder (an exit other than 0/1, or a killed scan — for
+example an unparseable `.skillspector-baseline.yaml`) is a per-item rejection, not a
+refusal: the skill gets rule `scan error` and the failure line plus scanner output as
+its report, and the remaining skills still install. A negative verdict is never
+cached, so a scan-error skill is rescanned on the next run.
 
 In the server pipeline (`server.ts` `provision()`), both scripts always run in order;
 the pipeline stops early only when a script exited `null` (killed) or exited non-zero
@@ -112,7 +119,9 @@ failure; `provisionedSha` still moves only on `ok`.
    fails is `rejected` and excluded;
 4. worker-list validation (fatal as before), conflicts (fatal as before);
 5. scan gate over the surviving skills: findings (exit 1) make that skill
-   `rejected`; excluded skills are dropped from the plan, the manifest, and
+   `rejected`; a scan error (any other non-zero exit or a killed scan) makes that
+   skill `rejected` with rule `scan error`; excluded skills are dropped from the
+   plan, the manifest, and
    `conflicts` before any write, so an installed record-matching copy is deleted by
    the existing deletion path;
 6. writes, deletions, manifest; layer mode scans the fresh layer before the manifest
@@ -141,7 +150,12 @@ b. An installed copy of a now-rejected skill is deleted; a machine-changed copy
 c. One uncovered origin does not stop the other items: the covered rule installs,
    the uncovered item is reported, exit 1.
 d. A missing scanner refuses the whole install-user run; nothing is written.
-e. A scanner error (exit 2) refuses the whole run.
+e. A scan error (exit 2, for example an unparseable `.skillspector-baseline.yaml`)
+   rejects only that skill: the clean skills install, the broken skill is reported
+   `rejected: scan error` with the scanner message, the results file keeps
+   `fatal: false` (so the server's `ok` stays false), and the run exits 1. The
+   scan-error skill is rescanned on the next run. A scanner that cannot run at all
+   (spawn error, missing binary) still refuses the whole run.
 f. `upstreams.json` that is not JSON refuses the whole run; a structurally broken
    entry refuses the whole run.
 g. The server pipeline continues past a per-item failure and stops on a killed

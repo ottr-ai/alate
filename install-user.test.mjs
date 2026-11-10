@@ -60,12 +60,15 @@ const run = (extra, h = home, env, cwd) => {
 const stubDir = join(tmp, 'stub');
 const callsLog = join(stubDir, 'calls.log');
 const scanned = process.platform !== 'win32';
-const writeStub = (exit, version = 'SkillSpector v2.13.0', rejectNames = []) => {
+const writeStub = (exit, version = 'SkillSpector v2.13.0', rejectNames = [], errorNames = []) => {
   // rejectNames holds skill-dir basenames the stub rejects: it prints a findings-shaped
   // report (a HIGH SC2 finding plus its Location line, the pinned scanner's real format)
   // and exits 1 for those dirs only, so one named skill can fail while the others pass.
+  // errorNames holds basenames whose scan crashes: the stub prints a diagnostic on stderr
+  // and exits 2, the stand-in for a real scan error such as an unparseable baseline file.
   writeFileSync(join(stubDir, 'reject.list'), rejectNames.length ? `${rejectNames.join('\n')}\n` : '');
-  writeFileSync(join(stubDir, 'skillspector'), `#!/bin/sh\n[ "$1" = scan ] && printf '%s\\n' "$*" >> '${callsLog}'\nif [ "$1" = "--version" ]; then echo '${version}'; exit 0; fi\nif [ "$1" = scan ] && grep -qx "$(basename "$2")" '${stubDir}/reject.list' 2>/dev/null; then\n  printf '  HIGH: SC2 - External Script Fetching...\\n    Location: SKILL.md:7\\n'\n  exit 1\nfi\nexit ${exit}\n`);
+  writeFileSync(join(stubDir, 'error.list'), errorNames.length ? `${errorNames.join('\n')}\n` : '');
+  writeFileSync(join(stubDir, 'skillspector'), `#!/bin/sh\n[ "$1" = scan ] && printf '%s\\n' "$*" >> '${callsLog}'\nif [ "$1" = "--version" ]; then echo '${version}'; exit 0; fi\nif [ "$1" = scan ] && grep -qx "$(basename "$2")" '${stubDir}/error.list' 2>/dev/null; then\n  echo 'skillspector: unparseable .skillspector-baseline.yaml (yaml: line 1: did not find expected key)' >&2\n  exit 2\nfi\nif [ "$1" = scan ] && grep -qx "$(basename "$2")" '${stubDir}/reject.list' 2>/dev/null; then\n  printf '  HIGH: SC2 - External Script Fetching...\\n    Location: SKILL.md:7\\n'\n  exit 1\nfi\nexit ${exit}\n`);
   chmodSync(join(stubDir, 'skillspector'), 0o755);
 };
 if (scanned) {
@@ -998,19 +1001,44 @@ try {
     assert.ok(r.stdout.includes('user/omp/agent/skills/bad-one — rejected: SC2 at SKILL.md:7'), 'the bad skill is reported with its rule and file');
     assert.ok(r.stdout.includes('Failed items:'), 'the failed items print as one stdout block');
 
-    // A scanner error (exit 2) is a broken scanner: it cannot produce verdicts, so the whole
-    // run refuses and nothing is written.
-    putA('omp/agent/skills/good-0/SKILL.md', skillText('good-0', '# good-0, v2\n'));
-    writeStub(2);
-    const aHomeBefore = (() => { const entries = []; const visit = p => { for (const e of readdirSync(p, { withFileTypes: true })) { entries.push(join(p, e.name)); if (e.isDirectory()) visit(join(p, e.name)); } }; visit(scanAHome); return entries.sort().join('\n'); })();
-    const aPassesBefore = readFileSync(join(scanAHome, '.alate', 'skillspector-pass.json'), 'utf8');
-    r = run(['--data', scanAData, '--skip-plugins'], scanAHome);
-    assert.equal(r.status, 1, 'a scanner error refuses the run');
-    assert.match(r.stderr, /SkillSpector scan of .* failed \(exit 2\)/);
-    assert.ok(!/\d+ installed/.test(r.stdout), 'a scanner error installs nothing');
-    const aHomeAfter = (() => { const entries = []; const visit = p => { for (const e of readdirSync(p, { withFileTypes: true })) { entries.push(join(p, e.name)); if (e.isDirectory()) visit(join(p, e.name)); } }; visit(scanAHome); return entries.sort().join('\n'); })();
-    assert.equal(aHomeAfter, aHomeBefore, 'a scanner error changes no target file');
-    assert.equal(readFileSync(join(scanAHome, '.alate', 'skillspector-pass.json'), 'utf8'), aPassesBefore, 'a scanner error writes no cache entry');
+    // A scan error (exit 2 — the user-host case of an unparseable .skillspector-baseline.yaml)
+    // rejects only its own skill: the clean skills still install, the broken one is left out
+    // and reported with the scanner message, and the run fails per item (fatal false, so the
+    // server's ok stays false), not as a whole-run refusal.
+    const scanBData = join(tmp, 'data-scan-b');
+    const scanBHome = join(tmp, 'home-scan-b');
+    const putB = (rel, text) => { mkdirSync(dirname(join(scanBData, 'user', rel)), { recursive: true }); writeFileSync(join(scanBData, 'user', rel), text); };
+    putB('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putB('omp/agent/skills/clean-one/SKILL.md', skillText('clean-one'));
+    putB('omp/agent/skills/bad-base/SKILL.md', skillText('bad-base'));
+    putB('omp/agent/skills/bad-base/.skillspector-baseline.yaml', 'findings: [unclosed\n');
+    writeStub(0, 'SkillSpector v2.13.0', [], ['bad-base']);
+    const bResults = join(tmp, 'results-scan-b.json');
+    r = run(['--data', scanBData, '--skip-plugins'], scanBHome, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ALATE_PROVISION_RESULTS: bResults });
+    assert.equal(r.status, 1, 'the scan-error skill fails the run');
+    assert.equal(readFileSync(join(scanBHome, '.omp/agent/skills/clean-one/SKILL.md'), 'utf8'), skillText('clean-one'), 'the clean skill installs beside a scan-error skill');
+    assert.ok(!existsSync(join(scanBHome, '.omp/agent/skills/bad-base')), 'the scan-error skill never lands');
+    assert.ok(r.stdout.includes('user/omp/agent/skills/bad-base — rejected: scan error'), 'the scan-error skill is reported with the scan-error rule');
+    assert.match(r.stdout, /SkillSpector scan of .*bad-base failed \(exit 2\)/, 'the deploy log names the failed scan');
+    assert.ok(r.stdout.includes('unparseable .skillspector-baseline.yaml'), 'the scanner message prints in the report block');
+    const bRes = JSON.parse(readFileSync(bResults, 'utf8'));
+    assert.equal(bRes.fatal, false, 'a per-skill scan error is not a whole-run refusal');
+    assert.equal(bRes.error, null);
+    const bBad = bRes.items.find(i => i.item === 'user/omp/agent/skills/bad-base');
+    assert.equal(bBad.status, 'rejected');
+    assert.equal(bBad.rule, 'scan error');
+    assert.match(bBad.report, /failed \(exit 2\)/, 'the report starts with the failure line');
+    assert.match(bBad.report, /unparseable \.skillspector-baseline\.yaml/, 'the scanner message travels with the item');
+    assert.equal(bRes.items.find(i => i.item === 'user/omp/agent/skills/clean-one').status, 'installed');
+    // A negative verdict is never cached: the next run rescans only the scan-error skill,
+    // and the clean skill stays a cached pass.
+    const bCallsBefore = readFileSync(callsLog, 'utf8').trim().split('\n').filter(Boolean).length;
+    r = run(['--data', scanBData, '--skip-plugins'], scanBHome);
+    assert.equal(r.status, 1, 'the scan error repeats on the next run');
+    const bCallsGrown = readFileSync(callsLog, 'utf8').trim().split('\n').filter(Boolean).slice(bCallsBefore);
+    assert.equal(bCallsGrown.length, 1, 'only the scan-error skill is rescanned');
+    assert.ok(bCallsGrown[0].includes(join(scanBData, 'user/omp/agent/skills/bad-base')), 'a scan-error skill is never cached');
+    assert.ok(!existsSync(join(scanBHome, '.omp/agent/skills/bad-base')), 'the scan-error skill still never lands');
 
     // A missing scanner refuses too: fail closed, and the error names the pinned build.
     r = run(['--data', data, '--skip-plugins'], home, { ...process.env, SKILLSPECTOR_VENV: join(tmp, 'no-venv') });

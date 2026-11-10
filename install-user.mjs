@@ -15,9 +15,9 @@
 // Provision is per item (specs/provision-item-by-item.md): a skill or Markdown file that fails
 // a content or scan gate, or a snapshot item with no recorded origin in upstreams.json, is left
 // out and reported while every item that passed still installs. Global refusals stay
-// all-or-nothing: a broken gate itself (missing or wrong-version scanner, crashed scan, invalid
-// worker list, unreadable or structurally broken upstreams.json, machine-changed copies) refuses
-// the whole run. When ALATE_PROVISION_RESULTS holds an absolute path, one JSON file with the
+// all-or-nothing: a broken gate itself (missing or wrong-version scanner, a scanner that
+// cannot run, invalid worker list, unreadable or structurally broken upstreams.json,
+// machine-changed copies) refuses the whole run. When ALATE_PROVISION_RESULTS holds an absolute path, one JSON file with the
 // per-item results is written there at the end of every run (success, item failures, and
 // refusals); failed items are also printed as one stdout block at the end.
 // JSON config is adapted to the target machine first (forTarget, lib/data.mjs): a Windows capture
@@ -91,9 +91,9 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
 const pluginInstallFile = rel =>
   rel === 'omp/plugins/package.json' || rel === 'omp/plugins/bun.lock' || rel.startsWith('omp/plugins/patches/');
 // A skill snapshot is executable agent content, so install-user scans each one statically before
-// anything lands in the home (or, in layer mode, before the layer goes live): findings reject
-// that one skill (left out, reported), while a missing scanner or a crashed scan refuse the whole
-// restore before the first write. The scan applies the snapshot's own shipped
+// anything lands in the home (or, in layer mode, before the layer goes live): findings and
+// scan errors reject that one skill (left out, reported), while a missing scanner or a scanner
+// that cannot run refuse the whole restore before the first write. The scan applies the snapshot's own shipped
 // `.skillspector-baseline.yaml` — its accepted findings are review records committed to the data
 // repo, the same file the data repo's pre-push gate accepts. The upstream build is
 // pinned to a tag on purpose:
@@ -185,9 +185,11 @@ const collectSkillDirs = dir => {
 // Fail-closed gate: every skill snapshot is scanned before anything lands on disk (or, in
 // layer mode, before the layer goes live). Each scan's report is buffered and printed as one
 // block, so parallel scans never interleave lines. Exit 1 (findings) rejects that one skill:
-// it is left out of the install and reported; any other non-zero exit, a signal kill, or a
-// spawn error is a broken scanner, which cannot produce verdicts, so the whole run refuses. A
-// skill whose own bytes cannot be hashed is rejected as unreadable rather than scanned. A scan costs ~15 s per
+// it is left out of the install and reported. Any other scan failure of one skill folder
+// (another non-zero exit, a signal kill — for example an unparseable baseline file) rejects
+// that skill too, with rule `scan error` and the scanner output as the report. A spawn error
+// means the scanner cannot run at all, which cannot produce verdicts, so the whole run refuses.
+// A skill whose own bytes cannot be hashed is rejected as unreadable rather than scanned. A scan costs ~15 s per
 // skill, which made a 57-skill deploy seed wait ~14 minutes even when one file changed, so
 // the gate re-scans only what changed: it hashes the exact bytes of each skill folder itself
 // (never a hash the data repo ships — .skill-lock.json is data, not proof), one framed digest
@@ -263,8 +265,9 @@ const recordPass = passes => {
 
 // The pinned build's verdict for these exact bytes, printed as one block so a tail of the
 // output always shows a whole report. Exit 0 resolves clean, exit 1 resolves with the findings
-// report (a per-skill rejection); any other outcome rejects with an error, which the caller
-// turns into a whole-run refusal.
+// report (a per-skill rejection); any other exit or a signal kill resolves as a scan error —
+// also a per-skill rejection, carrying the failure line and the scanner output. Only a spawn
+// error rejects: the scanner cannot run at all, which the caller turns into a whole-run refusal.
 const scanOne = (scanner, dir, total) => new Promise((resolve, reject) => {
   const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: scannerEnv() });
   const out = [], errOut = [];
@@ -276,7 +279,7 @@ const scanOne = (scanner, dir, total) => new Promise((resolve, reject) => {
     console.log(`--- SkillSpector report: ${dir}${report ? `\n${report}` : ''}`);
     if (code === 0) resolve({ report: null });
     else if (code === 1) resolve({ report });
-    else reject(new Error(`SkillSpector scan of ${dir} failed (exit ${code ?? `signal ${signal}`}); refusing to install ${total} skill snapshot(s).`));
+    else resolve({ report, scanError: `SkillSpector scan of ${dir} failed (exit ${code ?? `signal ${signal}`}).` });
   });
 });
 
@@ -366,9 +369,10 @@ const runScan = async skillDirs => {
   const pending = scanList.filter(dir => passes[keys.get(dir)] !== true);
   console.log(`Scanning ${pending.length} of ${scanList.length} skill snapshot(s) (${scanList.length - pending.length} cached) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied)...`);
   if (!pending.length) return { rejected };
-  // Findings (exit 1) reject their own skill only; any other non-zero exit, a signal kill, or
-  // a spawn error is a broken scanner: stop scheduling, let the in-flight scans finish, then
-  // refuse the whole run — a broken scanner cannot produce verdicts.
+  // Findings (exit 1) reject their own skill only; so does any other scan failure (another
+  // non-zero exit, a signal kill): the skill is left out with rule `scan error` and the scan
+  // continues. Only a spawn error — the scanner cannot run at all, so no verdict is possible —
+  // stops scheduling, lets the in-flight scans finish, and refuses the whole run.
   let fatal = null;
   let next = 0;
   const worker = async () => {
@@ -379,6 +383,10 @@ const runScan = async skillDirs => {
         if (res.report === null) {
           passes[keys.get(dir)] = true;
           recordPass(passes);
+        } else if (res.scanError !== undefined) {
+          rejected.set(dir, { rule: 'scan error', report: `${res.scanError}${res.report ? `\n${res.report}` : ''}` });
+          // Stdout too: the deploy log's tail must name the rejected skill folder.
+          console.log(`${res.scanError} The skill is left out of this install.`);
         } else {
           rejected.set(dir, { report: res.report });
           // Stdout too: the deploy log's tail must name the rejected skill folder.
@@ -470,8 +478,9 @@ let nestedFailed = false;
 const capReport = report => report.length > 4000 ? `${report.slice(0, 4000)}…` : report;
 const failItem = (item, status, rule, at, report) =>
   items.push({ item, status, rule: rule ?? null, at: at ?? null, ...(report == null ? {} : { report: capReport(report) }) });
-// A scan rejection carries the first SkillSpector finding as rule and position; the hash-error
-// rejection carries its own rule. `key` is the item key of the skill dir.
+// A scan rejection carries the first SkillSpector finding as rule and position; a scan-error
+// rejection carries rule `scan error`; the hash-error rejection carries its own rule. `key` is
+// the item key of the skill dir.
 const addScanRejection = (key, info) => {
   if (info.rule !== undefined) failItem(key, 'rejected', info.rule, null, info.report);
   else {
