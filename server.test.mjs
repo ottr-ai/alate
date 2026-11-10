@@ -2,7 +2,7 @@
 // Hermetic: a fixture origin repo, config file and HOME all live in a temp dir; the server runs on an ephemeral port.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, request } from 'node:http';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -609,6 +609,10 @@ try {
     assert.equal(snapshot.prepare("SELECT COUNT(*) AS n FROM files WHERE path LIKE '.git/%'").get().n, 0);
   } finally { snapshot.close(); }
   assert.equal((await postJson('/config', { repo: origin }, true)).status, 200, 're-import preserves the provisioned baseline');
+  // Write flags (specs/source-write-flags.md): a repo source reports neither.
+  body = await (await get('/health')).json();
+  assert.equal(body.git, null, 'a repo source reports no git flag');
+  assert.equal(body.writable, null, 'a repo source reports no writable flag');
   assert.equal((await (await get('/config')).json()).tokenSet, true, 'a source refresh preserves the stored credential');
   git(['-C', origin, '-c', 'user.email=test@example.com', '-c', 'user.name=test', 'commit', '--allow-empty', '-m', 'second']);
   await waitFor(async () => {
@@ -687,6 +691,14 @@ try {
   // source switch to a path disables the update loop
   body = await (await get('/health')).json();
   assert.equal(body.update.enabled, false);
+  // Write flags (specs/source-write-flags.md): a plain folder is not a work tree.
+  assert.equal(body.git, false, 'a plain folder reports git false');
+  assert.equal(body.writable, true, 'a writable folder reports writable true');
+  assert.equal((await postJson('/config', { path: origin }, true)).status, 200);
+  body = await (await get('/health')).json();
+  assert.equal(body.git, true, 'a git folder reports git true');
+  assert.equal(body.writable, true, 'a writable folder reports writable true');
+  assert.equal((await postJson('/config', { path: emptyDir }, true)).status, 200, 'the script-failure run keeps the plain-folder source');
   // a path source has no update loop to re-save config, so only POST /config can persist it
   assert.equal(JSON.parse(readFileSync(config, 'utf8')).path, emptyDir, 'path source persisted to config file');
   r = await postJson('/provision', {}, true);
@@ -4015,6 +4027,24 @@ try {
       return out;
     };
     const err10 = fn => { try { fn(); } catch (e) { return e; } throw new Error('expected a throw'); };
+
+    // -- Write-flag probes (specs/source-write-flags.md): both read-only, no writes.
+    // Build paths first: recursive mkdirSync returns the first created dir, not the leaf.
+    const flagsGit = join(w10, 'flags-git');
+    mkdirSync(flagsGit, { recursive: true });
+    assert.equal(git(['init', flagsGit]).status, 0);
+    assert.equal(dash.isGitWorkTree(flagsGit), true, 'a git folder is a work tree');
+    mkdirSync(join(w10, 'flags-plain'), { recursive: true });
+    assert.equal(dash.isGitWorkTree(join(w10, 'flags-plain')), false, 'a plain folder is no work tree');
+    assert.equal(dash.isWritableDir(flagsGit), true, 'a writable folder reports writable');
+    // As root, access(W_OK) passes on any existing folder, so the false case needs non-root.
+    if (process.getuid?.() !== 0) {
+      const flagsRo = join(w10, 'flags-ro');
+      mkdirSync(flagsRo, { recursive: true });
+      chmodSync(flagsRo, 0o555);
+      try { assert.equal(dash.isWritableDir(flagsRo), false, 'a read-only folder reports not writable'); }
+      finally { chmodSync(flagsRo, 0o755); }
+    }
 
     // -- scanInventory: empty repo returns the full default shape.
     ddir('e10');

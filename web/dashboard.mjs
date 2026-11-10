@@ -1,7 +1,7 @@
 // Dashboard core for the alate web UI: inventory scan and data-repo import.
 // HTTP serving lives in server.ts; this module is transport-free.
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -466,6 +466,21 @@ function runGit(dir, args, env = process.env) {
   return spawnSync('git', ['-C', dir, ...args], { env, encoding: 'utf8' });
 }
 
+// True when dir sits inside a git work tree — the gate editPathSource uses before it
+// commits, and the `git` flag GET /health reports for a path source (specs/source-write-flags.md).
+// rev-parse never writes to the folder.
+function isGitWorkTree(dir) {
+  return runGit(dir, ['rev-parse', '--is-inside-work-tree']).status === 0;
+}
+
+// Read-only write signal for a path source (the `writable` flag GET /health reports).
+// accessSync(W_OK) never writes, but it can over-report: some kernels pass W_OK on a
+// read-only bind mount, and a root process passes W_OK on any existing folder. So
+// `false` is reliable; `true` means the PUT can still fail with a raw fs error.
+function isWritableDir(dir) {
+  try { accessSync(dir, constants.W_OK); return true; } catch { return false; }
+}
+
 // -c identity only when the tree has none: a commit must always be possible.
 function identArgs(dir, env) {
   const id = runGit(dir, ['config', 'user.email'], env);
@@ -513,7 +528,7 @@ function editPathSource(state, db, src, op, token) {
   if (!existsSync(dir)) fail(400, `no local data repo at ${src.spec}`);
   applyToTree(dir, op.rel, op.base, op.bytes);
   let commit = '', pushed = false, warning, failure = null;
-  if (runGit(dir, ['rev-parse', '--is-inside-work-tree']).status === 0) {
+  if (isGitWorkTree(dir)) {
     try {
       commit = commitEdit(dir, op.rel, op.message, process.env, token);
       if (runGit(dir, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']).status !== 0) {
@@ -567,4 +582,4 @@ function remoteHead(name, ref, token, host = '') {
   return git.status === 0 && git.stdout ? git.stdout.split('\n')[0].trim().split(/\s+/)[0] : '';
 }
 
-export { scanInventory, importSource, loadState, remoteHead, snapshotData, readStoredFile, listStoredFiles, applyFileEdit };
+export { scanInventory, importSource, isGitWorkTree, isWritableDir, loadState, remoteHead, snapshotData, readStoredFile, listStoredFiles, applyFileEdit };

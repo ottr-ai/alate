@@ -11,7 +11,7 @@ import type { AddressInfo } from 'node:net'
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
 import { cleanupData, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
-import { applyFileEdit, importSource, listStoredFiles, loadState, readStoredFile, remoteHead, snapshotData } from './web/dashboard.mjs'
+import { applyFileEdit, importSource, isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead, snapshotData } from './web/dashboard.mjs'
 import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
 
 const repoRoot = import.meta.dirname
@@ -279,23 +279,35 @@ app.setNotFoundHandler((req, reply) => {
   return reply.code(404).send({ error: 'not found' })
 })
 
-app.get('/health', async () => ({
-  ok: true,
-  running,
-  // Ottr's provisioning gate reads this flag: it skips its idle wait only when it
-  // matches the layer mode the spawned install-user.mjs inherits (ALATE_LAYER=1).
-  layers: process.env.ALATE_LAYER === '1',
-  apiKeySet: !!config.apiKey,
-  repo: config.repo,
-  path: config.path,
-  tokenSet: !!config.token,
-  pending: !!(dashState.source?.importedSha && dashState.source.importedSha !== config.update.provisionedSha),
-  update: {
-    enabled: !!config.repo,
-    lastChecked: config.update.lastChecked,
-    behind: !!config.update.provisionedSha && config.update.remoteSha !== config.update.provisionedSha,
-  },
-}))
+app.get('/health', async () => {
+  // Path-source write flags (specs/source-write-flags.md): git says whether a path PUT
+  // commits, writable whether the folder accepts writes, so a client can disable its
+  // save before the first refused write. Computed per request, never stored; null for a
+  // repo source (a repo PUT always commits on a fresh clone). writable can over-report
+  // (read-only bind mount, root) — see isWritableDir in web/dashboard.mjs.
+  const src = dashState.source
+  const writeFlags = src && src.kind === 'path'
+    ? { git: isGitWorkTree(src.name), writable: isWritableDir(src.name) }
+    : { git: null, writable: null }
+  return {
+    ok: true,
+    running,
+    // Ottr's provisioning gate reads this flag: it skips its idle wait only when it
+    // matches the layer mode the spawned install-user.mjs inherits (ALATE_LAYER=1).
+    layers: process.env.ALATE_LAYER === '1',
+    apiKeySet: !!config.apiKey,
+    repo: config.repo,
+    path: config.path,
+    ...writeFlags,
+    tokenSet: !!config.token,
+    pending: !!(dashState.source?.importedSha && dashState.source.importedSha !== config.update.provisionedSha),
+    update: {
+      enabled: !!config.repo,
+      lastChecked: config.update.lastChecked,
+      behind: !!config.update.provisionedSha && config.update.remoteSha !== config.update.provisionedSha,
+    },
+  }
+})
 
 app.get('/config', async () => ({ repo: config.repo, path: config.path, tokenSet: !!config.token }))
 
