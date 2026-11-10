@@ -1033,6 +1033,11 @@ try {
     assert.ok(!/\d+ installed/.test(r.stdout), 'nothing was installed');
     assert.ok(!existsSync(join(home, '.omp/agent/skills/mine/EVIL.md')));
 
+    // Back to the pinned stub: on a non-root runner (CI) no test-created venv is trusted,
+    // so the venv-preference run below must serve from this PATH stub — an off-pin stub
+    // left over from the refusal test would refuse before the venv gate is even reached.
+    writeStub(0);
+
     // The pinned venv is preferred over PATH, but only when the trust gate passes: it must
     // be root-owned on POSIX and live outside the home install-user writes into, because the
     // home volume is shared with worker agent turns (specs/skillspector-scanner-trust.md).
