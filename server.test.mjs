@@ -1228,12 +1228,17 @@ try {
       return reply(200, { time: { '1.2.0': T.ctx60, '1.3.0': T.ctx10 }, versions: {} });
     if (url.pathname === '/npm/@xynogen/pix-skills')
       return reply(200, { time: { '0.8.5': T.npm20 }, versions: {} });
-    if (url.pathname === '/pypi/fake-pypi-pkg/json')
-      return reply(200, { info: { version: '1.2.3' }, releases: {
-        '1.2.3': [{ upload_time_iso_8601: T.npm90 }],
-        '1.3.0': [{ upload_time_iso_8601: T.npm20 }],
+    if (url.pathname === '/pypi/fake-pypi-pkg/json') {
+      const doc = { releases: {
+        '1.3.0': [{ upload_time_iso_8601: T.npm90 }],
+        '1.3.0.post1': [{ upload_time_iso_8601: T.npm20 }],
+        '1.4.0rc1': [{ upload_time_iso_8601: T.npm20 }],
         '1.4.0-b1': [{ upload_time: T.npm20 }],
-      } });
+        '1.5.0.dev1': [{ upload_time: T.npm20 }],
+      } };
+      doc.info = { version: '1.4.0rc1' };
+      return reply(200, doc);
+    }
     if (url.pathname === '/npm/chrome-devtools-mcp')
       return reply(200, { time: { '1.10.1': T.npm90, '1.11.0': T.npm20 }, versions: {} });
     if (url.pathname === '/dist/index.json')
@@ -1297,7 +1302,7 @@ try {
     writeFileSync(join(upRepo, 'user', 'omp', 'plugins', 'package.json'), JSON.stringify({ dependencies: { 'context-mode': '^1.0.5', 'caveman-installer': 'github:JuliusBrussee/caveman', '@xynogen/pix-optimizer': 'npm:@xynogen/pix-optimizer', '@xynogen/pix-skills': 'npm:@xynogen/pix-skills@^0.8' } }));
     // The real mcp.json shape: the pinned version rides an npx args token.
     mkdirSync(join(upRepo, 'user', 'omp', 'agent'), { recursive: true });
-    writeFileSync(join(upRepo, 'user', 'omp', 'agent', 'mcp.json'), JSON.stringify({ mcpServers: { 'chrome-devtools-mcp': { command: 'cmd', args: ['/c', 'npx', '-y', 'chrome-devtools-mcp@1.10.1', '--no-usage-statistics'] }, 'fake-pypi-mcp': { command: 'uvx', args: ['fake-pypi-pkg==1.2.3'] } } }));
+    writeFileSync(join(upRepo, 'user', 'omp', 'agent', 'mcp.json'), JSON.stringify({ mcpServers: { 'chrome-devtools-mcp': { command: 'cmd', args: ['/c', 'npx', '-y', 'chrome-devtools-mcp@1.10.1', '--no-usage-statistics'] }, 'fake-pypi-mcp': { command: 'uvx', args: ['fake-pypi-pkg==1.3.0'] } } }));
     assert.equal(git(['init', upRepo]).status, 0);
     assert.equal(git(['-C', upRepo, 'add', '-A']).status, 0);
     assert.equal(git(['-C', upRepo, '-c', 'user.email=test@example.com', '-c', 'user.name=test', 'commit', '-m', 'updates fixture']).status, 0);
@@ -1415,9 +1420,9 @@ try {
     // A plain key reads the version from a `<package>==<version>` token (a pinned Python
     // MCP server); the pypi check mirrors the npm stable pick over the releases map.
     const pypi = rows['pypi-demo'];
-    assert.equal(pypi.current, '1.2.3', 'the pinned version from the mcp.json args token');
-    assert.equal(pypi.latest, '1.3.0', 'prerelease versions stay out');
-    assert.equal(pypi.target, '1.3.0', '1.3.0 is 20 days old, so it qualifies');
+    assert.equal(pypi.current, '1.3.0', 'the pinned version from the mcp.json args token');
+    assert.equal(pypi.latest, '1.3.0.post1', '.post ranks above the bare release, PEP 440 pre/dev releases stay out');
+    assert.equal(pypi.target, '1.3.0.post1', '1.3.0 itself is not > current, so only the post release qualifies');
     assert.equal(pypi.publishedAt, T.npm20);
     assert.equal(pypi.notesUrl, 'https://pypi.org/project/fake-pypi-pkg');
     assert.deepEqual(pypi.pin, { file: 'user/omp/agent/mcp.json', key: 'fake-pypi-pkg' });

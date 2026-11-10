@@ -7,7 +7,7 @@
 //   data dir: --data <dir>, else --repo (shallow clone), else $ALATE_DATA, else ../agent-data beside this checkout
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertSourceInside, checkDestination, cleanupData, die, fingerprint, parseArgs, resolveDataDir, ruleProblems, SNAP_AGENTS_DIR, unwrapCmd } from './lib/data.mjs';
 
@@ -93,6 +93,20 @@ try {
       }
       const mcp = readJson('user/omp/agent/mcp.json');
       const serverArgs = cfg => (Array.isArray(cfg?.args) ? cfg.args : []).filter(a => typeof a === 'string');
+      // A concrete PEP 440 pin is "<name>==<final/prerelease/post/dev version>"; an empty version,
+      // a wildcard or a range leaves the release open and does not count as pinned.
+      const pyPin = spec => {
+        const at = spec.indexOf('==');
+        return at >= 0 && /^\d+(?:\.\d+)*(?:(?:a|b|rc)\d+|\.(?:post|dev)\d+)?$/i.test(spec.slice(at + 2)) ? spec.slice(0, at) : undefined;
+      };
+      // Own-glob coverage only reaches self-written servers inside the running machine's home;
+      // a vendor path or another user's file is foreign, and a bare program name is never a home path.
+      const home = homedir();
+      const inHome = cmd => {
+        if (typeof cmd !== 'string' || !isAbsolute(cmd)) return false;
+        const rel = relative(home, cmd);
+        return !!rel && !rel.startsWith('..') && !isAbsolute(rel);
+      };
       for (const [name, cfg] of Object.entries(mcp?.mcpServers ?? {})) {
         const bare = unwrapCmd(cfg) ?? cfg ?? {}; // a Windows capture wraps npx in cmd /c; judge the real program
         const strs = [bare.command, ...serverArgs(bare)].filter(s => typeof s === 'string');
@@ -100,12 +114,12 @@ try {
         const pySpec = bare.command === 'uvx' ? firstArg
           : (bare.command === 'pipx' && firstArg === 'run') ? serverArgs(bare).slice(1).find(a => !a.startsWith('-')) : undefined;
         const ok = strs.some(s => /(^|[\\/])plugins[\\/]/.test(s))
-          || (typeof bare.command === 'string' && own.some(g => globRe(g).test(bare.command)))
+          || (inHome(bare.command) && own.some(g => globRe(g).test(bare.command)))
           || ((bare.command === 'npx' || bare.command === 'bunx') && items.some(it => it?.kind === 'mcp'
             && typeof it.check?.package === 'string' && (firstArg === it.check.package || firstArg?.startsWith(`${it.check.package}@`))))
-          || (typeof pySpec === 'string' && pySpec.includes('==') && items.some(it => it?.kind === 'mcp' && it.check?.type === 'pypi'
-            && typeof it.check?.package === 'string' && it.check.package && (pySpec === it.check.package || pySpec.startsWith(`${it.check.package}==`))));
-        if (!ok && typeof pySpec === 'string' && !pySpec.includes('=='))
+          || (typeof pySpec === 'string' && items.some(it => it?.kind === 'mcp' && it.check?.type === 'pypi'
+            && typeof it.check?.package === 'string' && it.check.package && pyPin(pySpec) === it.check.package));
+        if (!ok && typeof pySpec === 'string' && pyPin(pySpec) === undefined)
           problems.push(`user/omp/agent/mcp.json "${name}": ${bare.command === 'pipx' ? 'pipx run' : bare.command} package "${pySpec}" is not pinned to a version — pin it in mcp.json args as "${pySpec}==<version>" and add an upstreams.json item with check {"type":"pypi","package":"${pySpec}"}`);
         else if (!ok) uncovered.push(`user/omp/agent/mcp.json "${name}"`);
       }

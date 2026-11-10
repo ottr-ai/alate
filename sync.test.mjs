@@ -359,8 +359,8 @@ try {
   assert.equal(r.status, 1);
   assert.match(r.stderr, /"sx": pipx run package "mcp-server-x" is not pinned to a version/);
 
-  // 4. Own glob covers a self-written server; a non-matching own list leaves it uncovered.
-  mcpReset({ mine: { command: '/home/u/.omp/agents/servers/my-mcp.py', args: [] } });
+  // 4. Own glob covers a self-written server under the child's HOME; a non-matching own list leaves it uncovered.
+  mcpReset({ mine: { command: join(childHome, 'servers', 'my-mcp.py'), args: [] } });
   r = gateRun({ own: ['r.md', '**/servers/*.py'], items: [] }, 'rules-py5');
   assert.equal(r.status, 0, r.stderr);
   r = gateRun({ own: ['/home/u/other/**', 'r.md'], items: [] }, 'rules-py6');
@@ -384,6 +384,40 @@ try {
   r = gateRun({ own: ['r.md'], items: [{ name: 'atl', kind: 'mcp', origin: 'https://github.com/x/y', check: { type: 'pypi' } }] }, 'rules-py9');
   assert.equal(r.status, 1);
   assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "atl": no recorded origin/);
+
+  // 8. An empty version is not a concrete pin: the unpinned refusal fires despite the `==`.
+  mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian=='] } });
+  r = gateRun({ own: ['r.md'], items: [pypiItem('mcp-atlassian')] }, 'rules-py10');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /uvx package "mcp-atlassian==" is not pinned to a version/);
+
+  // 9. A PEP 440 wildcard is not a concrete pin: the unpinned refusal fires.
+  mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==1.*'] } });
+  r = gateRun({ own: ['r.md'], items: [pypiItem('mcp-atlassian')] }, 'rules-py11');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /uvx package "mcp-atlassian==1\.\*" is not pinned to a version/);
+
+  // 10. A concrete prerelease pin is still a pin.
+  mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==1.0rc1'] } });
+  r = gateRun({ own: ['r.md'], items: [pypiItem('mcp-atlassian')] }, 'rules-py12');
+  assert.equal(r.status, 0, r.stderr);
+
+  // 11. Own-glob coverage needs the command inside the child's HOME; the glob alone is not enough.
+  mcpReset({ mine: { command: join(childHome, 'servers', 'mine.py'), args: [] } });
+  r = gateRun({ own: ['r.md', '**/servers/*.py'], items: [] }, 'rules-py13');
+  assert.equal(r.status, 0, r.stderr);
+
+  // 12. Outside the HOME the matching glob alone must not cover: generic uncovered line.
+  mcpReset({ vend: { command: '/opt/vendor/servers/x.py', args: [] } });
+  r = gateRun({ own: ['r.md', '**/servers/*.py'], items: [] }, 'rules-py14');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /  user\/omp\/agent\/mcp\.json "vend": no recorded origin — add an item to upstreams\.json or an own entry/);
+
+  // 13. A bare runner name never satisfies an own glob; the pin rule still applies.
+  mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian'] } });
+  r = gateRun({ own: ['r.md', 'uvx'], items: [pypiItem('mcp-atlassian')] }, 'rules-py15');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /uvx package "mcp-atlassian" is not pinned to a version/);
 
   if (process.platform === 'win32') {
     const link = join(tmp, 'rules-link');
