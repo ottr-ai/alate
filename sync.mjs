@@ -119,8 +119,10 @@ try {
             && typeof it.check?.package === 'string' && (firstArg === it.check.package || firstArg?.startsWith(`${it.check.package}@`))))
           || (typeof pySpec === 'string' && items.some(it => it?.kind === 'mcp' && it.check?.type === 'pypi'
             && typeof it.check?.package === 'string' && it.check.package && pyPin(pySpec) === it.check.package));
-        if (!ok && typeof pySpec === 'string' && pyPin(pySpec) === undefined)
-          problems.push(`user/omp/agent/mcp.json "${name}": ${bare.command === 'pipx' ? 'pipx run' : bare.command} package "${pySpec}" is not pinned to a version — pin it in mcp.json args as "${pySpec}==<version>" and add an upstreams.json item with check {"type":"pypi","package":"${pySpec}"}`);
+        if (!ok && typeof pySpec === 'string' && pyPin(pySpec) === undefined) {
+          const pyName = pySpec.split('==')[0];
+          problems.push(`user/omp/agent/mcp.json "${name}": ${bare.command === 'pipx' ? 'pipx run' : bare.command} package "${pyName}" is not pinned to a version — pin it in mcp.json args as "${pyName}==<version>" and add an upstreams.json item with check {"type":"pypi","package":"${pyName}"}`);
+        }
         else if (!ok) uncovered.push(`user/omp/agent/mcp.json "${name}"`);
       }
       uncovered.sort().forEach(p => problems.push(`${p}: no recorded origin — add an item to upstreams.json or an own entry`));

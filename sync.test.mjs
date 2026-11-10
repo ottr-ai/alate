@@ -389,13 +389,13 @@ try {
   mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian=='] } });
   r = gateRun({ own: ['r.md'], items: [pypiItem('mcp-atlassian')] }, 'rules-py10');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /uvx package "mcp-atlassian==" is not pinned to a version/);
+  assert.match(r.stderr, /^  user\/omp\/agent\/mcp\.json "atl": uvx package "mcp-atlassian" is not pinned to a version — pin it in mcp\.json args as "mcp-atlassian==<version>" and add an upstreams\.json item with check \{"type":"pypi","package":"mcp-atlassian"\}$/m);
 
   // 9. A PEP 440 wildcard is not a concrete pin: the unpinned refusal fires.
   mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==1.*'] } });
   r = gateRun({ own: ['r.md'], items: [pypiItem('mcp-atlassian')] }, 'rules-py11');
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /uvx package "mcp-atlassian==1\.\*" is not pinned to a version/);
+  assert.match(r.stderr, /^  user\/omp\/agent\/mcp\.json "atl": uvx package "mcp-atlassian" is not pinned to a version — pin it in mcp\.json args as "mcp-atlassian==<version>" and add an upstreams\.json item with check \{"type":"pypi","package":"mcp-atlassian"\}$/m);
 
   // 10. A concrete prerelease pin is still a pin.
   mcpReset({ atl: { command: 'uvx', args: ['mcp-atlassian==1.0rc1'] } });
