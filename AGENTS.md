@@ -79,6 +79,10 @@ One-line conventional `type: summary`, matching the existing log: `sync:`,
 version bumps; release notes come from commit messages when a person cuts a
 release.
 
+## Ready reports
+
+- Before a ready report, check the diff against every acceptance clause of the card, one clause at a time. List each clause with its evidence in the report.
+
 ## Merging changes
 
 Integration keeps linear history; never a merge commit.
