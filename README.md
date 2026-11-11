@@ -84,7 +84,7 @@ Pin each Python server: a `uvx` or `pipx run` spec counts as pinned only with a 
 
 ## Skills alate ships
 
-Alate vendors the whole `.agents/skills` tree of [github.com/ottr-ai/ottr](https://github.com/ottr-ai/ottr) at the pinned commit `89f9410d4df031628158702bf03b0a1ae6479f04`, and installs every skill folder in that tree into every provisioned home. Today this tree holds seven skills:
+Alate vendors the whole `.agents/skills` tree of [github.com/ottr-ai/ottr](https://github.com/ottr-ai/ottr) at the pinned commit `a7191d7fab8bbe337e918aa15f0a8e53df3e323a`, and installs every skill folder in that tree into every provisioned home. Today this tree holds seven skills:
 
 - `check-ottr-board`
 - `diff-security-review`

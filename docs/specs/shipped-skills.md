@@ -1,7 +1,7 @@
 # Ottr's shipped skills install on every provision
 
 Alate vendors every skill folder under Ottr's `.agents/skills` at the pinned commit
-(`github.com/ottr-ai/ottr`, commit `89f9410d4df031628158702bf03b0a1ae6479f04`) and installs
+(`github.com/ottr-ai/ottr`, commit `a7191d7fab8bbe337e918aa15f0a8e53df3e323a`) and installs
 every folder in that tree on every provision. Today this tree holds seven skills:
 `check-ottr-board`, `diff-security-review`, `explain-project`, `llm-to-code`, `retro`,
 `ui-ux-check`, and `web-perf-audit`.
