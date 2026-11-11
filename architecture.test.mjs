@@ -8,7 +8,7 @@
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import {
-  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync, linkSync,
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync, linkSync, chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -32,12 +32,29 @@ const freshCase = name => {
 const cliEnv = c => ({
   ...process.env,
   HOME: c.home, USERPROFILE: c.home,
+  // install-user probes the SkillSpector scan gate on every run (the vendored shipped
+  // skills install into every provisioned home), so every CLI gets a stub scanner. It is
+  // an absolute path outside every fixture home, as the gate's trust check requires, and
+  // it answers --version with the build parsed out of install-user.mjs so stub and pin
+  // cannot drift; SKILLSPECTOR_VENV stays unset, so the gate resolves the stub.
+  SKILLSPECTOR_BIN: join(ROOT, 'scanner-stub', 'skillspector'),
   PI_CODING_AGENT_DIR: join(c.dir, 'agentdir'),
   ALATE_DATA: c.aldata, // exists but empty: a fallback lands in the sandbox, visibly broken
   GH_TOKEN: 'sanitized-no-network', GITHUB_TOKEN: 'sanitized-no-network',
 });
 const runCli = (c, script, args) =>
   spawnSync(process.execPath, [join(TOOL, script), ...args], { cwd: c.dir, env: cliEnv(c), encoding: 'utf8' });
+
+// The stub scanner cliEnv points at: answers the pin probe, exits 0 on scan. Written from
+// the pinned ref in install-user.mjs so the pair cannot drift.
+{
+  const stub = join(ROOT, 'scanner-stub');
+  mkdirSync(stub, { recursive: true });
+  const pin = text(join(TOOL, 'install-user.mjs')).match(/^const SKILLSPECTOR_REF = '([^']+)';$/m)?.[1];
+  assert.ok(pin, `install-user.mjs must pin SKILLSPECTOR_REF`);
+  writeFileSync(join(stub, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "SkillSpector ${pin}"; exit 0; fi\nexit 0\n`);
+  chmodSync(join(stub, 'skillspector'), 0o755);
+}
 
 const refused = (r, what) => assert(r.status !== null && r.status !== 0,
   `${what}: expected nonzero exit, got 0\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);

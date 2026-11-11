@@ -11,6 +11,10 @@ Copy it into a new private GitHub repo, then fill it with your own data.
 - `projects/`: per-project agent context snapshots, driven by `projects/projects.json`.
 - `upstreams.json`: where every public item came from; `own` lists self-written paths. The MCP servers in `mcp.json` need coverage too: a pinned `npx`, `bunx`, `uvx`, or `pipx run` package gets a `kind: "mcp"` item with an `npm` or `pypi` check. An `own` entry covers a self-written server only when its command is an absolute path under the home and the path matches an `own` glob, never a bare program name such as `uvx` or `npx`.
 
+## Shipped skills
+
+Alate installs four Ottr skills (`check-ottr-board`, `diff-security-review`, `explain-project`, `ui-ux-check`) on every provision, so a fresh install needs no copies of them here. A data repo skill of the same name wins: your copy installs, and the shipped copy of that name stays out.
+
 ## First run
 
 1. Copy this folder into a new private GitHub repo and push it.

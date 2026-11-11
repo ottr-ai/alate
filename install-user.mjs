@@ -42,6 +42,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { assertSourceInside, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend, writeProvisionResults } from './lib/data.mjs';
+import { SHIPPED_PIN, SHIPPED_TREE, shippedSkillDir } from './lib/shipped.mjs';
 
 const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home', '--commit'], ['--force', '--skip-plugins', '--layer']);
 // The imported commit names the layer id in layer mode: the server passes it for a repo
@@ -805,20 +806,112 @@ try {
       }
     }
   }
+  // Ottr ships four agent skills in its own checkout, alate vendors them at one pinned
+  // commit (lib/shipped.mjs, shipped/ottr), and omp only loads .agents/skills for runs
+  // inside the Ottr checkout itself — so every provision installs the vendored copies under
+  // ~/.agents/skills/<name>. The same gates apply in the same order as for snapshot skills:
+  // a data repo skill of the same name wins (presence-based, any skills/ or managed-skills/
+  // folder name), then the structure gate, then the scan gate below — a rejection fails that
+  // one skill per item and never stops the others. The vendored bytes are upstream content,
+  // never captured machine config, so no forTarget and no remapHomePaths apply.
+  const toolRoot = dirname(fileURLToPath(import.meta.url));
+  const snapshotSkillNames = new Set(skillDirs.map(dir => basename(dir)));
+  const shippedScanDirs = [];
+  const shippedDirKey = new Map();
+  for (const pin of SHIPPED_PIN.skills) {
+    const vendored = shippedSkillDir(toolRoot, pin);
+    if (!vendored) {
+      failItem(`user/agents/skills/${pin.name}`, 'rejected', 'missing vendored copy', null, `${pin.path} is absent from ${SHIPPED_TREE} in the tool checkout`);
+      continue;
+    }
+    if (snapshotSkillNames.has(pin.name)) {
+      notes.push(`shipped skill ${pin.name} skipped: the data repo has its own copy`);
+      continue;
+    }
+    const entrypoint = join(vendored, 'SKILL.md');
+    const label = `user/agents/skills/${pin.name}/SKILL.md`;
+    const problems = [];
+    let text;
+    try {
+      assertSourceInside(toolRoot, entrypoint);
+      if (!statSync(entrypoint).isFile()) throw new Error('SKILL.md must be a regular file');
+      text = readFileSync(entrypoint, 'utf8');
+    } catch (err) {
+      problems.push(`${label}: cannot read SKILL.md (${err.message})`);
+    }
+    if (text !== undefined) problems.push(...skillProblems(label, text));
+    if (problems.length) {
+      const first = describeProblem(problems[0]);
+      failItem(`user/agents/skills/${pin.name}`, 'rejected', first.rule, first.at, problems.join('\n'));
+      continue;
+    }
+    for (const file of walk(vendored)) {
+      const rel = `agents/skills/${pin.name}/${file}`;
+      const srcPath = join(vendored, file);
+      try {
+        assertSourceInside(vendored, srcPath);
+      } catch (err) {
+        throw new Error(`user/${rel}: ${err.message}`);
+      }
+      const dest = join(writeRoot, '.' + rel);
+      checkDestination(writeRoot, dest);
+      const readDest = join(readRoot, '.' + rel);
+      if (layerMode) checkDestination(readRoot, readDest);
+      const want = fingerprint(rel, readFileSync(srcPath));
+      // The shipped SKILL.md is the entrypoint and already passed skillProblems above; every
+      // other .md/.mdc gets the hidden-character scan like the snapshot walk. A file with a
+      // problem is rejected per item: no plan entry, no record, no conflict.
+      if (/\.(md|mdc)$/.test(file) && file !== 'SKILL.md') {
+        const hidden = ruleProblems(`user/${rel}`, readFileSync(srcPath).toString('utf8'), { frontmatter: false });
+        if (hidden.length) {
+          const first = describeProblem(hidden[0]);
+          failItem(`user/${rel}`, 'rejected', first.rule, first.at, hidden.join('\n'));
+          continue;
+        }
+      }
+      const have = existsSync(readDest) ? fingerprint(rel, readFileSync(readDest)) : null;
+      const record = have !== null && have === last[rel];
+      const itemKey = `user/${rel}`;
+      if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey]);
+      else if (layerMode && have === want) plan.push(['installed', dest, readFileSync(srcPath), itemKey]);
+      else if (layerMode && have !== null && !record) {
+        // Same machine-state rules as snapshot skills: layer mode keeps the machine copy,
+        // --force takes the shipped bytes.
+        if (force) {
+          plan.push(['installed', dest, readFileSync(srcPath), itemKey]);
+          notes.push(`machine change overridden by --force: ${readDest}`);
+        } else {
+          plan.push(['installed', dest, readFileSync(readDest), itemKey]);
+          notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
+        }
+      }
+      else if (have === null || record || force) plan.push(['installed', dest, readFileSync(srcPath), itemKey]);
+      else conflicts.push(dest);
+      current[rel] = want;
+    }
+    shippedScanDirs.push(vendored);
+    shippedDirKey.set(vendored, `user/agents/skills/${pin.name}`);
+  }
   // In-place scan gate: before any write, and before the deletions are computed, so a skill
   // the scan rejects is dropped from the plan, the manifest, and the conflicts first — its
   // installed record-matching copy then flows into the deletion loop below, and its own
   // changed copy never blocks the conflicts refusal. Skills already recorded as unchanged are
   // scanned again too: a copy a pre-gate alate installed was never scanned, and the manifest
-  // cannot prove it was. Layer mode scans the installed layer after the writes instead.
-  if (!layerMode && skillDirs.length) {
-    const scan = await runScan(skillDirs.filter(dir => !rejectedSkills.has(dir)));
+  // cannot prove it was. The shipped skills join the same single runScan call, with their own
+  // rejection keys (user/agents/skills/<name>) and their own prefix pass for the plan,
+  // current, and conflicts cleanup. Layer mode scans the installed layer after the writes
+  // instead: the shipped skills ride in the layer, and the existing post-write cleanup
+  // removes a rejected one.
+  if (!layerMode && (skillDirs.length || shippedScanDirs.length)) {
+    const scan = await runScan([...skillDirs.filter(dir => !rejectedSkills.has(dir)), ...shippedScanDirs]);
     for (const [dir, info] of scan.rejected) {
-      addScanRejection(skillKey(userRoot, dir), info);
+      addScanRejection(shippedDirKey.get(dir) ?? skillKey(userRoot, dir), info);
       rejectedSkills.add(dir);
     }
     // Drop every rel inside a rejected skill from the plan, the manifest, and the conflicts.
-    const prefixes = [...rejectedSkills].map(dir => relative(userRoot, dir).split(sep).join('/'));
+    const prefixes = [...rejectedSkills].map(dir => shippedDirKey.has(dir)
+      ? `agents/skills/${basename(dir)}`
+      : relative(userRoot, dir).split(sep).join('/'));
     const relRejected = rel => prefixes.some(p => rel === p || rel.startsWith(`${p}/`));
     for (let i = plan.length - 1; i >= 0; i--) if (relRejected(plan[i][3].slice('user/'.length))) plan.splice(i, 1);
     for (const rel of Object.keys(current)) if (relRejected(rel)) delete current[rel];

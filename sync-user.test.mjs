@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,10 @@ mkdirSync(join(repo, 'lib'), { recursive: true });
 mkdirSync(data);
 copyFileSync(fileURLToPath(new URL('./sync-user.mjs', import.meta.url)), join(repo, 'sync-user.mjs'));
 copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(repo, 'lib/data.mjs'));
+// install-user's shipped-skill install reads the pin module and the vendored tree from the
+// tool root, so the sandbox provisions the real vendored skills like a real checkout does.
+copyFileSync(fileURLToPath(new URL('./lib/shipped.mjs', import.meta.url)), join(repo, 'lib/shipped.mjs'));
+cpSync(fileURLToPath(new URL('./shipped/ottr', import.meta.url)), join(repo, 'shipped/ottr'), { recursive: true });
 const put = (rel, text) => { mkdirSync(join(home, rel, '..'), { recursive: true }); writeFileSync(join(home, rel), text); };
 const run = () => spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', home, '--data', data], { encoding: 'utf8' });
 const snap = rel => readFileSync(join(data, 'user', rel), 'utf8');
@@ -564,9 +568,13 @@ try {
   // PATH (the gate fails closed without one).
   const stub = join(tmp, 'skillspector-stub');
   mkdirSync(stub, { recursive: true });
-  writeFileSync(join(stub, 'skillspector'), '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "SkillSpector v2.13.0"; exit 0; fi\nexit 0\n');
+  // The pinned version travels with install-user.mjs: parsing it here keeps stub and gate
+  // from drifting, and the nonexistent venv path makes the run resolve the PATH stub.
+  const pin = readFileSync(join(repo, 'install-user.mjs'), 'utf8').match(/^const SKILLSPECTOR_REF = '([^']+)';$/m)?.[1];
+  assert.ok(pin, 'install-user.mjs must pin SKILLSPECTOR_REF');
+  writeFileSync(join(stub, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "SkillSpector ${pin}"; exit 0; fi\nexit 0\n`);
   chmodSync(join(stub, 'skillspector'), 0o755);
-  const stubEnv = { ...process.env, HOME: childHome, USERPROFILE: childHome };
+  const stubEnv = { ...process.env, HOME: childHome, USERPROFILE: childHome, SKILLSPECTOR_VENV: join(tmp, 'no-venv') };
   delete stubEnv.PI_CODING_AGENT_DIR;
   if (process.platform !== 'win32') stubEnv.PATH = `${stub}${delimiter}${stubEnv.PATH ?? ''}`;
   put('.omp/plugins/bun.lock', '{}'); // restore the fixture the removal above deleted

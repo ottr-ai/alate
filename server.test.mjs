@@ -13,6 +13,7 @@ import { forAll, keepTemp } from './lib/data.mjs';
 
 import { diffLines } from './web/diff.mjs';
 import { checkUpdates, cmpVer, initUpdates, isValidUpdateRecord, loadUpdates, rowErrorText } from './lib/updates.mjs';
+import { SHIPPED_PIN } from './lib/shipped.mjs';
 
 // Proof-mark diff: change, pure addition, pure deletion, and no change.
 assert.deepEqual(diffLines(['a', 'b', 'c'], ['a', 'B', 'c']), [{ start: 1, count: 1, old: ['b'] }]);
@@ -61,7 +62,7 @@ const tmp = mkdtempSync(join(tmpdir(), 'alate-server-'));
     put('user/omp/plugins/bun.lock', JSON.stringify({ workspaces: { '': { dependencies: { '@s/p': 'github:fake/rel' } } }, packages: { '@s/p': ['@s/p@github:fake/rel#S1'] } }));
     await checkUpdates(udb);
     const ids = udb.prepare('SELECT id FROM updates').all().map(r => r.id).sort();
-    assert.deepEqual(ids, ['@s/p@rel-1', 'plugin:@s/p:rel-1', 'plugin:@s/p:rel-1#2'], 'the id loop falls back to the row key, then to the "#2" suffix');
+    assert.deepEqual(ids, ['@s/p@rel-1', 'check-ottr-board@latest', 'diff-security-review@latest', 'explain-project@latest', 'plugin:@s/p:rel-1', 'plugin:@s/p:rel-1#2', 'ui-ux-check@latest'], 'the id loop falls back to the row key, then to the "#2" suffix');
   } finally {
     udb.close();
     delete process.env.ALATE_TEST_GITHUB_API_BASE;
@@ -248,7 +249,16 @@ assert.equal(git(['-C', ghData, '-c', 'user.email=test@example.com', '-c', 'user
 const ghSha = () => git(['-C', ghData, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
 const sha1 = ghSha();
 
-const serverEnv = { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, TMPDIR: serverTmp, TEMP: serverTmp, TMP: serverTmp, ALATE_KEEP_TEMP: '', ALATE_TEST_PROVISION_GATE: provisionGate, ALATE_TEST_SCRIPT_GATE: scriptGate, ALATE_TEST_NO_RESULTS_FILE: join(tmp, 'no-results-gate'), ALATE_TEST_GH_BASE: pathToFileURL(join(tmp, 'gh')).href, GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_GLOBAL: 'nul', GIT_CONFIG_SYSTEM: 'nul' };
+// SkillSpector stub for provision children: with the shipped skills installed on every
+// provision, install-user always probes the scanner. The stub answers --version with the
+// pinned version (read from install-user.mjs so the pair cannot drift) and accepts every
+// scan; SKILLSPECTOR_VENV points nowhere, so resolution lands on this PATH stub.
+const SKILLSPECTOR_REF = /^const SKILLSPECTOR_REF = '([^']+)';/m.exec(readFileSync(join(repoRoot, 'install-user.mjs'), 'utf8'))[1];
+const scannerStubDir = join(tmp, 'scanner-stub');
+mkdirSync(scannerStubDir, { recursive: true });
+writeFileSync(join(scannerStubDir, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'SkillSpector v${SKILLSPECTOR_REF.slice(1)}'; exit 0; fi\nexit 0\n`, { mode: 0o755 });
+
+const serverEnv = { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, TMPDIR: serverTmp, TEMP: serverTmp, TMP: serverTmp, PATH: `${scannerStubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-scanner-venv'), ALATE_KEEP_TEMP: '', ALATE_TEST_PROVISION_GATE: provisionGate, ALATE_TEST_SCRIPT_GATE: scriptGate, ALATE_TEST_NO_RESULTS_FILE: join(tmp, 'no-results-gate'), ALATE_TEST_GH_BASE: pathToFileURL(join(tmp, 'gh')).href, GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_GLOBAL: 'nul', GIT_CONFIG_SYSTEM: 'nul' };
 // sync.mjs prefers PI_CODING_AGENT_DIR over HOME: an inherited value would install fixture rules into a real agent dir.
 delete serverEnv.PI_CODING_AGENT_DIR;
 // ALATE_API_KEY would seed the first-start key of every fresh-config server this suite boots.
@@ -1250,6 +1260,8 @@ try {
   let slowRel = false; // stretch the rel-demo releases request: two overlapping POSTs join one run
   let holdNpm = false; // stall the running check at the context-mode npm request
   let releaseNpm = null; // set once the held request arrived; call it to let the check finish
+  let shippedHead = SHIPPED_PIN.commit; // fake ottr-ai/ottr head: moved to a new sha by the soak test
+  let shippedDrop = ''; // set to a pin path: the fake HEAD tree loses that folder
   let child2 = null; // the trigger-check server, spawned and killed inside the try
   let child3 = null; // the POST /config first-setup server, spawned and killed inside the try
   const authSeen = [];
@@ -1301,6 +1313,12 @@ try {
       if (url.pathname === '/gh/repos/JuliusBrussee/caveman/commits/v4.0.0') return reply(200, { sha: SHA.gitPlugTag400 });
       if (url.pathname === '/gh/repos/fake/gap/commits')
         return reply(200, [{ sha: SHA.gapHead, commit: { committer: { date: T.node40 } }, html_url: `https://github.com/fake/gap/commit/${SHA.gapHead}` }]);
+      // Shipped Ottr skills (lib/shipped.mjs): the fake head sits at the pin commit, so the
+      // four rows report no update until a test moves the head or drops a folder.
+      if (url.pathname === '/gh/repos/ottr-ai/ottr/commits')
+        return reply(200, [{ sha: shippedHead, commit: { committer: { date: T.fresh2 } }, html_url: `https://github.com/ottr-ai/ottr/commit/${shippedHead}` }]);
+      if (url.pathname === '/gh/repos/ottr-ai/ottr/git/trees/HEAD')
+        return reply(200, { tree: SHIPPED_PIN.skills.filter(s => s.path !== shippedDrop).map(s => ({ path: s.path, type: 'tree', sha: `tree-${s.name}` })) });
       return reply(404, { message: 'no such gh fixture' });
     }
     if (url.pathname === '/npm/fake-demo-pkg')
@@ -1450,7 +1468,7 @@ try {
     await waitFor(async () => {
       const state = (await (await get('/api/state')).json()).updates;
       providerRows = (await (await authed('/api/updates')).json()).updates;
-      if (state?.updates?.length !== 18 || providerRows?.length !== 8) return false;
+      if (state?.updates?.length !== 18 + SHIPPED_PIN.skills.length || providerRows?.length !== 8 + SHIPPED_PIN.skills.length) return false;
       stateRows = Object.fromEntries(state.updates.map(u => [u.name, u]));
       return true;
     }, 20_000);
@@ -1570,6 +1588,16 @@ try {
     assert.equal(gone.error ?? null, null);
     assert.equal(gone.id, `gone-skill@${SHA.goneHead}`);
 
+    // Shipped Ottr skills: four rows beside the lock rows, current is the pinned commit and
+    // the fake head equals it, so no row reports a target.
+    for (const p of SHIPPED_PIN.skills) {
+      const sh = rows[p.name];
+      assert.deepEqual([sh.current, sh.latest, sh.target], [SHIPPED_PIN.commit, SHIPPED_PIN.commit, null], JSON.stringify(sh));
+      assert.deepEqual(sh.pin, { file: 'lib/shipped.mjs', key: p.name });
+      assert.equal(sh.repo, 'ottr-ai/ottr');
+      assert.equal(sh.origin, `${SHIPPED_PIN.source}/tree/${SHIPPED_PIN.commit}/${p.path}`);
+    }
+
     // Plugins from bun.lock: npm packages get the registry check, git ones the release tags.
     const ctx = stateRows['context-mode'];
     assert.deepEqual(ctx.pin, { file: 'user/omp/plugins/bun.lock', key: 'context-mode' });
@@ -1598,7 +1626,7 @@ try {
 
     // The dashboard payload carries the same rows on /api/state.
     const state = await (await get('/api/state')).json();
-    assert.equal(state.updates.updates.length, 18);
+    assert.equal(state.updates.updates.length, 18 + SHIPPED_PIN.skills.length);
     assert.equal(typeof state.updates.checkedAt, 'string');
 
     // The stored GitHub key goes to GitHub endpoints only, never to npm, node or cft.
@@ -1714,10 +1742,11 @@ try {
     assert.equal((await postJson('/api/settings', { autoUpdate: true })).status, 200, 'auto-update refresh drives the selectSource trigger');
     r = await postImport(JSON.stringify({ source: 'https://github.com/demo/upd2.git', kind: 'repo' }));
     assert.equal(r.status, 200, JSON.stringify(await r.json()));
-    // Same split as the first server: /api/state keeps all 18 rows, the provider serves 8.
+    // Same split as the first server: /api/state keeps all rows, the provider serves the
+    // board-valid ones; both lists grow by the four shipped-skill rows.
     const allRows = async () => (await (await get('/api/state')).json()).updates.updates;
-    await waitFor(async () => (await allRows()).length === 18, 20_000);
-    await waitFor(async () => (await updatesBody()).updates.length === 8, 20_000);
+    await waitFor(async () => (await allRows()).length === 18 + SHIPPED_PIN.skills.length, 20_000);
+    await waitFor(async () => (await updatesBody()).updates.length === 8 + SHIPPED_PIN.skills.length, 20_000);
     assert.ok((await updatesBody()).updates.every(isValidUpdateRecord), 'every served record passes the board shape');
     let rows2 = await updatesBody();
     const from0 = rows2.updates.find(u => u.name === 'from-demo');
@@ -1862,6 +1891,15 @@ try {
       setTimeout(() => reject(new Error(`config-route server did not start; got: ${buf}`)), 10_000).unref();
     });
     apiKey = apiKey3;
+    // The server runs one check at boot (no stored token yet). With the shipped-skill
+    // rows that boot check can still be in flight when POST /config lands, and a
+    // single-flight join would make the queued call ride along without the new token.
+    // Wait until the boot check has written its rows, so the only check that can run
+    // past this point is the one the route queues.
+    await waitFor(async () => {
+      const s = await (await fetch(new URL('/api/state', base), { headers: { Authorization: `Bearer ${apiKey3}` } })).json();
+      return s.updates?.checkedAt != null && s.updates.updates.length === SHIPPED_PIN.skills.length;
+    }, 20_000);
     const hitsAtConfig = upHits.length;
     r = await postJson('/config', { repo: 'https://github.com/demo/upd2', token: 'config-route-token-77a' }, true);
     assert.equal(r.status, 200, JSON.stringify(await r.json()));
@@ -1942,7 +1980,7 @@ try {
     await bootFast('fast-off');
     assert.equal((await postJson('/api/settings', { token: 'fast-gh-token-4c1' })).status, 200);
     assert.equal((await postImport(JSON.stringify({ source: 'https://github.com/demo/fastup.git', kind: 'repo' }))).status, 200);
-    await waitFor(async () => (await (await get('/api/state')).json()).updates.updates.length === 1, 20_000);
+    await waitFor(async () => (await (await get('/api/state')).json()).updates.updates.length === 1 + SHIPPED_PIN.skills.length, 20_000);
     const off = await fastRow();
     assert.equal(off.latest, '2.0.0');
     assert.equal(off.target, null, 'securityFastPath: false keeps the plain 7-day gate');
@@ -2016,9 +2054,9 @@ try {
   });
   const putJson = async b => fetch(new URL('/api/file', base), { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify(b) });
   const delJson = async b => fetch(new URL('/api/file', base), { method: 'DELETE', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify(b) });
-  const persistedEdit = () => {
+  const persistedEdit = async () => {
     const db = new DatabaseSync(join(tmp, 'state-edit.db'), { readOnly: true });
-    try { return JSON.parse(db.prepare('SELECT value FROM state WHERE id = 1').get().value); }
+    try { return JSON.parse((await retryOnLocked(() => Promise.resolve(db.prepare('SELECT value FROM state WHERE id = 1').get()))).value); }
     finally { db.close(); }
   };
   const editToken = 'alate-edit-token-7d21';
@@ -2360,7 +2398,7 @@ try {
   assert.ok(!('warning' in body));
   assert.equal(body.state.update, null, 'a path source has no update block');
   assert.equal(readFileSync(join(plainDir, 'seed.md'), 'utf8'), 'plain edit\n');
-  assert.ok('update' in persistedEdit(), 'the edit persisted its state row');
+  assert.ok('update' in await persistedEdit(), 'the edit persisted its state row');
 
   // A data dir that vanished after the import refuses cleanly.
   renameSync(plainDir, join(tmp, 'plain-edit-gone'));
@@ -2577,6 +2615,13 @@ try {
   const item = (name, extra = {}) => ({ name, kind: 't', origin: `https://github.com/fake/${name}`, ...extra });
   const UP = items => JSON.stringify({ items });
   const rows = db => Object.fromEntries(loadUpdates(db).updates.map(u => [u.name, u]));
+  // Rows minus the four shipped pins: assertions about entry/lock-driven rows filter the
+  // shipped rows out, since a plan always carries one row per pin.
+  const rowsEx = db => {
+    const r = rows(db);
+    for (const p of SHIPPED_PIN.skills) delete r[p.name];
+    return r;
+  };
   const rawRows = db => db.prepare('SELECT value FROM updates').all().map(r => JSON.parse(r.value));
   const run = async (files, opts = {}) => {
     const db = mkDb(files);
@@ -2608,8 +2653,8 @@ try {
     }
 
     // Empty and whitespace-only snapshot files mean "no entries", never fatal.
-    assert.equal(Object.keys(rows(await run({ 'upstreams.json': '' }))).length, 0);
-    assert.equal(Object.keys(rows(await run({ 'upstreams.json': ' \n\t ', 'user/agents/.skill-lock.json': ' \n\t ' }))).length, 0);
+    assert.equal(Object.keys(rowsEx(await run({ 'upstreams.json': '' }))).length, 0);
+    assert.equal(Object.keys(rowsEx(await run({ 'upstreams.json': ' \n\t ', 'user/agents/.skill-lock.json': ' \n\t ' }))).length, 0);
 
     // github-release: sort order, pick, age gate, publishedAt/notesUrl from the qualifying pick.
     {
@@ -2625,7 +2670,7 @@ try {
         ['3.0.0', '2.0.0', old30, 'u20', plusDays(old30, 7), 'r1@2.0.0'], JSON.stringify(r.r1));
       assert.deepEqual([r.r1.repo, r.r1.pin, r.r1.current, r.r1.error ?? null], [null, null, '1.0.0', null], 'an unpinned item reports a null repo');
       const res = await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
-      assert.deepEqual([res.count, typeof res.checkedAt], [1, 'string'], 'checkUpdates reports count and checkedAt');
+      assert.deepEqual([res.count, typeof res.checkedAt], [1 + SHIPPED_PIN.skills.length, 'string'], 'checkUpdates reports count and checkedAt');
     }
 
     // github-release: draft/prerelease/tagless/hyphen skip; no target at an equal current.
@@ -3084,8 +3129,10 @@ try {
         await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
         assert.equal(rows(db).s1.security?.tier, 'B');
         if (mode === 'aged') {
-          const row = db.prepare('SELECT id, value FROM updates').get();
-          db.prepare('UPDATE updates SET value = ? WHERE id = ?').run(JSON.stringify({ ...JSON.parse(row.value), publishedAt: old30 }), row.id);
+          for (const r of db.prepare('SELECT id, value FROM updates').all()) {
+            const v = JSON.parse(r.value);
+            if (v.name === 's1') db.prepare('UPDATE updates SET value = ? WHERE id = ?').run(JSON.stringify({ ...v, publishedAt: old30 }), r.id);
+          }
         }
         const prev = handler;
         handler = url => url.pathname === '/gh/repos/fake/s1/releases' ? [503, { message: 'down' }] : prev(url);
@@ -3314,6 +3361,68 @@ try {
         'only the current head keeps a seen row');
     }
 
+    // Shipped Ottr skills (lib/shipped.mjs): a row per pin beside the lock rows, the same
+    // 7-day first-seen gate, snapshot-name suppression, and a removed notification.
+    {
+      const pin = SHIPPED_PIN.commit;
+      const names = SHIPPED_PIN.skills.map(s => s.name);
+      const fakeHead = sha => ({ sha, commit: { committer: { date: old30 } }, html_url: `https://github.com/ottr-ai/ottr/commit/${sha}` });
+      let head = pin;
+      let drop = '';
+      handler = url => {
+        if (url.pathname === '/gh/repos/ottr-ai/ottr/commits') return [200, [fakeHead(head)]];
+        if (url.pathname === '/gh/repos/ottr-ai/ottr/git/trees/HEAD')
+          return [200, { tree: SHIPPED_PIN.skills.filter(s => s.path !== drop).map(s => ({ path: s.path, type: 'tree', sha: `t-${s.name}` })) }];
+        return null;
+      };
+      // Fresh first seen: four rows, current is the pinned commit, no target yet.
+      const db = await run({});
+      let r = rows(db);
+      for (const p of SHIPPED_PIN.skills) {
+        const u = r[p.name];
+        assert.deepEqual([u.current, u.latest, u.target, u.repo, u.pin, u.removed ?? null],
+          [pin, pin, null, 'ottr-ai/ottr', { file: 'lib/shipped.mjs', key: p.name }, null], JSON.stringify(u));
+        assert.equal(u.origin, `${SHIPPED_PIN.source}/tree/${pin}/${p.path}`);
+      }
+      assert.ok(loadUpdates(db).updates.every(isValidUpdateRecord), 'every shipped record passes the board shape');
+      // The head equals the pin: no target even once the first-seen record is a week old.
+      for (const n of names) db.prepare('UPDATE update_seen SET seenAt = ? WHERE key LIKE ?').run(old30, `shipped-skill:${n}|%`);
+      await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      r = rows(db);
+      for (const n of names) assert.equal(r[n].target, null, 'current equal to the pinned commit never targets');
+
+      // A moved head qualifies only once its own first-seen record clears the 7-day gate.
+      head = 'b'.repeat(40);
+      await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      r = rows(db);
+      for (const n of names) {
+        assert.equal(r[n].latest, head, 'the moved head shows up as latest');
+        assert.equal(r[n].target, null, 'first seen this run: the soak starts now');
+      }
+      db.prepare("UPDATE update_seen SET seenAt = ? WHERE key LIKE 'shipped-skill:%'").run(old30);
+      await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      r = rows(db);
+      for (const n of names) assert.equal(r[n].target, head, 'a soaked moved head qualifies');
+      assert.ok(loadUpdates(db).updates.every(isValidUpdateRecord), 'targeted records still pass the board shape');
+
+      // Suppression: a snapshot skill folder of the same name wins, the shipped row is
+      // skipped, and the other three pins keep their rows.
+      const supp = await run({ 'user/agents/skills/check-ottr-board/SKILL.md': 'x' });
+      r = rows(supp);
+      assert.equal(r['check-ottr-board'], undefined, 'the data repo copy suppresses the shipped row');
+      assert.deepEqual(names.filter(n => r[n] != null), names.filter(n => n !== 'check-ottr-board'), 'the other three pins keep their rows');
+      // A managed-skills copy suppresses too: the pattern's %skills/ tail matches both dirs.
+      const supp2 = await run({ 'user/managed-skills/ui-ux-check/SKILL.md': 'x' });
+      assert.equal(rows(supp2)['ui-ux-check'], undefined, 'a managed-skills copy suppresses the shipped row');
+
+      // Folder gone upstream: a removed notification row, never a target, no age gate.
+      drop = '.agents/skills/check-ottr-board';
+      const gone = await run({});
+      const g = rows(gone)['check-ottr-board'];
+      assert.deepEqual([g.removed, g.target, g.latest, g.current], [true, null, head, pin], JSON.stringify(g));
+      assert.ok(loadUpdates(gone).updates.every(isValidUpdateRecord), 'the removed record passes the board shape');
+    }
+
     // npm: created/modified exclusion, prerelease exclusion, pick, package fallback, empty doc.
     {
       handler = url => {
@@ -3515,23 +3624,23 @@ try {
       assert.deepEqual([r.pkga.current, r.pkga.latest, r.pkga.target], ['1.2.3', '1.2.3', null]);
       assert.deepEqual([r.pkgb.current, r.pkgb.latest], ['2.5.0"', '2.5.0'], 'the escaped quote survives the stripper');
       // A whitespace-only lock means no entries; malformed and unclosed shapes throw or stay clean.
-      assert.equal(Object.keys(rows(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': ' \n\t ' }))).length, 0);
-      assert.equal(Object.keys(rows(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': '{"workspaces": {}, "packages": {"z": ["z@1.0"]}}' }))).length, 0, 'a workspace-less lock has no plugin rows');
+      assert.equal(Object.keys(rowsEx(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': ' \n\t ' }))).length, 0);
+      assert.equal(Object.keys(rowsEx(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': '{"workspaces": {}, "packages": {"z": ["z@1.0"]}}' }))).length, 0, 'a workspace-less lock has no plugin rows');
       await assert.rejects(run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': '{oops' }));
       await assert.rejects(run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': '1 / junk' }), undefined, 'a bare slash outside a comment never parses');
       await assert.rejects(run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': '{"workspaces": { "": { "dependencies": { "pkgc": "^5.0.0" } } }, "packages": { "pkgc": ["pkgc@5.0.0", "", {}] } } **' }), undefined, 'a bare star pair outside a comment is fatal');
       await assert.rejects(run({ 'upstreams.json': '{' }));
       await assert.rejects(run({ 'user/agents/.skill-lock.json': '{' }));
-      assert.equal(Object.keys(rows(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': '{"workspaces": { "": { "dependencies": { "pkgc": "^5.0.0" } } }, "packages": { "pkgc": ["pkgc@5.0.0", "", {}] } }\n/* unclosed to EOF' }))).length, 1, 'a comment unclosed at EOF still parses');
-      assert.equal(Object.keys(rows(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': '{"workspaces": { "": { "dependencies": { "pkgc": "^5.0.0" } } }, "packages": { "pkgc": ["pkgc@5.0.0", "", {}] } }\n// final comment no newline' }))).length, 1, 'a line comment to EOF still parses');
-      assert.equal(Object.keys(rows(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': '{"packages": { "z": ["z@1.0"] } }' }))).length, 0, 'a lock without workspaces has no plugin rows');
+      assert.equal(Object.keys(rowsEx(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': '{"workspaces": { "": { "dependencies": { "pkgc": "^5.0.0" } } }, "packages": { "pkgc": ["pkgc@5.0.0", "", {}] } }\n/* unclosed to EOF' }))).length, 1, 'a comment unclosed at EOF still parses');
+      assert.equal(Object.keys(rowsEx(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': '{"workspaces": { "": { "dependencies": { "pkgc": "^5.0.0" } } }, "packages": { "pkgc": ["pkgc@5.0.0", "", {}] } }\n// final comment no newline' }))).length, 1, 'a line comment to EOF still parses');
+      assert.equal(Object.keys(rowsEx(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': '{"packages": { "z": ["z@1.0"] } }' }))).length, 0, 'a lock without workspaces has no plugin rows');
       const lockEsc = `{
   "note": "x\\"",
   // comment between the escape and the deps
   "workspaces": { "": { "dependencies": { "pkgd": "^7.0.0" } } },
   "packages": { "pkgd": ["pkgd@7.0.0", "", {}] }
 }`;
-      assert.equal(Object.keys(rows(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': lockEsc }))).length, 1, 'an escaped quote keeps the stripper in sync');
+      assert.equal(Object.keys(rowsEx(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': lockEsc }))).length, 1, 'an escaped quote keeps the stripper in sync');
     }
 
     // Skills: tree-hash compare, branch plumbing, gone folders, origin from sourceUrl, taken set.
@@ -4062,7 +4171,9 @@ try {
       const r = rows(await run({ 'upstreams.json': UP([item('m1', { version: '0.0.1', check: { type: 'npm', package: 'm1' }, managedBy: 'alate sync' })]) }));
       assert.deepEqual([r.m1.latest, r.m1.target], ['0.1', null], 'managed rows are recorded, never targeted');
       const dbd = mkDb({ 'upstreams.json': UP([]) });
-      assert.deepEqual(await checkUpdates(dbd), { checkedAt: null, count: 0 }, 'default opts run clean over an empty snapshot');
+      const empty = await checkUpdates(dbd);
+      assert.deepEqual([empty.count, typeof empty.checkedAt], [SHIPPED_PIN.skills.length, 'string'],
+        'default opts run clean over an empty snapshot: only the shipped-skill rows');
       dbd.close();
       const dbx = new DatabaseSync(':memory:');
       dbx.exec('CREATE TABLE files (path TEXT PRIMARY KEY, content TEXT)');
@@ -4081,7 +4192,7 @@ try {
       await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
       const stored = rawRows(db);
       const ids = stored.map(v => v.id);
-      assert.deepEqual([...ids].sort(), ['dup@latest', 'item:dup#2:latest', 'n1@latest'],
+      assert.deepEqual([...ids].sort(), ['check-ottr-board@latest', 'diff-security-review@latest', 'dup@latest', 'explain-project@latest', 'item:dup#2:latest', 'n1@latest', 'ui-ux-check@latest'],
         'the first copy keeps the plain id, the repeated name falls back to the row key, all ids stay unique');
       const second = stored.find(v => v._row === 'item:dup#2');
       assert.match(second.error, /duplicate item name "dup" in upstreams\.json/, 'the repeated name reports a problem row');
@@ -4964,6 +5075,11 @@ try {
       });
       await new Promise(resolve => fakeNpm.listen(0, '127.0.0.1', resolve));
       const npmBase = `http://127.0.0.1:${fakeNpm.address().port}/npm`;
+      // The shipped-skill rows ask GitHub about the pinned ottr folders. This block has no
+      // gh fixture, so serve them a refusing fake instead of the real api.github.com: the
+      // rows just carry the error, and the npm hits below stay the block's own.
+      const ghMiss = createServer((req, res) => { res.writeHead(404, { 'content-type': 'application/json' }); res.end('{}'); });
+      await new Promise(resolve => ghMiss.listen(0, '127.0.0.1', resolve));
       try {
         const fdir = join(tmp, 'mut10-upstream');
         mkdirSync(fdir, { recursive: true });
@@ -4972,8 +5088,13 @@ try {
           { name: 'mut10-pin', kind: 'image-pin', origin: 'https://github.com/fake/img', check: { type: 'npm', package: 'p1' }, pin: { file: 'Dockerfile', key: 'fake/img' } },
         ] }));
         const cfgG = join(tmp, 'server-config-mutG.json');
-        const G = mut10Spawn(['--port', '0', '--config', cfgG, '--db', join(tmp, 'state-mutG.db'), '--interval', '100000', '--update-interval', '100000'], { ALATE_TEST_NPM_BASE: npmBase });
+        const G = mut10Spawn(['--port', '0', '--config', cfgG, '--db', join(tmp, 'state-mutG.db'), '--interval', '100000', '--update-interval', '100000'], { ALATE_TEST_NPM_BASE: npmBase, ALATE_TEST_GITHUB_API_BASE: `http://127.0.0.1:${ghMiss.address().port}/gh` });
         const { base, key } = await G.up;
+        // The server runs one check at boot (the four shipped-skill rows over the refusing
+        // gh fake). Wait until it has written its rows: an import that lands while it is
+        // still in flight would only mark the boot run stale, and the one rerun it queues
+        // would be the check the npm fake then holds — losing the rerun this block asserts.
+        await waitFor(async () => (await (await fetch(new URL('/api/state', base), { headers: { Authorization: `Bearer ${key}` } })).json()).updates.checkedAt != null, 20_000);
         const rowsG = async () => (await (await fetch(new URL('/api/state', base), { headers: { Authorization: `Bearer ${key}` } })).json()).updates.updates;
         // Check #1 is held open at the fake: a rapid second import must not start a second
         // checker concurrently, and the changed snapshot gets exactly one more check after it.
@@ -4988,16 +5109,22 @@ try {
         await waitFor(async () => npmHits === 2, 20_000);
         await new Promise(r => setTimeout(r, 1000));
         assert.equal(npmHits, 2, 'the queued rerun runs once, still one check at a time');
-        await waitFor(async () => (await rowsG()).length === 1, 20_000);
+        // The four shipped-skill rows join the pin's row; their gh fake refuses, so they
+        // only carry the error text.
+        await waitFor(async () => (await rowsG()).length === 1 + SHIPPED_PIN.skills.length, 20_000);
         [st, body] = await mut10Json(base, '/api/state', { headers: { Authorization: `Bearer ${key}` } });
-        assert.equal(body.updates.updates[0].repo, fdir, 'a path source reports its spec as the pin repo');
+        assert.equal(body.updates.updates.find(u => u.name === 'mut10-pin').repo, fdir, 'a path source reports its spec as the pin repo');
         // A new npm version is picked up by the next import's check.
         npmTime = { '1.0.0': new Date(Date.now() - 30 * 86_400_000).toISOString(), '2.0.0': new Date(Date.now() - 20 * 86_400_000).toISOString() };
         [st, body] = await mut10Post(base, '/api/import', { source: fdir }, null, { origin: base });
         assert.equal(st, 200);
         await waitFor(async () => (await rowsG()).find(u => u.name === 'mut10-pin')?.latest === '2.0.0', 20_000);
         await mut10Kill(G.p);
-      } finally { await new Promise(resolve => fakeNpm.close(resolve)); }
+      } finally {
+        ghMiss.closeAllConnections();
+        await new Promise(resolve => ghMiss.close(resolve));
+        await new Promise(resolve => fakeNpm.close(resolve));
+      }
     }
   }
 
