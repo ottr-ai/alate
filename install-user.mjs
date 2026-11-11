@@ -35,8 +35,8 @@
 // -> ~/.ottr/workers/<project>/<file>; workers/_all/ is provisioned like a project. The data
 // repo is their only source, so a changed list replaces the machine copy without --force, and a
 // list it no longer ships is deleted. tools.json, env.txt and requirements.txt are validated before any write.
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { homedir, availableParallelism } from 'node:os';
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { availableParallelism, homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
@@ -268,12 +268,52 @@ const recordPass = passes => {
   }
 };
 
+// A Windows host bind-mounts the data repo with every file marked executable (the
+// board-seed `docker run --rm -v <data-repo>:/data:ro board-seed --data /data` shape), and
+// the pinned scanner reads any file whose mode carries an exec bit as executable content.
+// A shipped `.skillspector-baseline.yaml` is also a dot-path, which the scanner treats as a
+// hidden artifact, so it reports the baseline as a concealed executable (SC9, HIGH) and the
+// install drops every skill that ships a baseline. The mount can be read-only, so the gate
+// cannot clean the mode in place: a skill folder whose explicitly selected baseline carries
+// an exec bit is scanned through a byte-identical staging copy whose files carry clean
+// modes. The scanner then reads executability from file suffix and content magic only,
+// never from mount noise, and the shipped baseline still applies — the staged bytes are the
+// snapshot's bytes, so the verdict cache keys (bytes only) hold and a warm cache never
+// stages at all.
+const SHIPPED_BASELINE = '.skillspector-baseline.yaml';
+const scanNeedsStaging = dir => {
+  try {
+    return (statSync(join(dir, SHIPPED_BASELINE)).mode & 0o111) !== 0;
+  } catch {
+    // No baseline (or an unreadable one): nothing to normalize; the scan judges the folder
+    // as it is, and the hash gate already rejects an unreadable snapshot.
+    return false;
+  }
+};
+const stageScanCopy = (dir, root, index) => {
+  const dest = join(root, `${String(index).padStart(3, '0')}-${basename(dir)}`);
+  const copy = (from, to) => {
+    mkdirSync(to, { recursive: true });
+    for (const entry of readdirSync(from, { withFileTypes: true })) {
+      const child = join(from, entry.name);
+      if (entry.isDirectory()) copy(child, join(to, entry.name));
+      // Bytes only: a fresh file carries a clean mode, and a symlink contributes its
+      // resolved target bytes — exactly what hashSkillDir keyed and the install walk copies.
+      else writeFileSync(join(to, entry.name), readFileSync(child));
+    }
+  };
+  copy(dir, dest);
+  return dest;
+};
+
 // The pinned build's verdict for these exact bytes, printed as one block so a tail of the
 // output always shows a whole report. Exit 0 resolves clean, exit 1 resolves with the findings
 // report (a per-skill rejection); any other exit or a signal kill resolves as a scan error —
 // also a per-skill rejection, carrying the failure line and the scanner output. Only a spawn
 // error rejects: the scanner cannot run at all, which the caller turns into a whole-run refusal.
-const scanOne = (scanner, dir, total) => new Promise((resolve, reject) => {
+// `display` names the folder in every message: a staged scan copy reports under the snapshot
+// folder's name, so a deploy log's tail still names the skill.
+const scanOne = (scanner, dir, total, display = dir) => new Promise((resolve, reject) => {
   const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: scannerEnv() });
   const out = [], errOut = [];
   child.stdout.on('data', chunk => out.push(chunk));
@@ -281,10 +321,10 @@ const scanOne = (scanner, dir, total) => new Promise((resolve, reject) => {
   child.on('error', err => reject(new Error(`skillspector could not run (${err.code ?? err.message}); refusing to install ${total} skill snapshot(s).`)));
   child.on('close', (code, signal) => {
     const report = `${Buffer.concat(out).toString('utf8')}${Buffer.concat(errOut).toString('utf8')}`.trimEnd();
-    console.log(`--- SkillSpector report: ${dir}${report ? `\n${report}` : ''}`);
+    console.log(`--- SkillSpector report: ${display}${report ? `\n${report}` : ''}`);
     if (code === 0) resolve({ report: null });
     else if (code === 1) resolve({ report });
-    else resolve({ report, scanError: `SkillSpector scan of ${dir} failed (exit ${code ?? `signal ${signal}`}).` });
+    else resolve({ report, scanError: `SkillSpector scan of ${display} failed (exit ${code ?? `signal ${signal}`}).` });
   });
 });
 
@@ -380,33 +420,56 @@ const runScan = async skillDirs => {
   // stops scheduling, lets the in-flight scans finish, and refuses the whole run.
   let fatal = null;
   let next = 0;
-  const worker = async () => {
-    while (fatal === null && next < pending.length) {
-      const dir = pending[next++];
-      try {
-        const res = await scanOne(scanner, dir, skillDirs.length);
-        if (res.report === null) {
-          passes[keys.get(dir)] = true;
-          recordPass(passes);
-        } else if (res.scanError !== undefined) {
-          rejected.set(dir, { rule: 'scan error', report: `${res.scanError}${res.report ? `\n${res.report}` : ''}` });
-          // Stdout too: the deploy log's tail must name the rejected skill folder.
-          console.log(`${res.scanError} The skill is left out of this install.`);
-        } else {
-          rejected.set(dir, { report: res.report });
-          // Stdout too: the deploy log's tail must name the rejected skill folder.
-          console.log(`SkillSpector rejected ${dir} (exit 1); the skill is left out of this install.`);
-        }
-      } catch (err) {
-        fatal = err;
-      }
-    }
+  // Staged scan copies for folders whose shipped baseline carries exec bits (the Windows
+  // bind-mount shape); created lazily, so a clean mount never pays for one, and removed
+  // before this function returns, whatever the scans decided.
+  let stageRoot = null;
+  let staged = 0;
+  const scanTargetFor = dir => {
+    if (!scanNeedsStaging(dir)) return dir;
+    if (stageRoot === null) stageRoot = mkdtempSync(join(tmpdir(), 'alate-scan-'));
+    return stageScanCopy(dir, stageRoot, staged++);
   };
-  await Promise.all(Array.from({ length: Math.min(8, availableParallelism(), pending.length) }, worker));
-  if (fatal !== null) {
-    // Stdout too: the deploy log's tail must end on the line naming the broken scan.
-    console.log(fatal.message);
-    throw fatal;
+  try {
+    const worker = async () => {
+      while (fatal === null && next < pending.length) {
+        const dir = pending[next++];
+        let scanTarget;
+        try {
+          scanTarget = scanTargetFor(dir);
+        } catch (err) {
+          // Staging reads the same bytes the hash gate just read, so this is a mid-run race,
+          // not a broken snapshot: reject the one skill, scan the rest.
+          rejected.set(dir, { rule: 'unreadable skill files', report: `${dir}: ${err.message}` });
+          continue;
+        }
+        try {
+          const res = await scanOne(scanner, scanTarget, skillDirs.length, dir);
+          if (res.report === null) {
+            passes[keys.get(dir)] = true;
+            recordPass(passes);
+          } else if (res.scanError !== undefined) {
+            rejected.set(dir, { rule: 'scan error', report: `${res.scanError}${res.report ? `\n${res.report}` : ''}` });
+            // Stdout too: the deploy log's tail must name the rejected skill folder.
+            console.log(`${res.scanError} The skill is left out of this install.`);
+          } else {
+            rejected.set(dir, { report: res.report });
+            // Stdout too: the deploy log's tail must name the rejected skill folder.
+            console.log(`SkillSpector rejected ${dir} (exit 1); the skill is left out of this install.`);
+          }
+        } catch (err) {
+          fatal = err;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, availableParallelism(), pending.length) }, worker));
+    if (fatal !== null) {
+      // Stdout too: the deploy log's tail must end on the line naming the broken scan.
+      console.log(fatal.message);
+      throw fatal;
+    }
+  } finally {
+    if (stageRoot !== null) rmSync(stageRoot, { recursive: true, force: true });
   }
   return { rejected };
 };

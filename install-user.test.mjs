@@ -1564,6 +1564,70 @@ try {
     r = run(['--data', verData, '--skip-plugins'], verHome);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Scanning 0 of 5 skill snapshot\(s\) \(5 cached\)/);
+
+    // A Windows bind mount (the board-seed `-v <data-repo>:/data:ro` shape) marks every file
+    // executable, and the pinned scanner reads a mode-carried exec bit on the dot-named
+    // shipped baseline as a concealed executable (SC9, HIGH) — without the staging copy the
+    // install drops every skill that ships a baseline. The stand-in scanner rejects exactly
+    // what the pinned build rejects there — a scan target whose baseline is executable —
+    // and logs whether each scan target carries the baseline, so a staged copy must scan
+    // clean with the baseline present. The clean-modes skill keeps scanning in place, both
+    // skills install, and the warm cache reuses the staged verdict without staging again.
+    const winData = join(tmp, 'win-data');
+    const winHome = join(tmp, 'win-home');
+    const winBaselineLog = join(stubDir, 'win-baseline.log');
+    mkdirSync(join(winData, 'user/omp/agent/skills/windy'), { recursive: true });
+    mkdirSync(join(winData, 'user/omp/agent/skills/calm'), { recursive: true });
+    writeFileSync(join(winData, 'user/omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
+    writeFileSync(join(winData, 'user/omp/agent/skills/windy/SKILL.md'), skillText('windy'));
+    writeFileSync(join(winData, 'user/omp/agent/skills/windy/.skillspector-baseline.yaml'), 'version: 2\nscanner_version: 2.13.0\nfindings: []\n');
+    writeFileSync(join(winData, 'user/omp/agent/skills/calm/SKILL.md'), skillText('calm'));
+    writeFileSync(join(winData, 'user/omp/agent/skills/calm/.skillspector-baseline.yaml'), 'version: 2\nscanner_version: 2.13.0\nfindings: []\n');
+    chmodSync(join(winData, 'user/omp/agent/skills/windy/SKILL.md'), 0o777);
+    chmodSync(join(winData, 'user/omp/agent/skills/windy/.skillspector-baseline.yaml'), 0o777);
+    const writeWinStub = () => {
+      writeFileSync(join(stubDir, 'skillspector'), `#!/bin/sh
+[ "$1" = scan ] && printf '%s\\n' "$*" >> '${callsLog}'
+[ "$1" = scan ] && printf 'baseline=%s %s\\n' "$([ -f "$2/.skillspector-baseline.yaml" ] && echo yes || echo no)" "$2" >> '${winBaselineLog}'
+if [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi
+if [ "$1" = scan ] && [ -x "$2/.skillspector-baseline.yaml" ]; then
+  printf '  HIGH: SC9 - Concealed Executable Artifact...\\n    Location: .skillspector-baseline.yaml:1\\n'
+  exit 1
+fi
+exit 0
+`);
+      chmodSync(join(stubDir, 'skillspector'), 0o755);
+    };
+    writeWinStub();
+    rmSync(winBaselineLog, { force: true });
+    r = run(['--data', winData, '--skip-plugins'], winHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(`Scanning ${2 + shippedCount} of ${2 + shippedCount} skill snapshot(s) (0 cached)`), r.stdout);
+    assert.ok(existsSync(join(winHome, '.omp/agent/skills/windy/SKILL.md')), 'the 0777 skill installs');
+    assert.ok(existsSync(join(winHome, '.omp/agent/skills/calm/SKILL.md')), 'the clean-modes skill installs');
+    const winTargets = readFileSync(callsLog, 'utf8').trim().split('\n')
+      .filter(line => line.startsWith('scan '))
+      .map(line => line.slice('scan '.length, line.indexOf(' --no-llm')));
+    const windyTarget = winTargets.find(dir => dir.endsWith('windy'));
+    assert.ok(windyTarget, 'the 0777 skill is scanned');
+    assert.ok(!windyTarget.startsWith(winData), `the 0777 skill scans through a staging copy, not the data folder: ${windyTarget}`);
+    const calmTarget = winTargets.find(dir => dir.startsWith(winData));
+    assert.equal(calmTarget, join(winData, 'user/omp/agent/skills/calm'), 'the clean-modes skill scans in place');
+    const winScans = readFileSync(winBaselineLog, 'utf8').trim().split('\n').map(line => {
+      const match = line.match(/^baseline=(\S+) (.*)$/);
+      return { baseline: match[1], dir: match[2] };
+    });
+    const windyScan = winScans.find(scan => scan.dir.endsWith('windy'));
+    assert.ok(windyScan && windyScan.baseline === 'yes', `the staged copy carries the shipped baseline: ${JSON.stringify(windyScan)}`);
+    const calmScan = winScans.find(scan => scan.dir === join(winData, 'user/omp/agent/skills/calm'));
+    assert.ok(calmScan && calmScan.baseline === 'yes', 'the in-place scan still sees the baseline');
+    assert.ok(!existsSync(dirname(windyTarget)), 'the staging copy is removed after the run');
+    const winWarmBefore = readFileSync(callsLog, 'utf8');
+    r = run(['--data', winData, '--skip-plugins'], winHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(`Scanning 0 of ${2 + shippedCount} skill snapshot(s) (${2 + shippedCount} cached)`), r.stdout);
+    assert.equal(readFileSync(callsLog, 'utf8'), winWarmBefore, 'a warm cache reuses the staged verdict and stages nothing');
+    writeStub(0);
   } else {
     console.log('win32: the scanner-stub checks need a real skillspector on PATH; gate assertions skipped');
   }
