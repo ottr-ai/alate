@@ -13,7 +13,7 @@ import { forAll, keepTemp } from './lib/data.mjs';
 
 import { diffLines } from './web/diff.mjs';
 import { checkUpdates, cmpVer, initUpdates, isValidUpdateRecord, loadUpdates, rowErrorText } from './lib/updates.mjs';
-import { SHIPPED_PIN, shippedSkills } from './lib/shipped.mjs';
+import { SHIPPED_REPO, SHIPPED_PIN, shippedSkills } from './lib/shipped.mjs';
 
 // Proof-mark diff: change, pure addition, pure deletion, and no change.
 assert.deepEqual(diffLines(['a', 'b', 'c'], ['a', 'B', 'c']), [{ start: 1, count: 1, old: ['b'] }]);
@@ -1598,7 +1598,7 @@ try {
       const sh = rows[p.name];
       assert.deepEqual([sh.current, sh.latest, sh.target], [SHIPPED_PIN.commit, SHIPPED_PIN.commit, null], JSON.stringify(sh));
       assert.deepEqual(sh.pin, { file: 'lib/shipped.mjs', key: p.name });
-      assert.equal(sh.repo, 'ottr-ai/ottr');
+      assert.equal(sh.repo, SHIPPED_REPO);
       assert.equal(sh.origin, `${SHIPPED_PIN.source}/tree/${SHIPPED_PIN.commit}/${p.path}`);
     }
 
@@ -3391,7 +3391,7 @@ try {
       for (const p of shipped) {
         const u = r[p.name];
         assert.deepEqual([u.current, u.latest, u.target, u.repo, u.pin, u.removed ?? null],
-          [pin, pin, null, 'ottr-ai/ottr', { file: 'lib/shipped.mjs', key: p.name }, null], JSON.stringify(u));
+          [pin, pin, null, SHIPPED_REPO, { file: 'lib/shipped.mjs', key: p.name }, null], JSON.stringify(u));
         assert.equal(u.origin, `${SHIPPED_PIN.source}/tree/${pin}/${p.path}`);
       }
       assert.ok(loadUpdates(db).updates.every(isValidUpdateRecord), 'every shipped record passes the board shape');
@@ -3450,6 +3450,18 @@ try {
       assert.equal(rows(readmeOnly)['ui-ux-check'], undefined, 'a user override dir suppresses without a SKILL.md');
       const bareRoot = await run({ 'user/skills/check-ottr-board/anything.txt': 'x' });
       assert.equal(rows(bareRoot)['check-ottr-board'], undefined, 'a zero-middle-dir user override suppresses too');
+      // First-root-wins (collectSkillDirs): a deeper skills-named segment sits inside the
+      // already-collected skill, so it is never seen as a root and neither counts nor hides.
+      const deepRoot = await run({ 'user/agents/skills/custom/references/skills/check-ottr-board/SKILL.md': 'x' });
+      assert.ok(rows(deepRoot)['check-ottr-board'] != null, 'a skills dir inside a collected skill is not an override root');
+      const deepManaged = await run({ 'user/agents/managed-skills/other/references/skills/ui-ux-check/SKILL.md': 'x' });
+      assert.ok(rows(deepManaged)['ui-ux-check'] != null, 'a managed-skills dir inside a collected skill is not an override root');
+      // A file directly under the first root's skill child suppresses; a same-named folder
+      // with no content inside does not (the installer collects dirs with children).
+      const directChild = await run({ 'user/agents/skills/diff-security-review/SKILL.md': 'x' });
+      assert.equal(rows(directChild)['diff-security-review'], undefined, 'the first root wins');
+      const noRoot = await run({ 'user/check-ottr-board/SKILL.md': 'x' });
+      assert.ok(rows(noRoot)['check-ottr-board'] != null, 'a user-layer dir with no skills root is not an override');
 
       // Folder gone upstream: a removed notification row, never a target, no age gate.
       drop = '.agents/skills/check-ottr-board';
@@ -3466,6 +3478,19 @@ try {
       const b = rows(broken)['check-ottr-board'];
       assert.deepEqual([b.target, b.latest, b.current ?? null], [null, null, null], JSON.stringify(b));
       assert.ok(String(b.error).includes(`has no folder at .agents/skills/check-ottr-board`), JSON.stringify(b));
+      pinDrop = '';
+
+      // Transition regression: an aged target carried by an earlier pin must not survive a
+      // pin error. ui-ux-check holds target = head from the soaked changed-tree case above;
+      // when the pin commit's tree later loses that folder, the row carries the error and
+      // the target is cleared (otherwise the board schedules stale work under a broken pin).
+      pinDrop = '.agents/skills/ui-ux-check';
+      await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      r = rows(db);
+      const stale = r['ui-ux-check'];
+      assert.ok(String(stale.error).includes(`has no folder at .agents/skills/ui-ux-check`), JSON.stringify(stale));
+      assert.equal(stale.target, null, 'a pin error clears the carried target');
+      assert.ok(isValidUpdateRecord(stale), 'the error row stays a harmless board record');
       pinDrop = '';
     }
 
