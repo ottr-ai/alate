@@ -41,6 +41,22 @@ alate provisions an [omp](https://github.com/can1357/oh-my-pi) agent on any mach
 
 Capture is the prepared way to get a usable setup. Docker Compose is the prepared way to run the server.
 
+## Local image builds on Windows
+
+The compose file builds the image from this checkout (`build: .`). The repo pins LF in
+`.gitattributes` (`* text=auto eol=lf`), so git writes LF working files on Windows too.
+Git applies the attribute only at checkout. A checkout made before the `.gitattributes`
+commit keeps its old CRLF working files.
+
+The Dockerfile copies the whole checkout into the image. The SkillSpector baselines for
+the vendored skills are fingerprints over LF bytes, so a CRLF vendored skill fails the
+scan at provision time. Commit or stash your changes first. Then run this once to
+refresh the working files:
+
+```sh
+git rm -r --cached . && git reset --hard
+```
+
 ## Start from your current setup
 
 The `create-data-repo` skill runs the quick start for you. It checks the prerequisites, captures this machine's omp setup with `sync-user.mjs` and `sync-projects.mjs`, scans the result for secrets, and creates the private repo. It asks before each step outside your machine and refuses a public repo.
@@ -160,7 +176,7 @@ Needs Node 24.12+. Flags: `--port` or `PORT`, `--host` or `ALATE_HOST`, `--confi
 One manifest, one lockfile, no build step. The verified chain:
 
 ```sh
-npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node home-guard.test.mjs && node home-guard.test.mjs record && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && npx tsc --noEmit && node server.test.mjs && node home-guard.test.mjs check
+npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node crlf.test.mjs && node home-guard.test.mjs && node home-guard.test.mjs record && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && node scripts/mutant-run.test.mjs && npx tsc --noEmit && node server.test.mjs && node home-guard.test.mjs check
 ```
 
 home-guard.test.mjs brackets the chain: the early record snapshots the home's `.alate`, `.agents` and `.omp`, and the final check fails the run when a path or an mtime there changed. The platform's own runtime files (the omp databases, logs, cache, run, the session stores under `.omp`, and the two bookkeeping files under `.alate`) stay excluded: a live worker writes them during any chain.

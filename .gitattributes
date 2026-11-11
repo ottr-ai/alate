@@ -1,0 +1,6 @@
+# LF everywhere: scoop's Git turns on core.autocrlf, which checks out CRLF on Windows, and
+# the Dockerfile copies the whole checkout into the image. The SkillSpector baselines for
+# the vendored shipped skills are fingerprints over LF bytes, so CRLF copies make the scan
+# reject findings that the baselines accept.
+* text=auto eol=lf
+*.png binary
