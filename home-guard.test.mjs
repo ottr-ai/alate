@@ -27,7 +27,7 @@ const LIVE = {
     || rel === 'agent/custom-session-files' || rel.startsWith('agent/custom-session-files/')
     || rel === 'snapcompact-savings.jsonl'
     || rel === 'agent/blobs' || rel.startsWith('agent/blobs/')
-    || /^agent\/[A-Za-z0-9]+\.db(?:\.|-|$)/.test(rel),
+    || /^agent\/[A-Za-z0-9-]+\.db(?:\.|-|$)/.test(rel),
 };
 const resolveSnap = (argv) => argv[3] ?? process.env.ALATE_HOME_GUARD_SNAPSHOT ?? join(tmpdir(), 'alate-home-guard-snapshot.json');
 
@@ -97,6 +97,7 @@ const selfCheck = () => {
   const fake = join(tmp, 'home');
   for (const rel of ['.alate/state.json', '.alate/in-use.json', '.alate/skillspector-pass.json',
     '.agents/skills/x/SKILL.md', '.omp/agent/rules/r.md', '.omp/agent/agent.db', '.omp/agent/agent.db-wal',
+    '.omp/agent/skill-descriptions.db-shm', '.omp/agent/skill-descriptions.db-wal',
     '.omp/logs/omp.231.log', '.omp/context-mode/sessions/s.db-shm', '.omp/agent/custom-session-files/a',
     '.omp/snapcompact-savings.jsonl', 'unwatched.txt']) {
     mkdirSync(join(fake, rel, '..'), { recursive: true });
@@ -113,6 +114,8 @@ const selfCheck = () => {
     assert.equal(run('check', fake, snap).status, 0, 'unwatched change passes');
     // Platform runtime files may churn mid-chain; the guard ignores them.
     utimesSync(join(fake, '.omp/agent/agent.db-wal'), new Date(), new Date(Date.now() + 9000));
+    utimesSync(join(fake, '.omp/agent/skill-descriptions.db-shm'), new Date(), new Date(Date.now() + 9000));
+    writeFileSync(join(fake, '.omp/agent/skill-descriptions.db-wal'), 'more\n');
     writeFileSync(join(fake, '.omp/logs/omp.231.log'), 'more\n');
     writeFileSync(join(fake, '.alate/skillspector-pass.json'), '{}\n');
     writeFileSync(join(fake, '.omp/context-mode/sessions/s.db-shm'), 'more\n');
