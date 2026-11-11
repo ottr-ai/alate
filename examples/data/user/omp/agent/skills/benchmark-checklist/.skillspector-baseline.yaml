@@ -4,7 +4,11 @@ version: 2
 scanner_version: 2.13.0
 rules: []
 fingerprints:
-- hash: sha256:f2a8ab6ab62729225bd1158a17b9d5080beb98b0dd755d8ec0471fd75d201e5f
+- hash: sha256:4fa5158b7d48e3dc5ad5b72015a0dcb79fc106ddfb49e33883971ef618722521
   rule_id: AS3
   file: SKILL.md
   reason: Port-notice provenance, not skill enumeration. The quoted paths name the upstream pstack files this skill was ported from; the skill never reads or lists other skills' files or directories.
+- hash: sha256:97be3f6beae83cd5573e4a30c53c25982922bf99c8bec04da7f00b7faaf99e41
+  rule_id: EA3
+  file: SKILL.md
+  reason: False positive on the verbatim MIT license text kept by the port notice requirement; the flagged line is license boilerplate, not an instruction to expand the skill's scope.

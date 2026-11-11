@@ -74,7 +74,7 @@
       "check": { "type": "github-path", "repo": "cursor/plugins", "path": "pstack/skills/benchmark-checklist" },
       "version": "4dd1d05818d19792e7cd6e818f1667f95f7e1dbe",
       "paths": ["user/omp/agent/skills/benchmark-checklist"],
-      "note": "Ported from pstack at the pinned commit (2026-10-29), MIT (Copyright (c) 2026 Lauren Tan): pstack/skills/benchmark-checklist/SKILL.md, with pstack/skills/principle-explain-the-number/SKILL.md folded in as a section and the upstream pstack-playbook section dropped. The check tracks only the primary file, so a change in the folded-in file needs a manual port."
+      "note": "Ported from pstack at the pinned commit (2026-10-29), MIT (Copyright (c) 2026 Lauren Tan): pstack/skills/benchmark-checklist/SKILL.md, with pstack/skills/principle-explain-the-number/SKILL.md folded in as a section and the upstream pstack-playbook section dropped. This copy appends the full MIT license text as a License section. The check tracks only the primary file, so a change in the folded-in file needs a manual port."
     }
   ]
 }
