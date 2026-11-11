@@ -191,7 +191,7 @@ try {
       assert.equal(result.status, 0, `valid skill metadata installs: ${result.stderr}`);
       result = run(extra, target);
       assert.equal(result.status, 0, result.stderr);
-      assert.match(result.stdout, /0 of 13 skill snapshot\(s\) \(13 cached\)/, 'the fixture starts with a warm scanner cache');
+      assert.match(result.stdout, new RegExp(`0 of ${validSkills.length + shippedCount} skill snapshot\\(s\\) \\(${validSkills.length + shippedCount} cached\\)`), 'the fixture starts with a warm scanner cache');
       for (const [name, text] of malformedSkills) {
         const rel = malformedRel(name);
         if (text === undefined) mkdirSync(join(gateData, 'user', rel, 'SKILL.md'), { recursive: true });
@@ -297,7 +297,7 @@ try {
 
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /13 installed, 0 unchanged/);
+  assert.match(r.stdout, /20 installed, 0 unchanged/);
   assert.equal(got('.omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
   assert.equal(got('.agents/.skill-lock.json'), '{"skills":{}}\n', 'the first dot is restored');
   assert.ok(existsSync(join(home, '.omp/agent/skills/mine/SKILL.md')), 'nested dirs are created');
@@ -305,13 +305,13 @@ try {
 
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /0 installed, 13 unchanged/, 'a rerun copies nothing');
+  assert.match(r.stdout, /0 installed, 20 unchanged/, 'a rerun copies nothing');
 
   // A CRLF copy of the same bytes counts as unchanged, so autocrlf checkouts never churn a live home.
   mkdirSync(join(home, '.agents/skills/theirs'), { recursive: true });
   writeFileSync(join(home, '.agents/skills/theirs/SKILL.md'), skillText('theirs').replaceAll('\n', '\r\n'));
   r = run(['--data', data, '--skip-plugins']);
-  assert.match(r.stdout, /0 installed, 13 unchanged/);
+  assert.match(r.stdout, /0 installed, 20 unchanged/);
   assert.equal(got('.agents/skills/theirs/SKILL.md'), skillText('theirs').replaceAll('\n', '\r\n'), 'line-ending-only drift is not rewritten');
 
   const live = '# mine, edited on the machine\n';
@@ -330,7 +330,7 @@ try {
   put('omp/agent/skills/mine/SKILL.md', skillText('mine', '# mine, v2\n'));
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 0, `an untouched install takes the newer snapshot: ${r.stderr}`);
-  assert.match(r.stdout, /1 installed, 12 unchanged/);
+  assert.match(r.stdout, /1 installed, 19 unchanged/);
   assert.equal(got(mine), skillText('mine', '# mine, v2\n'));
   // ...but not one changed on the machine since,
   writeFileSync(join(home, mine), live);
@@ -574,7 +574,7 @@ try {
     assert.equal(installed.mcpServers.wrapped.command, 'npx');
     assert.match(r.stdout, /MCP server wrapped runs npx directly, without cmd \/c/);
     r = run(['--data', data, '--skip-plugins'], linuxHome);
-    assert.match(r.stdout, /0 installed, 14 unchanged/, 'an adapted file counts as unchanged on the rerun');
+    assert.match(r.stdout, /0 installed, 21 unchanged/, 'an adapted file counts as unchanged on the rerun');
   }
 
   // omp stamps updatedAt on each catalog refresh: that drift alone is no conflict, a changed path is.
@@ -621,7 +621,7 @@ try {
   const snapshotConfig = readFileSync(join(data, 'user/omp/agent/config.yml'), 'utf8');
   writeFileSync(depConfig, snapshotConfig + blocks);
   r = run(['--data', data, '--skip-plugins'], depHome);
-  assert.match(r.stdout, /0 installed, 15 unchanged/, `only deployment blocks differ: ${r.stderr}`);
+  assert.match(r.stdout, /0 installed, 22 unchanged/, `only deployment blocks differ: ${r.stderr}`);
   assert.equal(readFileSync(depConfig, 'utf8'), snapshotConfig + blocks, 'unchanged leaves the blocks byte for byte');
 
   // A snapshot change installs and keeps the target's deployment blocks byte for byte,
@@ -630,12 +630,12 @@ try {
   put('omp/agent/config.yml', v2);
   r = run(['--data', data, '--skip-plugins'], depHome);
   assert.equal(r.status, 0, `a snapshot change takes the deployment blocks along: ${r.stderr}`);
-  assert.match(r.stdout, /1 installed, 14 unchanged/);
+  assert.match(r.stdout, /1 installed, 21 unchanged/);
   assert.equal(readFileSync(depConfig, 'utf8'), v2 + blocks, 'the blocks survive the install byte for byte');
   assert.equal(JSON.parse(readFileSync(join(depHome, '.alate/installed.json'), 'utf8'))['omp/agent/config.yml'],
     fingerprint('omp/agent/config.yml', Buffer.from(v2)), 'the record holds the snapshot fingerprint');
   r = run(['--data', data, '--skip-plugins'], depHome);
-  assert.match(r.stdout, /0 installed, 15 unchanged/, 'the recorded fingerprint makes the rerun unchanged');
+  assert.match(r.stdout, /0 installed, 22 unchanged/, 'the recorded fingerprint makes the rerun unchanged');
 
   // A change outside the deployment blocks that is neither the snapshot nor the last install
   // is still a conflict, and the block content never reaches the output.
@@ -668,14 +668,14 @@ try {
   assert.equal(r.status, 0, r.stderr);
   writeFileSync(join(dep2Home, '.omp/agent/config.yml'), v2 + 'hindsight:\n  apiUrl: http://nas:8888');
   r = run(['--data', data, '--skip-plugins'], dep2Home);
-  assert.match(r.stdout, /0 installed, 15 unchanged/, `an unterminated block still matches the snapshot: ${r.stderr}`);
+  assert.match(r.stdout, /0 installed, 22 unchanged/, `an unterminated block still matches the snapshot: ${r.stderr}`);
 
   // A snapshot without a final newline still gets the blocks on their own line.
   const v3 = 'modelRoles:\n  default: zai/glm-4';
   put('omp/agent/config.yml', v3);
   r = run(['--data', data, '--skip-plugins'], dep2Home);
   assert.equal(r.status, 0, `an unterminated snapshot takes the blocks along: ${r.stderr}`);
-  assert.match(r.stdout, /1 installed, 14 unchanged/);
+  assert.match(r.stdout, /1 installed, 21 unchanged/);
   assert.equal(readFileSync(join(dep2Home, '.omp/agent/config.yml'), 'utf8'),
     `${v3}\nhindsight:\n  apiUrl: http://nas:8888`, 'the merge adds the missing terminator');
 
@@ -696,7 +696,7 @@ try {
   // A fresh capture has the entry gone: install agrees with capture, so the rerun is unchanged.
   put('omp/agent/config.yml', memBase);
   r = run(['--data', data, '--skip-plugins'], memHome);
-  assert.match(r.stdout, /0 installed, 15 unchanged/, `the re-captured snapshot matches what was installed: ${r.stderr}`);
+  assert.match(r.stdout, /0 installed, 22 unchanged/, `the re-captured snapshot matches what was installed: ${r.stderr}`);
 
   put('omp/agent/config.yml', 'memory:\n  backend: mnemopi\n  autoRecall: true\n' + memBase);
   r = run(['--data', data, '--skip-plugins'], memHome);
@@ -750,7 +750,7 @@ try {
   put('omp/agent/skills/mine/RENAME.md', renamed);
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /1 installed, 16 unchanged, 1 deleted/);
+  assert.match(r.stdout, /1 installed, 23 unchanged, 1 deleted/);
   assert.match(r.stdout, /deleted  \.omp[/\\]agent[/\\]skills[/\\]mine[/\\]AUX\.md/);
   assert.ok(!existsSync(join(home, '.omp/agent/skills/mine/AUX.md')));
   assert.equal(got('.omp/agent/skills/mine/RENAME.md'), renamed);
@@ -762,13 +762,13 @@ try {
   rmSync(join(data, 'user/omp/agent/skills/mine/RENAME.md'));
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /0 installed, 16 unchanged, 1 deleted/);
+  assert.match(r.stdout, /0 installed, 23 unchanged, 1 deleted/);
 
   // A skill folder the snapshot drops completely goes with its empty directories.
   rmSync(join(data, 'user/agents/skills/theirs'), { recursive: true });
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /0 installed, 15 unchanged, 1 deleted/);
+  assert.match(r.stdout, /0 installed, 22 unchanged, 1 deleted/);
   assert.ok(!existsSync(join(home, '.agents/skills/theirs')));
   assert.ok(existsSync(join(home, '.agents/.skill-lock.json')), 'sibling files stay');
   assert.ok(existsSync(join(home, '.agents')), 'the mapped root stays');
@@ -779,7 +779,7 @@ try {
   rmSync(join(data, 'user/agents/.skill-lock.json'));
   r = run(['--data', data, '--skip-plugins']);
   assert.equal(r.status, 0, 'a changed dropped file never fails the run');
-  assert.match(r.stdout, /0 installed, 14 unchanged, 0 deleted/);
+  assert.match(r.stdout, /0 installed, 21 unchanged, 0 deleted/);
   assert.ok(r.stdout.includes('changed here, kept: '));
   assert.ok(r.stdout.includes(join(home, '.agents/.skill-lock.json')), r.stdout);
   assert.equal(got('.agents/.skill-lock.json'), '{"skills":{"extra":{}}}\n', 'machine state wins');
@@ -813,7 +813,7 @@ try {
   rmSync(join(bareHome, '.alate'), { recursive: true });
   r = run(['--data', data, '--skip-plugins'], bareHome);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /0 installed, 11 unchanged, 0 deleted/);
+  assert.match(r.stdout, /0 installed, 18 unchanged, 0 deleted/);
   assert.ok(existsSync(join(bareHome, '.omp/agent/mcp.json')), 'no record, no deletion');
 
   // A worker list the data repo no longer ships is deleted, with its empty directories.
@@ -823,7 +823,7 @@ try {
   rmSync(join(data, 'workers/web/apt.txt'));
   r = run(['--data', data, '--skip-plugins'], workerHome);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /0 installed, 10 unchanged, 1 deleted/);
+  assert.match(r.stdout, /0 installed, 17 unchanged, 1 deleted/);
   assert.match(r.stdout, /deleted  \.ottr[/\\]workers[/\\]web[/\\]apt\.txt/);
   assert.ok(!existsSync(join(workerHome, '.ottr/workers')), 'empty worker dirs are pruned');
   assert.ok(existsSync(join(workerHome, '.ottr')), 'the root stays');
@@ -860,7 +860,7 @@ try {
   assert.equal(readFileSync(join(toolsHome, '.ottr/workers/_all/env.txt'), 'utf8'), 'SHARED_TOKEN\n');
   assert.equal(readFileSync(join(toolsHome, '.ottr/workers/_all/requirements.txt'), 'utf8'), `numpy==2.4.0 --hash=sha256:${SHA}\n`);
   r = run(['--data', data, '--skip-plugins'], toolsHome);
-  assert.match(r.stdout, /0 installed, 17 unchanged/, 'a rerun copies nothing');
+  assert.match(r.stdout, /0 installed, 24 unchanged/, 'a rerun copies nothing');
 
   // The replace rule: a changed list is no conflict, the machine copy just takes the new bytes.
   putWorker('web', 'env.txt', 'PIXEL_LAB_API_KEY\nOTHER_NAME\n');
@@ -959,7 +959,7 @@ try {
     writeStub(1, 'SkillSpector v2.13.0', ['mine']);
     r = run(['--data', data, '--skip-plugins']);
     assert.equal(r.status, 1, 'the scan rejection fails the run');
-    assert.match(r.stdout, /Scanning 1 of 5 skill snapshot\(s\) \(4 cached\)/);
+    assert.match(r.stdout, new RegExp(`Scanning 1 of ${1 + shippedCount} skill snapshot\\(s\\) \\(${shippedCount} cached\\)`));
     assert.ok(r.stdout.includes('--- SkillSpector report:'), 'the findings report prints as one block');
     assert.ok(r.stdout.includes('SC2') && r.stdout.includes('SKILL.md:7'), 'the findings text stays visible');
     assert.ok(r.stdout.includes('SkillSpector rejected') && r.stdout.includes(join(data, 'user/omp/agent/skills/mine')), 'the rejection names the skill folder');
@@ -1098,7 +1098,7 @@ try {
     const venvEnv = { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: venvDir };
     r = run(['--data', data, '--skip-plugins'], home, venvEnv);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /11 unchanged/);
+    assert.match(r.stdout, /18 unchanged/);
     if (process.getuid?.() !== 0) {
       // The test-created venv is user-owned, so a non-root runner must see it refused
       // without a probe and the PATH stub serve instead.
@@ -1147,7 +1147,7 @@ try {
     const pathCallsBefore = readFileSync(callsLog, 'utf8');
     r = run(['--data', data, '--skip-plugins'], home, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: brokenVenv });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /11 unchanged/);
+    assert.match(r.stdout, /18 unchanged/);
     assert.ok(readFileSync(callsLog, 'utf8').length > pathCallsBefore.length, 'the PATH scanner scanned when the venv was broken');
     assert.ok(!existsSync(brokenCallsLog), 'the broken venv scanner stays unused');
 
@@ -1323,7 +1323,7 @@ try {
       r = run(['--data', data, '--skip-plugins'], realHome,
         { ...process.env, SKILLSPECTOR_VENV: dirname(dirname(scannerBin)) });
       assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stdout, /Scanning 3 of 7 skill snapshot\(s\) \(0 cached\)/);
+      assert.match(r.stdout, new RegExp(`Scanning 3 of ${3 + shippedCount} skill snapshot\\(s\\) \\(0 cached\\)`));
       assert.match(r.stdout, /at .+skillspector/, 'the run names the scanner it resolved');
       assert.equal(readFileSync(join(realHome, '.agents/skills/break-ui/SKILL.md'), 'utf8'), BREAK_UI_SKILL_MD, 'the break-ui snapshot installs byte-exact');
 
@@ -1331,7 +1331,7 @@ try {
       r = run(['--data', data, '--skip-plugins'], realHome,
         { ...process.env, SKILLSPECTOR_VENV: dirname(dirname(scannerBin)) });
       assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stdout, /Scanning 0 of 7 skill snapshot\(s\) \(7 cached\)/);
+      assert.match(r.stdout, new RegExp(`Scanning 0 of ${3 + shippedCount} skill snapshot\\(s\\) \\(${3 + shippedCount} cached\\)`));
 
       // The divergence itself: a build that answers the version probe with the pin but
       // behaves like an older release (a stale, shadowed, or patched install) flips the
@@ -1368,7 +1368,7 @@ try {
     put('omp/agent/managed-skills/garded/SKILL.md', skillText('garded'));
     r = run(['--data', data, '--skip-plugins']);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /Scanning 1 of 6 skill snapshot\(s\) \(5 cached\)/);
+    assert.match(r.stdout, new RegExp(`Scanning 1 of ${2 + shippedCount} skill snapshot\\(s\\) \\(${1 + shippedCount} cached\\)`));
     assert.ok(readFileSync(callsLog, 'utf8').includes(join(data, 'user/omp/agent/managed-skills/garded')), 'the managed-skills snapshot is scanned');
 
     // The scan cache and the pool, on a controlled fixture: nine skills in a fresh data dir
@@ -1398,7 +1398,7 @@ try {
     rmSync(cacheCalls, { force: true });
     r = run(['--data', cacheData, '--skip-plugins'], cacheHome);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /Scanning 13 of 13 skill snapshot\(s\) \(0 cached\)/);
+    assert.match(r.stdout, new RegExp(`Scanning ${cacheSkills.length + shippedCount} of ${cacheSkills.length + shippedCount} skill snapshot\\(s\\) \\(0 cached\\)`));
     const spans = new Map();
     for (const line of scanCalls().trim().split('\n')) {
       const [kind, dir, ts] = line.split(' ');
@@ -1420,14 +1420,14 @@ try {
     const warmBefore = scanCalls();
     r = run(['--data', cacheData, '--skip-plugins'], cacheHome);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /Scanning 0 of 13 skill snapshot\(s\) \(13 cached\)/);
+    assert.match(r.stdout, new RegExp(`Scanning 0 of ${cacheSkills.length + shippedCount} skill snapshot\\(s\\) \\(${cacheSkills.length + shippedCount} cached\\)`));
     assert.equal(scanCalls(), warmBefore, 'a cache hit runs no scanner');
 
     // One changed byte in one skill rescans exactly that skill.
     writeFileSync(join(cacheData, 'user/omp/agent/skills/beta/SKILL.md'), skillText('beta', '# beta, v2\n'));
     r = run(['--data', cacheData, '--skip-plugins'], cacheHome);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /Scanning 1 of 13 skill snapshot\(s\) \(12 cached\)/);
+    assert.match(r.stdout, new RegExp(`Scanning 1 of ${cacheSkills.length + shippedCount} skill snapshot\\(s\\) \\(${cacheSkills.length - 1 + shippedCount} cached\\)`));
     const delta = scanCalls().slice(warmBefore.length);
     const deltaStarts = delta.trim().split('\n').filter(l => l.startsWith('start '));
     assert.equal(deltaStarts.length, 1, 'only the changed skill is scanned');
@@ -1454,7 +1454,7 @@ try {
     writeFileSync(join(cacheData, 'user/omp/agent/skills/beta/SKILL.md'), skillText('beta', '# beta, v4\n'));
     r = run(['--data', cacheData, '--skip-plugins'], cacheHome);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /Scanning 1 of 13 skill snapshot\(s\) \(12 cached\)/);
+    assert.match(r.stdout, new RegExp(`Scanning 1 of ${cacheSkills.length + shippedCount} skill snapshot\\(s\\) \\(${cacheSkills.length - 1 + shippedCount} cached\\)`));
     assert.equal(readFileSync(join(cacheHome, '.omp/agent/skills/beta/SKILL.md'), 'utf8'), skillText('beta', '# beta, v4\n'));
 
     // A scanner-version change rescans everything: the same bytes under a different pin are
@@ -1477,7 +1477,7 @@ try {
       env: sandbox({ ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv') }),
     });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /Scanning 13 of 13 skill snapshot\(s\) \(0 cached\)/);
+    assert.match(r.stdout, new RegExp(`Scanning ${cacheSkills.length + shippedCount} of ${cacheSkills.length + shippedCount} skill snapshot\\(s\\) \\(0 cached\\)`));
     writeStub(0);
 
     // The cache key binds the bytes the install copies, proved with the two review repros
@@ -1498,14 +1498,14 @@ try {
     writeStub(0);
     r = run(['--data', linkData, '--skip-plugins'], linkHome);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /Scanning 5 of 5 skill snapshot\(s\) \(0 cached\)/);
+    assert.match(r.stdout, new RegExp(`Scanning ${1 + shippedCount} of ${1 + shippedCount} skill snapshot\\(s\\) \\(0 cached\\)`));
     assert.equal(readFileSync(join(linkHome, '.omp/agent/skills/mine/run.sh'), 'utf8'), 'echo ok\n', 'the install copies the resolved target bytes');
     const linkPasses = readFileSync(join(linkHome, '.alate', 'skillspector-pass.json'), 'utf8');
     writeFileSync(join(linkData, 'user/omp/agent/notes/run.sh'), 'EVIL\n');
     writeStub(1, 'SkillSpector v2.13.0', ['mine']);
     r = run(['--data', linkData, '--skip-plugins'], linkHome);
     assert.equal(r.status, 1, 'a poisoned link target fails the run');
-    assert.match(r.stdout, /Scanning 1 of 5 skill snapshot\(s\) \(4 cached\)/, 'the changed target bytes miss the cache');
+    assert.match(r.stdout, new RegExp(`Scanning 1 of ${1 + shippedCount} skill snapshot\\(s\\) \\(${shippedCount} cached\\)`), 'the changed target bytes miss the cache');
     assert.ok(r.stdout.includes('SkillSpector rejected') && r.stdout.includes(join(linkData, 'user/omp/agent/skills/mine')), r.stdout);
     assert.equal(readFileSync(join(linkHome, '.alate', 'skillspector-pass.json'), 'utf8'), linkPasses, 'a failed scan is never cached');
     assert.ok(!existsSync(join(linkHome, '.omp/agent/skills/mine')), 'the poisoned skill is deleted like any rejected one');
@@ -1528,7 +1528,7 @@ try {
     writeStub(0);
     r = run(['--data', frameData, '--skip-plugins'], frameHome);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /Scanning 5 of 5 skill snapshot\(s\) \(0 cached\)/);
+    assert.match(r.stdout, new RegExp(`Scanning ${1 + shippedCount} of ${1 + shippedCount} skill snapshot\\(s\\) \\(0 cached\\)`));
     assert.equal(readFileSync(join(frameHome, '.omp/agent/skills/mine/a.bin'), 'utf8'), fused);
     const framePasses = readFileSync(join(frameHome, '.alate', 'skillspector-pass.json'), 'utf8');
     writeFileSync(join(frameData, 'user/omp/agent/skills/mine/a.bin'), 'X');
@@ -1536,7 +1536,7 @@ try {
     writeStub(1, 'SkillSpector v2.13.0', ['mine']);
     r = run(['--data', frameData, '--skip-plugins'], frameHome);
     assert.equal(r.status, 1, 'the re-split tree fails the run');
-    assert.match(r.stdout, /Scanning 1 of 5 skill snapshot\(s\) \(4 cached\)/, 'the re-split bytes miss the cache');
+    assert.match(r.stdout, new RegExp(`Scanning 1 of ${1 + shippedCount} skill snapshot\\(s\\) \\(${shippedCount} cached\\)`), 'the re-split bytes miss the cache');
     assert.ok(r.stdout.includes('SkillSpector rejected') && r.stdout.includes(join(frameData, 'user/omp/agent/skills/mine')), r.stdout);
     assert.equal(readFileSync(join(frameHome, '.alate', 'skillspector-pass.json'), 'utf8'), framePasses, 'a failed scan is never cached');
     assert.ok(!existsSync(join(frameHome, '.omp/agent/skills/mine/z.sh')), 'the split-out file never lands');
@@ -1559,11 +1559,11 @@ try {
     writeFileSync(verPass, `${JSON.stringify(legacy, null, 2)}\n`);
     r = run(['--data', verData, '--skip-plugins'], verHome);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /Scanning 5 of 5 skill snapshot\(s\) \(0 cached\)/, 'a legacy entry without the format token misses');
+    assert.match(r.stdout, new RegExp(`Scanning ${1 + shippedCount} of ${1 + shippedCount} skill snapshot\\(s\\) \\(0 cached\\)`), 'a legacy entry without the format token misses');
     assert.equal(JSON.parse(readFileSync(verPass, 'utf8'))[verKey], true, 'the fresh pass carries the tokened key');
     r = run(['--data', verData, '--skip-plugins'], verHome);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /Scanning 0 of 5 skill snapshot\(s\) \(5 cached\)/);
+    assert.match(r.stdout, new RegExp(`Scanning 0 of ${1 + shippedCount} skill snapshot\\(s\\) \\(${1 + shippedCount} cached\\)`));
 
     // A Windows bind mount (the board-seed `-v <data-repo>:/data:ro` shape) marks every file
     // executable, and the pinned scanner reads a mode-carried exec bit on the dot-named
@@ -2352,8 +2352,8 @@ exit 0
     const shEnv = results => ({ ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ...(results ? { ALATE_PROVISION_RESULTS: results } : {}) });
     writeStub(0);
 
-    // Acceptance 1: an empty data repo (no skills) provisions all four shipped skills with
-    // the pinned bytes, and the per-item results name all four as installed.
+    // Acceptance 1: an empty data repo (no skills) provisions every shipped skill with
+    // the pinned bytes, and the per-item results name each one as installed.
     shPut('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
     const shHome = join(tmp, 'home-shipped');
     const shResults = join(tmp, 'results-shipped.json');
@@ -2432,7 +2432,7 @@ exit 0
     // Acceptance 5: the whole vendored tree is the source — a skill folder added to the
     // vendored tree installs with no code change, and reports installed per item. The
     // folder is removed again so any later test that counts the tree keeps seeing the
-    // vendored set; the tests above computed their counts from the four-folder tree.
+    // vendored set; the tests above computed their counts from the vendored tree.
     const fifth = join(shippedSkillsRoot, 'fifth-probe');
     try {
       mkdirSync(fifth, { recursive: true });

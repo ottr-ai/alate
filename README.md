@@ -84,12 +84,15 @@ Pin each Python server: a `uvx` or `pipx run` spec counts as pinned only with a 
 
 ## Skills alate ships
 
-Alate vendors the whole `.agents/skills` tree of [github.com/ottr-ai/ottr](https://github.com/ottr-ai/ottr) at the pinned commit `affd848b7e02c08339561c7282957e2a5fc9c201`, and installs every skill folder in that tree into every provisioned home. Today this tree holds four skills:
+Alate vendors the whole `.agents/skills` tree of [github.com/ottr-ai/ottr](https://github.com/ottr-ai/ottr) at the pinned commit `89f9410d4df031628158702bf03b0a1ae6479f04`, and installs every skill folder in that tree into every provisioned home. Today this tree holds seven skills:
 
 - `check-ottr-board`
 - `diff-security-review`
 - `explain-project`
+- `llm-to-code`
+- `retro`
 - `ui-ux-check`
+- `web-perf-audit`
 
 The vendored tree is `shipped/ottr/.agents/skills/<name>`, and the pin lives in `lib/shipped.mjs`. omp loads `.agents/skills` only for runs inside the Ottr checkout itself, so a provisioned home has none of these skills unless alate ships them.
 

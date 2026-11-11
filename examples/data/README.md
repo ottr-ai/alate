@@ -13,7 +13,7 @@ Copy it into a new private GitHub repo, then fill it with your own data.
 
 ## Shipped skills
 
-Alate installs every skill folder under Ottr's `.agents/skills` at the pinned commit on every provision, so a fresh install needs no copies of them here. Today this tree holds four skills (`check-ottr-board`, `diff-security-review`, `explain-project`, `ui-ux-check`). A data repo skill of the same name wins: your copy installs, and the shipped copy of that name stays out.
+Alate installs every skill folder under Ottr's `.agents/skills` at the pinned commit on every provision, so a fresh install needs no copies of them here. Today this tree holds seven skills (`check-ottr-board`, `diff-security-review`, `explain-project`, `llm-to-code`, `retro`, `ui-ux-check`, `web-perf-audit`). A data repo skill of the same name wins: your copy installs, and the shipped copy of that name stays out.
 
 ## First run
 

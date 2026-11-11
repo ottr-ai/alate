@@ -1,9 +1,10 @@
 # Ottr's shipped skills install on every provision
 
 Alate vendors every skill folder under Ottr's `.agents/skills` at the pinned commit
-(`github.com/ottr-ai/ottr`, commit `affd848b7e02c08339561c7282957e2a5fc9c201`) and installs
-every folder in that tree on every provision. Today this tree holds four skills:
-`check-ottr-board`, `diff-security-review`, `explain-project`, and `ui-ux-check`.
+(`github.com/ottr-ai/ottr`, commit `89f9410d4df031628158702bf03b0a1ae6479f04`) and installs
+every folder in that tree on every provision. Today this tree holds seven skills:
+`check-ottr-board`, `diff-security-review`, `explain-project`, `llm-to-code`, `retro`,
+`ui-ux-check`, and `web-perf-audit`.
 omp loads `.agents/skills` only for runs inside the Ottr checkout itself, so a provisioned
 worker home has none of them unless alate vendors the tree (fix list #45, Alate part).
 
@@ -118,7 +119,7 @@ Each vendored skill folder gets a row beside the lock-driven skill rows, built a
 
 ## Non-goals
 
-- No change to which skills the Ottr board requires, and no retro skill (Ottr decides that on
-  its own card).
+- No change to which skills the Ottr board requires: alate vendors the tree Ottr ships and
+  decides nothing about the set (Ottr shipped `retro` on its own card, 2026-11-11).
 - No auto-update of pins, no dashboard section for shipped skills, no manifest or schema
   change beyond the pin module.

@@ -63,7 +63,7 @@ const tmp = mkdtempSync(join(tmpdir(), 'alate-server-'));
     put('user/omp/plugins/bun.lock', JSON.stringify({ workspaces: { '': { dependencies: { '@s/p': 'github:fake/rel' } } }, packages: { '@s/p': ['@s/p@github:fake/rel#S1'] } }));
     await checkUpdates(udb);
     const ids = udb.prepare('SELECT id FROM updates').all().map(r => r.id).sort();
-    assert.deepEqual(ids, ['@s/p@rel-1', 'check-ottr-board@latest', 'diff-security-review@latest', 'explain-project@latest', 'plugin:@s/p:rel-1', 'plugin:@s/p:rel-1#2', 'ui-ux-check@latest'], 'the id loop falls back to the row key, then to the "#2" suffix');
+    assert.deepEqual(ids, ['@s/p@rel-1', 'check-ottr-board@latest', 'diff-security-review@latest', 'explain-project@latest', 'llm-to-code@latest', 'plugin:@s/p:rel-1', 'plugin:@s/p:rel-1#2', 'retro@latest', 'ui-ux-check@latest', 'web-perf-audit@latest'], 'the id loop falls back to the row key, then to the "#2" suffix');
   } finally {
     udb.close();
     delete process.env.ALATE_TEST_GITHUB_API_BASE;
@@ -3450,11 +3450,11 @@ try {
       treeOverride = {};
 
       // Suppression: a snapshot skill folder of the same name wins, the shipped row is
-      // skipped, and the other three pins keep their rows.
+      // skipped, and the other pins keep their rows.
       const supp = await run({ 'user/agents/skills/check-ottr-board/SKILL.md': 'x' });
       r = rows(supp);
       assert.equal(r['check-ottr-board'], undefined, 'the data repo copy suppresses the shipped row');
-      assert.deepEqual(names.filter(n => r[n] != null), names.filter(n => n !== 'check-ottr-board'), 'the other three pins keep their rows');
+      assert.deepEqual(names.filter(n => r[n] != null), names.filter(n => n !== 'check-ottr-board'), 'the other pins keep their rows');
       // A managed-skills copy suppresses too: the pattern's %skills/ tail matches both dirs.
       const supp2 = await run({ 'user/managed-skills/ui-ux-check/SKILL.md': 'x' });
       assert.equal(rows(supp2)['ui-ux-check'], undefined, 'a managed-skills copy suppresses the shipped row');
@@ -4303,7 +4303,7 @@ try {
       await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
       const stored = rawRows(db);
       const ids = stored.map(v => v.id);
-      assert.deepEqual([...ids].sort(), ['check-ottr-board@latest', 'diff-security-review@latest', 'dup@latest', 'explain-project@latest', 'item:dup#2:latest', 'n1@latest', 'ui-ux-check@latest'],
+      assert.deepEqual([...ids].sort(), ['check-ottr-board@latest', 'diff-security-review@latest', 'dup@latest', 'explain-project@latest', 'item:dup#2:latest', 'llm-to-code@latest', 'n1@latest', 'retro@latest', 'ui-ux-check@latest', 'web-perf-audit@latest'],
         'the first copy keeps the plain id, the repeated name falls back to the row key, all ids stay unique');
       const second = stored.find(v => v._row === 'item:dup#2');
       assert.match(second.error, /duplicate item name "dup" in upstreams\.json/, 'the repeated name reports a problem row');
