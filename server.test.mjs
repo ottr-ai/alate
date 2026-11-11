@@ -190,9 +190,22 @@ const emptyDir = join(tmp, 'empty');
 const data = join(tmp, 'data');
 const stateFile = join(tmp, 'state.db');
 const persisted = () => {
-  const db = new DatabaseSync(stateFile, { readOnly: true });
-  try { return JSON.parse(db.prepare('SELECT value FROM state WHERE id = 1').get().value); }
-  finally { db.close(); }
+  // Same race as retryOnLocked below: a fixture server's background update check can hold
+  // the write lock while this assertion reads. Reads wait the tick out too, synchronously;
+  // the block's strength is unchanged, only the wait.
+  const end = Date.now() + 10_000;
+  for (;;) {
+    let db;
+    try {
+      db = new DatabaseSync(stateFile, { readOnly: true });
+      return JSON.parse(db.prepare('SELECT value FROM state WHERE id = 1').get().value);
+    } catch (err) {
+      if (Date.now() >= end || !/database is locked/.test(String(err?.message))) throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    } finally {
+      db?.close();
+    }
+  }
 };
 mkdirSync(tmpHome, { recursive: true });
 const serverTmp = join(tmp, 'server-tmp');
