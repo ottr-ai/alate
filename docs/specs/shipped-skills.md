@@ -12,10 +12,19 @@ worker home has none of them unless alate vendors the tree (fix list #45, Alate 
 - `lib/shipped.mjs` holds the pin: repo `ottr-ai/ottr` and the full commit SHA. The source
   is the whole `.agents/skills` tree at that commit; the module also enumerates the vendored
   folders, one per skill. `shipped/ottr/.agents/skills/<name>/` holds the vendored bytes,
-  mirroring the upstream layout. The bytes stay exactly the pinned commit's bytes (LF;
-  SkillSpector baselines fingerprint the upstream bytes).
+  mirroring the upstream layout. The skill bytes stay exactly the pinned commit's bytes
+  (LF). The `.skillspector-baseline.yaml` files are alate's own scan records: alate
+  regenerates each one for the vendored bytes with the pinned scanner in `--no-llm` mode
+  and keeps the accepted reasons. A baseline fingerprint binds the scan mode and the exact
+  bytes, so an upstream baseline does not suppress alate's findings (the 2026-11-11 CI
+  install failure).
 - Re-pinning is a new commit: copy the whole `.agents/skills` tree at the new upstream
-  commit into `shipped/ottr/` and bump `SHIPPED_PIN.commit`. The update checker (below)
+  commit into `shipped/ottr/`, bump `SHIPPED_PIN.commit`, regenerate each vendored skill's
+  `.skillspector-baseline.yaml` (`skillspector baseline <skill-dir> --no-llm` at the pinned
+  scanner, restore each entry's accepted reason from the previous baseline), and run the
+  scan gate over the vendored tree before the commit
+  (`skillspector scan <skill-dir> --no-llm --fail-on-findings --use-shipped-baseline`).
+  The update checker (below)
   makes the new upstream state visible with the same 7-day age gate as every other skill row.
 - The Ottr image path was rejected as the source: alate cannot read another container's
   image, and the compose stack gives it no Docker socket. A provision-time git fetch of the
