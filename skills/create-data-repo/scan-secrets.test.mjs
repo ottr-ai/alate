@@ -21,9 +21,10 @@ try {
   // The untouched starter is clean: full file list, correct summary, exit 0.
   let r = run();
   assert.equal(r.status, 0, r.stderr);
-  for (const f of ['README.md', 'coding-basics.md', 'git-safety.md', 'upstreams.json', 'projects/projects.json', 'user/omp/agent/config.yml'])
+  for (const f of ['README.md', 'coding-basics.md', 'git-safety.md', 'upstreams.json', 'projects/projects.json', 'user/omp/agent/config.yml',
+    ...['interrogate', 'blast-radius', 'correct', 'benchmark-checklist', 'code-simplifier'].flatMap(s => [`user/omp/agent/skills/${s}/SKILL.md`, `user/omp/agent/skills/${s}/.skillspector-baseline.yaml`])])
     assert.ok(r.stdout.includes(`file ${f}\n`), `file list misses ${f}:\n${r.stdout}`);
-  assert.match(r.stdout, /summary: 2 rules, 0 skills, 0 plugins, 1 captured user files/);
+  assert.match(r.stdout, /summary: 2 rules, 5 skills, 0 plugins, 11 captured user files/);
   assert.match(r.stdout, /^projects: none$/m);
   assert.match(r.stdout, /clean: yes/);
   assert.ok(!r.stdout.includes('finding '), `clean scan reports findings:\n${r.stdout}`);
@@ -35,7 +36,7 @@ try {
   put('projects/projects.json', '{"contextFiles":["AGENTS.md"],"projects":{"alate":["notes.md"]}}\n');
   r = run();
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /summary: 2 rules, 2 skills, 2 plugins, 4 captured user files/);
+  assert.match(r.stdout, /summary: 2 rules, 7 skills, 2 plugins, 14 captured user files/);
   assert.match(r.stdout, /^projects: alate$/m);
 
   // A fake token in a captured file is a finding with a position, never the value.

@@ -1,0 +1,10 @@
+# SkillSpector baseline — findings listed here are suppressed on future scans.
+# Edit 'reason' fields and add glob 'rules' as needed. See docs/SUPPRESSION.md.
+version: 2
+scanner_version: 2.13.0
+rules: []
+fingerprints:
+- hash: sha256:f2a8ab6ab62729225bd1158a17b9d5080beb98b0dd755d8ec0471fd75d201e5f
+  rule_id: AS3
+  file: SKILL.md
+  reason: Port-notice provenance, not skill enumeration. The quoted paths name the upstream pstack files this skill was ported from; the skill never reads or lists other skills' files or directories.

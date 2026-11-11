@@ -1,0 +1,10 @@
+# SkillSpector baseline — findings listed here are suppressed on future scans.
+# Edit 'reason' fields and add glob 'rules' as needed. See docs/SUPPRESSION.md.
+version: 2
+scanner_version: 2.13.0
+rules: []
+fingerprints:
+- hash: sha256:f81be9021a46a510d1aa486c90455c5ddaf50da5a532639a38c5d3f53814f28f
+  rule_id: EA3
+  file: SKILL.md
+  reason: False positive — the flagged lines are the verbatim MIT license text (Copyright (c) 2026 Lauren Tan), which the import keeps with the copy; a license grant is boilerplate, not an instruction to the agent.

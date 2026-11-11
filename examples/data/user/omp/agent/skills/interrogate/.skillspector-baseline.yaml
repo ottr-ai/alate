@@ -1,0 +1,10 @@
+# SkillSpector baseline — findings listed here are suppressed on future scans.
+# Edit 'reason' fields and add glob 'rules' as needed. See docs/SUPPRESSION.md.
+version: 2
+scanner_version: 2.13.0
+rules: []
+fingerprints:
+- hash: sha256:86ed17c69ec25ebfcdcb22bbd65ed29f64c66639d08962a60e09762a41411e86
+  rule_id: EA3
+  file: SKILL.md
+  reason: False positive. The Fixes section intentionally dispatches user-approved fixes to task agents as separate work; the port spec maps implementers to the omp task tool. The review pass itself stays read-only.

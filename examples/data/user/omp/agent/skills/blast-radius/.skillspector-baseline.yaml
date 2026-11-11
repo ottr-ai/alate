@@ -1,0 +1,10 @@
+# SkillSpector baseline — findings listed here are suppressed on future scans.
+# Edit 'reason' fields and add glob 'rules' as needed. See docs/SUPPRESSION.md.
+version: 2
+scanner_version: 2.13.0
+rules: []
+fingerprints:
+- hash: sha256:56dc619ab953a78cbf79cabb0ec0bd029f3bc48d7268432386ebf8fa0b0be01a
+  rule_id: EA3
+  file: SKILL.md
+  reason: False positive on the verbatim MIT license text (lines ~95-108); the flagged line is warranty/liability boilerplate kept by the port notice requirement, not an instruction to expand the skill's scope.
