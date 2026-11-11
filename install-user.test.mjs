@@ -1340,8 +1340,8 @@ try {
       r = run(['--data', data, '--skip-plugins'], join(tmp, 'diverge-home'),
         { ...process.env, SKILLSPECTOR_VENV: shimDir });
       assert.equal(r.status, 1, 'a build that diverges from the pin refuses the run');
-      assert.match(r.stderr, /SkillSpector rejected/);
-      assert.match(r.stderr, /break-ui/);
+      assert.match(r.stdout, /SkillSpector rejected/);
+      assert.match(r.stdout, /break-ui/);
       assert.ok(!existsSync(join(tmp, 'diverge-home', '.agents/skills/break-ui/SKILL.md')), 'the diverged verdict never installs');
       rmSync(join(data, 'user/agents/skills/break-ui'), { recursive: true, force: true });
     }
@@ -2271,6 +2271,10 @@ try {
   assert.ok(
     readFileSync(fileURLToPath(new URL('./Dockerfile', import.meta.url)), 'utf8').includes(`ARG SKILLSPECTOR_REF=${ref}`),
     `Dockerfile must carry the pinned build install-user.mjs requires (${ref})`,
+  );
+  assert.ok(
+    readFileSync(fileURLToPath(new URL('.github/workflows/install.yml', import.meta.url)), 'utf8').includes(`SKILLSPECTOR_REF: ${ref}`),
+    `.github/workflows/install.yml must install the pinned build install-user.mjs requires (${ref})`,
   );
 
   console.log('install-user.mjs ok');
