@@ -42,7 +42,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { assertSourceInside, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend, writeProvisionResults } from './lib/data.mjs';
-import { SHIPPED_PIN, SHIPPED_TREE, shippedSkillDir } from './lib/shipped.mjs';
+import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
 const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home', '--commit'], ['--force', '--skip-plugins', '--layer']);
 // The imported commit names the layer id in layer mode: the server passes it for a repo
@@ -806,30 +806,31 @@ try {
       }
     }
   }
-  // Ottr ships four agent skills in its own checkout, alate vendors them at one pinned
-  // commit (lib/shipped.mjs, shipped/ottr), and omp only loads .agents/skills for runs
-  // inside the Ottr checkout itself — so every provision installs the vendored copies under
-  // ~/.agents/skills/<name>. The same gates apply in the same order as for snapshot skills:
-  // a data repo skill of the same name wins (presence-based, any skills/ or managed-skills/
-  // folder name), then the structure gate, then the scan gate below — a rejection fails that
-  // one skill per item and never stops the others. The vendored bytes are upstream content,
-  // never captured machine config, so no forTarget and no remapHomePaths apply.
+  // Ottr ships its agent skills in its own checkout, alate vendors the whole tree at one
+  // pinned commit (lib/shipped.mjs, shipped/ottr/.agents/skills), and omp only loads
+  // .agents/skills for runs inside the Ottr checkout itself — so every provision installs
+  // every vendored folder under ~/.agents/skills/<name>. The pinned whole tree is the
+  // source, not a fixed list. The same gates apply in the same order as for snapshot
+  // skills: a data repo skill of the same name wins (presence-based, any skills/ or
+  // managed-skills/ folder name), then the structure gate, then the scan gate below — a
+  // rejection fails that one skill per item and never stops the others. The vendored bytes
+  // are upstream content, never captured machine config, so no forTarget and no
+  // remapHomePaths apply.
   const toolRoot = dirname(fileURLToPath(import.meta.url));
   const snapshotSkillNames = new Set(skillDirs.map(dir => basename(dir)));
   const shippedScanDirs = [];
   const shippedDirKey = new Map();
-  for (const pin of SHIPPED_PIN.skills) {
-    const vendored = shippedSkillDir(toolRoot, pin);
-    if (!vendored) {
-      failItem(`user/agents/skills/${pin.name}`, 'rejected', 'missing vendored copy', null, `${pin.path} is absent from ${SHIPPED_TREE} in the tool checkout`);
-      continue;
-    }
-    if (snapshotSkillNames.has(pin.name)) {
-      notes.push(`shipped skill ${pin.name} skipped: the data repo has its own copy`);
+  const shippedList = shippedSkills(toolRoot);
+  if (!shippedList.length) {
+    notes.push(`shipped skills: the vendored tree ${SHIPPED_TREE}/${SHIPPED_SKILLS_DIR} is absent; nothing shipped installs`);
+  }
+  for (const { name, dir: vendored } of shippedList) {
+    if (snapshotSkillNames.has(name)) {
+      notes.push(`shipped skill ${name} skipped: the data repo has its own copy`);
       continue;
     }
     const entrypoint = join(vendored, 'SKILL.md');
-    const label = `user/agents/skills/${pin.name}/SKILL.md`;
+    const label = `user/agents/skills/${name}/SKILL.md`;
     const problems = [];
     let text;
     try {
@@ -842,11 +843,11 @@ try {
     if (text !== undefined) problems.push(...skillProblems(label, text));
     if (problems.length) {
       const first = describeProblem(problems[0]);
-      failItem(`user/agents/skills/${pin.name}`, 'rejected', first.rule, first.at, problems.join('\n'));
+      failItem(`user/agents/skills/${name}`, 'rejected', first.rule, first.at, problems.join('\n'));
       continue;
     }
     for (const file of walk(vendored)) {
-      const rel = `agents/skills/${pin.name}/${file}`;
+      const rel = `agents/skills/${name}/${file}`;
       const srcPath = join(vendored, file);
       try {
         assertSourceInside(vendored, srcPath);
@@ -890,7 +891,7 @@ try {
       current[rel] = want;
     }
     shippedScanDirs.push(vendored);
-    shippedDirKey.set(vendored, `user/agents/skills/${pin.name}`);
+    shippedDirKey.set(vendored, `user/agents/skills/${name}`);
   }
   // In-place scan gate: before any write, and before the deletions are computed, so a skill
   // the scan rejects is dropped from the plan, the manifest, and the conflicts first — its

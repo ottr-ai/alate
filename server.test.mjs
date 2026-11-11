@@ -13,7 +13,7 @@ import { forAll, keepTemp } from './lib/data.mjs';
 
 import { diffLines } from './web/diff.mjs';
 import { checkUpdates, cmpVer, initUpdates, isValidUpdateRecord, loadUpdates, rowErrorText } from './lib/updates.mjs';
-import { SHIPPED_PIN } from './lib/shipped.mjs';
+import { SHIPPED_PIN, shippedSkills } from './lib/shipped.mjs';
 
 // Proof-mark diff: change, pure addition, pure deletion, and no change.
 assert.deepEqual(diffLines(['a', 'b', 'c'], ['a', 'B', 'c']), [{ start: 1, count: 1, old: ['b'] }]);
@@ -24,6 +24,7 @@ assert.deepEqual(diffLines(['x', 'a', 'y', 'b'], ['a', 'z', 'b', 'w']), [
 assert.deepEqual(diffLines(['a'], ['a']), []);
 
 const repoRoot = dirname(fileURLToPath(import.meta.url)); // this test sits at the repo root
+const shipped = shippedSkills(repoRoot); // one entry per vendored skill folder, so a fifth folder needs no test edits
 const tmp = mkdtempSync(join(tmpdir(), 'alate-server-'));
 
 // Updates id collisions: three rows can fight for one display id. Two skill-lock rows and
@@ -1314,11 +1315,11 @@ try {
       if (url.pathname === '/gh/repos/fake/gap/commits')
         return reply(200, [{ sha: SHA.gapHead, commit: { committer: { date: T.node40 } }, html_url: `https://github.com/fake/gap/commit/${SHA.gapHead}` }]);
       // Shipped Ottr skills (lib/shipped.mjs): the fake head sits at the pin commit, so the
-      // four rows report no update until a test moves the head or drops a folder.
+      // one row per vendored folder report no update until a test moves the head or drops a folder.
       if (url.pathname === '/gh/repos/ottr-ai/ottr/commits')
         return reply(200, [{ sha: shippedHead, commit: { committer: { date: T.fresh2 } }, html_url: `https://github.com/ottr-ai/ottr/commit/${shippedHead}` }]);
       if (url.pathname === '/gh/repos/ottr-ai/ottr/git/trees/HEAD')
-        return reply(200, { tree: SHIPPED_PIN.skills.filter(s => s.path !== shippedDrop).map(s => ({ path: s.path, type: 'tree', sha: `tree-${s.name}` })) });
+        return reply(200, { tree: shipped.filter(s => s.path !== shippedDrop).map(s => ({ path: s.path, type: 'tree', sha: `tree-${s.name}` })) });
       return reply(404, { message: 'no such gh fixture' });
     }
     if (url.pathname === '/npm/fake-demo-pkg')
@@ -1468,7 +1469,7 @@ try {
     await waitFor(async () => {
       const state = (await (await get('/api/state')).json()).updates;
       providerRows = (await (await authed('/api/updates')).json()).updates;
-      if (state?.updates?.length !== 18 + SHIPPED_PIN.skills.length || providerRows?.length !== 8 + SHIPPED_PIN.skills.length) return false;
+      if (state?.updates?.length !== 18 + shipped.length || providerRows?.length !== 8 + shipped.length) return false;
       stateRows = Object.fromEntries(state.updates.map(u => [u.name, u]));
       return true;
     }, 20_000);
@@ -1588,9 +1589,9 @@ try {
     assert.equal(gone.error ?? null, null);
     assert.equal(gone.id, `gone-skill@${SHA.goneHead}`);
 
-    // Shipped Ottr skills: four rows beside the lock rows, current is the pinned commit and
+    // Shipped Ottr skills: one row per vendored folder beside the lock rows, current is the pinned commit and
     // the fake head equals it, so no row reports a target.
-    for (const p of SHIPPED_PIN.skills) {
+    for (const p of shipped) {
       const sh = rows[p.name];
       assert.deepEqual([sh.current, sh.latest, sh.target], [SHIPPED_PIN.commit, SHIPPED_PIN.commit, null], JSON.stringify(sh));
       assert.deepEqual(sh.pin, { file: 'lib/shipped.mjs', key: p.name });
@@ -1626,7 +1627,7 @@ try {
 
     // The dashboard payload carries the same rows on /api/state.
     const state = await (await get('/api/state')).json();
-    assert.equal(state.updates.updates.length, 18 + SHIPPED_PIN.skills.length);
+    assert.equal(state.updates.updates.length, 18 + shipped.length);
     assert.equal(typeof state.updates.checkedAt, 'string');
 
     // The stored GitHub key goes to GitHub endpoints only, never to npm, node or cft.
@@ -1743,10 +1744,10 @@ try {
     r = await postImport(JSON.stringify({ source: 'https://github.com/demo/upd2.git', kind: 'repo' }));
     assert.equal(r.status, 200, JSON.stringify(await r.json()));
     // Same split as the first server: /api/state keeps all rows, the provider serves the
-    // board-valid ones; both lists grow by the four shipped-skill rows.
+    // board-valid ones; both lists grow by the shipped-skill rows.
     const allRows = async () => (await (await get('/api/state')).json()).updates.updates;
-    await waitFor(async () => (await allRows()).length === 18 + SHIPPED_PIN.skills.length, 20_000);
-    await waitFor(async () => (await updatesBody()).updates.length === 8 + SHIPPED_PIN.skills.length, 20_000);
+    await waitFor(async () => (await allRows()).length === 18 + shipped.length, 20_000);
+    await waitFor(async () => (await updatesBody()).updates.length === 8 + shipped.length, 20_000);
     assert.ok((await updatesBody()).updates.every(isValidUpdateRecord), 'every served record passes the board shape');
     let rows2 = await updatesBody();
     const from0 = rows2.updates.find(u => u.name === 'from-demo');
@@ -1898,7 +1899,7 @@ try {
     // past this point is the one the route queues.
     await waitFor(async () => {
       const s = await (await fetch(new URL('/api/state', base), { headers: { Authorization: `Bearer ${apiKey3}` } })).json();
-      return s.updates?.checkedAt != null && s.updates.updates.length === SHIPPED_PIN.skills.length;
+      return s.updates?.checkedAt != null && s.updates.updates.length === shipped.length;
     }, 20_000);
     const hitsAtConfig = upHits.length;
     r = await postJson('/config', { repo: 'https://github.com/demo/upd2', token: 'config-route-token-77a' }, true);
@@ -1980,7 +1981,7 @@ try {
     await bootFast('fast-off');
     assert.equal((await postJson('/api/settings', { token: 'fast-gh-token-4c1' })).status, 200);
     assert.equal((await postImport(JSON.stringify({ source: 'https://github.com/demo/fastup.git', kind: 'repo' }))).status, 200);
-    await waitFor(async () => (await (await get('/api/state')).json()).updates.updates.length === 1 + SHIPPED_PIN.skills.length, 20_000);
+    await waitFor(async () => (await (await get('/api/state')).json()).updates.updates.length === 1 + shipped.length, 20_000);
     const off = await fastRow();
     assert.equal(off.latest, '2.0.0');
     assert.equal(off.target, null, 'securityFastPath: false keeps the plain 7-day gate');
@@ -2615,11 +2616,11 @@ try {
   const item = (name, extra = {}) => ({ name, kind: 't', origin: `https://github.com/fake/${name}`, ...extra });
   const UP = items => JSON.stringify({ items });
   const rows = db => Object.fromEntries(loadUpdates(db).updates.map(u => [u.name, u]));
-  // Rows minus the four shipped pins: assertions about entry/lock-driven rows filter the
+  // Rows minus the shipped-skill pins: assertions about entry/lock-driven rows filter the
   // shipped rows out, since a plan always carries one row per pin.
   const rowsEx = db => {
     const r = rows(db);
-    for (const p of SHIPPED_PIN.skills) delete r[p.name];
+    for (const p of shipped) delete r[p.name];
     return r;
   };
   const rawRows = db => db.prepare('SELECT value FROM updates').all().map(r => JSON.parse(r.value));
@@ -2670,7 +2671,7 @@ try {
         ['3.0.0', '2.0.0', old30, 'u20', plusDays(old30, 7), 'r1@2.0.0'], JSON.stringify(r.r1));
       assert.deepEqual([r.r1.repo, r.r1.pin, r.r1.current, r.r1.error ?? null], [null, null, '1.0.0', null], 'an unpinned item reports a null repo');
       const res = await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
-      assert.deepEqual([res.count, typeof res.checkedAt], [1 + SHIPPED_PIN.skills.length, 'string'], 'checkUpdates reports count and checkedAt');
+      assert.deepEqual([res.count, typeof res.checkedAt], [1 + shipped.length, 'string'], 'checkUpdates reports count and checkedAt');
     }
 
     // github-release: draft/prerelease/tagless/hyphen skip; no target at an equal current.
@@ -3365,20 +3366,20 @@ try {
     // 7-day first-seen gate, snapshot-name suppression, and a removed notification.
     {
       const pin = SHIPPED_PIN.commit;
-      const names = SHIPPED_PIN.skills.map(s => s.name);
+      const names = shipped.map(s => s.name);
       const fakeHead = sha => ({ sha, commit: { committer: { date: old30 } }, html_url: `https://github.com/ottr-ai/ottr/commit/${sha}` });
       let head = pin;
       let drop = '';
       handler = url => {
         if (url.pathname === '/gh/repos/ottr-ai/ottr/commits') return [200, [fakeHead(head)]];
         if (url.pathname === '/gh/repos/ottr-ai/ottr/git/trees/HEAD')
-          return [200, { tree: SHIPPED_PIN.skills.filter(s => s.path !== drop).map(s => ({ path: s.path, type: 'tree', sha: `t-${s.name}` })) }];
+          return [200, { tree: shipped.filter(s => s.path !== drop).map(s => ({ path: s.path, type: 'tree', sha: `t-${s.name}` })) }];
         return null;
       };
-      // Fresh first seen: four rows, current is the pinned commit, no target yet.
+      // Fresh first seen: one row per vendored folder, current is the pinned commit, no target yet.
       const db = await run({});
       let r = rows(db);
-      for (const p of SHIPPED_PIN.skills) {
+      for (const p of shipped) {
         const u = r[p.name];
         assert.deepEqual([u.current, u.latest, u.target, u.repo, u.pin, u.removed ?? null],
           [pin, pin, null, 'ottr-ai/ottr', { file: 'lib/shipped.mjs', key: p.name }, null], JSON.stringify(u));
@@ -4172,7 +4173,7 @@ try {
       assert.deepEqual([r.m1.latest, r.m1.target], ['0.1', null], 'managed rows are recorded, never targeted');
       const dbd = mkDb({ 'upstreams.json': UP([]) });
       const empty = await checkUpdates(dbd);
-      assert.deepEqual([empty.count, typeof empty.checkedAt], [SHIPPED_PIN.skills.length, 'string'],
+      assert.deepEqual([empty.count, typeof empty.checkedAt], [shipped.length, 'string'],
         'default opts run clean over an empty snapshot: only the shipped-skill rows');
       dbd.close();
       const dbx = new DatabaseSync(':memory:');
@@ -5090,7 +5091,7 @@ try {
         const cfgG = join(tmp, 'server-config-mutG.json');
         const G = mut10Spawn(['--port', '0', '--config', cfgG, '--db', join(tmp, 'state-mutG.db'), '--interval', '100000', '--update-interval', '100000'], { ALATE_TEST_NPM_BASE: npmBase, ALATE_TEST_GITHUB_API_BASE: `http://127.0.0.1:${ghMiss.address().port}/gh` });
         const { base, key } = await G.up;
-        // The server runs one check at boot (the four shipped-skill rows over the refusing
+        // The server runs one check at boot (the shipped-skill rows over the refusing
         // gh fake). Wait until it has written its rows: an import that lands while it is
         // still in flight would only mark the boot run stale, and the one rerun it queues
         // would be the check the npm fake then holds — losing the rerun this block asserts.
@@ -5109,9 +5110,9 @@ try {
         await waitFor(async () => npmHits === 2, 20_000);
         await new Promise(r => setTimeout(r, 1000));
         assert.equal(npmHits, 2, 'the queued rerun runs once, still one check at a time');
-        // The four shipped-skill rows join the pin's row; their gh fake refuses, so they
+        // The shipped-skill rows join the pin's row; their gh fake refuses, so they
         // only carry the error text.
-        await waitFor(async () => (await rowsG()).length === 1 + SHIPPED_PIN.skills.length, 20_000);
+        await waitFor(async () => (await rowsG()).length === 1 + shipped.length, 20_000);
         [st, body] = await mut10Json(base, '/api/state', { headers: { Authorization: `Bearer ${key}` } });
         assert.equal(body.updates.updates.find(u => u.name === 'mut10-pin').repo, fdir, 'a path source reports its spec as the pin repo');
         // A new npm version is picked up by the next import's check.

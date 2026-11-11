@@ -10,7 +10,6 @@ import { tmpdir, homedir, availableParallelism } from 'node:os';
 import { delimiter, dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, remapHomePaths, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
-import { SHIPPED_PIN } from './lib/shipped.mjs';
 import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-install-'));
@@ -40,7 +39,7 @@ copyFileSync(fileURLToPath(new URL('./sync.mjs', import.meta.url)), join(scriptD
 // The shipped-skill install reads the pin module and the vendored tree from the tool root,
 // so the sandbox provisions the real vendored skills like a real checkout does.
 copyFileSync(fileURLToPath(new URL('./lib/shipped.mjs', import.meta.url)), join(scriptDir, 'lib', 'shipped.mjs'));
-const shippedCount = SHIPPED_PIN.skills.length;
+const shippedSkillsRoot = join(scriptDir, 'shipped', 'ottr', '.agents', 'skills');
 const copyTree = (src, dst) => {
   mkdirSync(dst, { recursive: true });
   for (const entry of readdirSync(src, { withFileTypes: true })) {
@@ -51,6 +50,9 @@ const copyTree = (src, dst) => {
   }
 };
 copyTree(fileURLToPath(new URL('./shipped/ottr', import.meta.url)), join(scriptDir, 'shipped', 'ottr'));
+// The vendored whole tree is the source, not a fixed list: count its folders at setup, so
+// a test that adds a folder keeps every shippedCount-derived expectation true.
+const shippedCount = readdirSync(shippedSkillsRoot, { withFileTypes: true }).filter(e => e.isDirectory()).length;
 const put = (rel, text) => { mkdirSync(join(data, 'user', rel, '..'), { recursive: true }); writeFileSync(join(data, 'user', rel), text); };
 const skillText = (name, body = `# ${name}\n`) => `---\nname: ${name}\ndescription: Test skill.\n---\n${body}`;
 const run = (extra, h = home, env, cwd) => {
@@ -2281,7 +2283,7 @@ try {
   if (scanned) {
     const shData = join(tmp, 'data-shipped');
     const shPut = (rel, text) => { mkdirSync(dirname(join(shData, 'user', rel)), { recursive: true }); writeFileSync(join(shData, 'user', rel), text); };
-    const shippedNames = SHIPPED_PIN.skills.map(pin => pin.name);
+    const shippedNames = readdirSync(shippedSkillsRoot, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name).sort();
     const vendoredBytes = name => readFileSync(join(scriptDir, 'shipped', 'ottr', '.agents', 'skills', name, 'SKILL.md'), 'utf8');
     const shEnv = results => ({ ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ...(results ? { ALATE_PROVISION_RESULTS: results } : {}) });
     writeStub(0);
@@ -2362,6 +2364,26 @@ try {
     assert.match(r.stdout, /machine change kept: .*explain-project/);
     assert.equal(readFileSync(join(realpathSync(join(shLayerHome, '.alate', 'current')), '.agents/skills/explain-project/SKILL.md'), 'utf8'), changed, 'layer mode keeps the machine copy');
     writeStub(0);
+
+    // Acceptance 5: the whole vendored tree is the source — a skill folder added to the
+    // vendored tree installs with no code change, and reports installed per item. The
+    // folder is removed again so any later test that counts the tree keeps seeing the
+    // vendored set; the tests above computed their counts from the four-folder tree.
+    const fifth = join(shippedSkillsRoot, 'fifth-probe');
+    try {
+      mkdirSync(fifth, { recursive: true });
+      const fifthBytes = '---\nname: fifth-probe\ndescription: Test skill\n---\n# fifth-probe\n';
+      writeFileSync(join(fifth, 'SKILL.md'), fifthBytes);
+      const shHome5 = join(tmp, 'home-shipped-fifth');
+      const shResults5 = join(tmp, 'results-shipped-fifth.json');
+      r = run(['--data', shData, '--skip-plugins'], shHome5, shEnv(shResults5));
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(readFileSync(join(shHome5, '.agents/skills/fifth-probe/SKILL.md'), 'utf8'), fifthBytes, 'the added vendored skill installs without any code change');
+      const shRes5 = JSON.parse(readFileSync(shResults5, 'utf8'));
+      assert.equal(shRes5.items.find(i => i.item === 'user/agents/skills/fifth-probe')?.status, 'installed', 'fifth-probe reports installed');
+    } finally {
+      rmSync(fifth, { recursive: true, force: true });
+    }
   }
 
   // The server image must carry the scanner the gate refuses to run without; the two pins

@@ -1,34 +1,35 @@
 # Ottr's shipped skills install on every provision
 
-The board requires four skills that Ottr ships in its own checkout
-(`.agents/skills/check-ottr-board`, `diff-security-review`, `explain-project`,
-`ui-ux-check` in `github.com/ottr-ai/ottr`, commit `affd848b7e02c08339561c7282957e2a5fc9c201`).
+Alate vendors every skill folder under Ottr's `.agents/skills` at the pinned commit
+(`github.com/ottr-ai/ottr`, commit `affd848b7e02c08339561c7282957e2a5fc9c201`) and installs
+every folder in that tree on every provision. Today this tree holds four skills:
+`check-ottr-board`, `diff-security-review`, `explain-project`, and `ui-ux-check`.
 omp loads `.agents/skills` only for runs inside the Ottr checkout itself, so a provisioned
-worker home has none of them unless the data repo carries copies. Alate vendors that tree at
-the pinned commit and installs it on every provision, so a fresh install needs no copy in the
-data repo (fix list #45, Alate part).
+worker home has none of them unless alate vendors the tree (fix list #45, Alate part).
 
 ## Pinned source
 
-- `lib/shipped.mjs` holds the pin: repo `ottr-ai/ottr`, the full commit SHA, and one path per
-  skill. `shipped/ottr/<path>` holds the vendored bytes, mirroring the upstream layout. The
-  bytes stay exactly the pinned commit's bytes (LF; SkillSpector baselines fingerprint the
-  upstream bytes).
-- Re-pinning is a new commit: copy the four folders at the new upstream commit into
-  `shipped/ottr/` and bump `SHIPPED_PIN.commit`. The update checker (below) makes the new
-  upstream state visible with the same 7-day age gate as every other skill row.
+- `lib/shipped.mjs` holds the pin: repo `ottr-ai/ottr` and the full commit SHA. The source
+  is the whole `.agents/skills` tree at that commit; the module also enumerates the vendored
+  folders, one per skill. `shipped/ottr/.agents/skills/<name>/` holds the vendored bytes,
+  mirroring the upstream layout. The bytes stay exactly the pinned commit's bytes (LF;
+  SkillSpector baselines fingerprint the upstream bytes).
+- Re-pinning is a new commit: copy the whole `.agents/skills` tree at the new upstream
+  commit into `shipped/ottr/` and bump `SHIPPED_PIN.commit`. The update checker (below)
+  makes the new upstream state visible with the same 7-day age gate as every other skill row.
 - The Ottr image path was rejected as the source: alate cannot read another container's
   image, and the compose stack gives it no Docker socket. A provision-time git fetch of the
   pin was rejected too: it makes every fresh provision depend on egress to public GitHub —
   exactly what the reporting stack (corporate proxy, GitHub Enterprise only) cannot rely on —
-  and hermetic tests could only prove plumbing, never the four skills landing.
+  and hermetic tests could only prove plumbing, never the skills landing.
 
 ## Install (install-user.mjs)
 
-Shipped skills are a second skill source beside the data repo snapshot. The same gates apply
+Shipped skills are a second skill source beside the data repo snapshot. The source is the
+vendored tree; the enumeration in `lib/shipped.mjs` lists its folders. The same gates apply
 in the same order as for snapshot skills; nothing about them is weaker.
 
-1. For each pinned skill, the vendored folder must exist and pass the structure gate
+1. For each vendored skill folder, the folder must exist and pass the structure gate
    (`SKILL.md` frontmatter, `skillProblems`) and the SkillSpector scan gate (same pinned
    scanner, `--no-llm`, the skill's own shipped `.skillspector-baseline.yaml`, same scan
    cache). A gate rejection fails that one skill per item and never stops the others.
@@ -41,15 +42,15 @@ in the same order as for snapshot skills; nothing about them is weaker.
    file, rel keys `agents/skills/<name>/...` (snapshot spelling, like
    `user/agents/skills/...`). Machine state rules are the snapshot's: an in-place install
    refuses a machine-changed copy unless `--force`; layer mode keeps the machine copy;
-   record-matching copies update. Manifest records, deletion when the pin drops a skill, and
-   unchanged counting all behave exactly like snapshot skills.
+   record-matching copies update. Manifest records, deletion when the upstream tree drops a
+   skill folder, and unchanged counting all behave exactly like snapshot skills.
 4. Per-item results use the skill key `user/agents/skills/<name>`, so the existing
    aggregation regex and the dashboard's failed-item count cover shipped skills. A missing
    vendored folder is a per-item `rejected` (`missing vendored copy`), never fatal.
 
 ## Update checker (lib/updates.mjs)
 
-Each pinned skill gets a row beside the lock-driven skill rows, built after them:
+Each vendored skill folder gets a row beside the lock-driven skill rows, built after them:
 
 - `name`: the skill name; `kind`: `skill`; `repo`: `ottr-ai/ottr`;
   `pin`: `{ file: "lib/shipped.mjs", key: <name> }`;
@@ -73,18 +74,22 @@ Each pinned skill gets a row beside the lock-driven skill rows, built after them
 
 ## Acceptance checks
 
-1. An empty data repo (a `user/` snapshot with no skills) provisions and all four vendored
-   skills land in `~/.agents/skills/<name>` with the pinned bytes; the per-item results name
-   all four as installed.
+1. An empty data repo (a `user/` snapshot with no skills) provisions and every vendored
+   skill lands in `~/.agents/skills/<name>` with the pinned bytes; the per-item results name
+   each of them as installed.
 2. A data repo that holds its own copy of one of the names keeps that copy (its bytes land in
-   the home), the shipped copy of that name is skipped with a log line, and the other three
+   the home), the shipped copy of that name is skipped with a log line, and the other
    shipped skills still install.
 3. A scan rejection of one shipped skill fails only that item; the others install.
 4. A machine-changed shipped skill refuses the in-place install; `--force` takes the shipped
    bytes; layer mode keeps the machine copy.
-5. The update checker reports the four pins with the pinned commit as `current`, holds
-   `target` back for the 7-day first-seen gate, and suppresses a pin whose name the snapshot
-   carries.
+5. The update checker reports one row per vendored skill folder with the pinned commit as
+   `current`, holds `target` back for the 7-day first-seen gate, and suppresses a row whose
+   name the snapshot carries.
+6. A test adds a fifth skill folder to the vendored tree and it installs on provision, with
+   no code changes to the install or update paths.
+7. The update checker rows match the enumeration of vendored folders in `lib/shipped.mjs`,
+   with no code changes.
 
 ## Non-goals
 

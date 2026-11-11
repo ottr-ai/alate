@@ -10,7 +10,7 @@
   <img src="logo.png" alt="alate — a smiling winged ant" width="320">
 </p>
 
-alate provisions an [omp](https://github.com/can1357/oh-my-pi) agent on any machine: global agent rules, the omp user layer, and per-project agent-context snapshots. It ships no rules or user-layer content of its own. All content lives in your own private data repo, so the tool stays public and your rules and machine state stay private. Alate also ships four pinned skills; see "Skills alate ships" below.
+alate provisions an [omp](https://github.com/can1357/oh-my-pi) agent on any machine: global agent rules, the omp user layer, and per-project agent-context snapshots. It ships no rules or user-layer content of its own. All content lives in your own private data repo, so the tool stays public and your rules and machine state stay private. Alate also ships the skills vendored from Ottr's `.agents/skills` at a pinned commit; see "Skills alate ships" below.
 
 ## Quick start
 
@@ -84,7 +84,7 @@ Pin each Python server: a `uvx` or `pipx run` spec counts as pinned only with a 
 
 ## Skills alate ships
 
-Alate vendors four skills from [github.com/ottr-ai/ottr](https://github.com/ottr-ai/ottr) at the pinned commit `affd848b7e02c08339561c7282957e2a5fc9c201`, and installs them into every provisioned home:
+Alate vendors the whole `.agents/skills` tree of [github.com/ottr-ai/ottr](https://github.com/ottr-ai/ottr) at the pinned commit `affd848b7e02c08339561c7282957e2a5fc9c201`, and installs every skill folder in that tree into every provisioned home. Today this tree holds four skills:
 
 - `check-ottr-board`
 - `diff-security-review`
@@ -93,9 +93,9 @@ Alate vendors four skills from [github.com/ottr-ai/ottr](https://github.com/ottr
 
 The vendored tree is `shipped/ottr/.agents/skills/<name>`, and the pin lives in `lib/shipped.mjs`. omp loads `.agents/skills` only for runs inside the Ottr checkout itself, so a provisioned home has none of these skills unless alate ships them.
 
-A data repo skill of the same name wins. When your snapshot holds a skill folder with one of these names, alate skips the shipped copy for that name and logs `shipped skill <name> skipped: the data repo has its own copy`.
+A data repo skill of the same name wins. When your snapshot holds a skill folder with the same name as any vendored skill folder, alate skips the shipped copy for that name and logs `shipped skill <name> skipped: the data repo has its own copy`.
 
-The update checker shows one update row per pin, with the pinned commit as `current`. The row uses the same 7-day first-seen age gate as other upstream skills. Applying an update is an alate change, not a provision action: copy the four skill folders at the new upstream commit into `shipped/ottr/`, then bump the commit in `lib/shipped.mjs`. A data repo copy suppresses the row for its name.
+The update checker shows one update row per vendored skill folder, with the pinned commit as `current`. The row uses the same 7-day first-seen age gate as other upstream skills. Applying an update is an alate change, not a provision action: copy the whole `.agents/skills` tree at the new upstream commit into `shipped/ottr/`, then bump the commit in `lib/shipped.mjs`. A data repo copy suppresses the row for its name.
 
 The SkillSpector scan gate therefore applies to every provision. A provision needs a working pinned scanner even when the data repo carries no skills, and the gate stays fail-closed for the shipped skills as for skill snapshots.
 
