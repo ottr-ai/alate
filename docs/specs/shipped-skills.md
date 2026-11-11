@@ -57,7 +57,10 @@ in the same order as for snapshot skills; nothing about them is weaker.
 
 Each vendored skill folder gets a row beside the lock-driven skill rows, built after them:
 
-- `name`: the skill name; `kind`: `skill`; `repo`: `ottr-ai/alate` (the alate repository,
+- `name`: the skill name; `kind`: `image-pin` (the pin-applied-in-the-owning-repo kind,
+  because the update procedure is alate's documented re-pin — copy the vendored tree at the
+  new upstream commit, bump `SHIPPED_PIN.commit` — for updates and for upstream removals
+  alike, never the skills CLI; `repo`: `ottr-ai/alate` (the alate repository,
   because applying an update is an alate re-pin commit, never an upstream skills update;
   `origin` and the upstream facts stay pointed at Ottr);
   `pin`: `{ file: "lib/shipped.mjs", key: <name> }`;

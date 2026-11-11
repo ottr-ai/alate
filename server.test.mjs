@@ -1600,6 +1600,10 @@ try {
       assert.deepEqual(sh.pin, { file: 'lib/shipped.mjs', key: p.name });
       assert.equal(sh.repo, SHIPPED_REPO);
       assert.equal(sh.origin, `${SHIPPED_PIN.source}/tree/${SHIPPED_PIN.commit}/${p.path}`);
+      // image-pin, not skill: the card generator must route a shipped pin into this repo's
+      // documented re-pin steps, never the skills CLI.
+      assert.equal(sh.kind, 'image-pin');
+      assert.equal(isValidUpdateRecord(sh), true, 'the shipped update record passes the board shape');
     }
 
     // Plugins from bun.lock: npm packages get the registry check, git ones the release tags.
@@ -3468,6 +3472,7 @@ try {
       const gone = await run({});
       const g = rows(gone)['check-ottr-board'];
       assert.deepEqual([g.removed, g.target, g.latest, g.current], [true, null, head, pin], JSON.stringify(g));
+      assert.equal(g.kind, 'image-pin', 'a removed shipped row keeps the re-pin kind');
       assert.ok(loadUpdates(gone).updates.every(isValidUpdateRecord), 'the removed record passes the board shape');
       drop = '';
 
