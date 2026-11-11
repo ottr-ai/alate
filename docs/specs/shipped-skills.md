@@ -45,8 +45,13 @@ in the same order as for snapshot skills; nothing about them is weaker.
    record-matching copies update. Manifest records, deletion when the upstream tree drops a
    skill folder, and unchanged counting all behave exactly like snapshot skills.
 4. Per-item results use the skill key `user/agents/skills/<name>`, so the existing
-   aggregation regex and the dashboard's failed-item count cover shipped skills. A missing
-   vendored folder is a per-item `rejected` (`missing vendored copy`), never fatal.
+   aggregation regex and the dashboard's failed-item count cover shipped skills.
+5. The vendored tree is load-bearing and the source fails closed. An absent or unreadable
+   tree is a broken tool install, and an empty enumeration would treat the shipped skills
+   already in the home as obsolete and delete them — so `shippedSkills` throws, and
+   install-user refuses the whole run before deletions or a layer switch (fatal, exit 1,
+   nothing written or deleted). A tree that exists but holds zero folders stays a visible
+   note, not an error.
 
 ## Update checker (lib/updates.mjs)
 
@@ -69,7 +74,8 @@ Each vendored skill folder gets a row beside the lock-driven skill rows, built a
 - `sync.mjs` and the origin gate are unchanged: shipped skills are not data repo items and
   need no `upstreams.json` entry. A data repo may still record an origin for its own copy.
 - The vendored tree is tool content, not snapshot content: the dashboard inventory, the file
-  editor and `sync-user.mjs` never see it.
+  editor and `sync-user.mjs` never see it. Its absence or unreadability refuses a provision
+  (fail closed, install step 5); it is never provisioned around.
 - No provision-time network access is added anywhere.
 
 ## Acceptance checks
@@ -90,6 +96,11 @@ Each vendored skill folder gets a row beside the lock-driven skill rows, built a
    no code changes to the install or update paths.
 7. The update checker rows match the enumeration of vendored folders in `lib/shipped.mjs`,
    with no code changes.
+8. Installed shipped skills survive a run whose vendored tree is gone: the run refuses with
+   a fatal result naming the vendored tree, every previously installed
+   `.agents/skills/<name>/SKILL.md` keeps its bytes, and a `--layer` run in the same state
+   switches nothing — `.alate/current` stays on the previous layer and no new layer folder
+   appears.
 
 ## Non-goals
 

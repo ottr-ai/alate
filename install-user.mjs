@@ -820,9 +820,20 @@ try {
   const snapshotSkillNames = new Set(skillDirs.map(dir => basename(dir)));
   const shippedScanDirs = [];
   const shippedDirKey = new Map();
-  const shippedList = shippedSkills(toolRoot);
+  // Fail closed: shippedSkills throws when the vendored tree is absent or unreadable, and
+  // an empty enumeration would delete the shipped skills already in the home as obsolete.
+  // This sits before the scan gate, the deletions, and the layer creation, so the throw
+  // flows through the main try: fatal results file, exit 1, nothing written or deleted,
+  // and in layer mode no layer is created or switched. A tree that exists but holds zero
+  // folders stays the note below, not an error.
+  let shippedList;
+  try {
+    shippedList = shippedSkills(toolRoot);
+  } catch (err) {
+    throw new Error(`refusing to install: the vendored shipped skills tree ${SHIPPED_TREE}/${SHIPPED_SKILLS_DIR} is missing or unreadable (${err.message}); a run without it would delete the shipped skills already in the home`);
+  }
   if (!shippedList.length) {
-    notes.push(`shipped skills: the vendored tree ${SHIPPED_TREE}/${SHIPPED_SKILLS_DIR} is absent; nothing shipped installs`);
+    notes.push(`shipped skills: the vendored tree ${SHIPPED_TREE}/${SHIPPED_SKILLS_DIR} holds no skill folders; nothing shipped installs`);
   }
   for (const { name, dir: vendored } of shippedList) {
     if (snapshotSkillNames.has(name)) {

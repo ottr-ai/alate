@@ -2384,6 +2384,53 @@ try {
     } finally {
       rmSync(fifth, { recursive: true, force: true });
     }
+
+    // Acceptance 6 (fail closed): the vendored tree is load-bearing. With the tree gone,
+    // a run without it would treat the shipped skills already in the home as obsolete and
+    // delete them, so the installer refuses before any write or deletion.
+    const shHome6 = join(tmp, 'home-shipped-failclosed');
+    const shResults6 = join(tmp, 'results-shipped-failclosed.json');
+    // check-ottr-board stays shadowed by the data repo copy from Acceptance 2, so it is
+    // never in this home; the fail-closed assertions cover the shipped names that install.
+    const installed6 = shippedNames.filter(n => n !== 'check-ottr-board');
+    r = run(['--data', shData, '--skip-plugins'], shHome6, shEnv(shResults6));
+    assert.equal(r.status, 0, r.stderr);
+    const before6 = Object.fromEntries(installed6.map(name => [name, readFileSync(join(shHome6, '.agents/skills', name, 'SKILL.md'), 'utf8')]));
+    const vendoredTree = join(scriptDir, 'shipped', 'ottr');
+    try {
+      rmSync(vendoredTree, { recursive: true, force: true });
+      rmSync(shResults6, { force: true });
+      r = run(['--data', shData, '--skip-plugins'], shHome6, shEnv(shResults6));
+      assert.equal(r.status, 1, 'a missing vendored tree refuses the run');
+      assert.match(r.stderr, /shipped\/ottr\/\.agents\/skills is missing or unreadable/, r.stderr);
+      const shRes6 = JSON.parse(readFileSync(shResults6, 'utf8'));
+      assert.equal(shRes6.fatal, true, 'the refusal is a whole-run refusal');
+      assert.match(shRes6.error, /refusing to install/);
+      for (const name of installed6) {
+        assert.ok(existsSync(join(shHome6, '.agents/skills', name, 'SKILL.md')), `${name} survives the refused run`);
+        assert.equal(readFileSync(join(shHome6, '.agents/skills', name, 'SKILL.md'), 'utf8'), before6[name], `${name} keeps its bytes through the refused run`);
+      }
+    } finally {
+      copyTree(fileURLToPath(new URL('./shipped/ottr', import.meta.url)), vendoredTree);
+    }
+
+    // Acceptance 7 (fail closed, layer mode): with the tree gone, a --layer run refuses
+    // before any layer is created or switched.
+    const shLayerHome7 = join(tmp, 'home-shipped-layer-failclosed');
+    r = run(['--data', shData, '--skip-plugins', '--layer'], shLayerHome7);
+    assert.equal(r.status, 0, r.stderr);
+    const priorLayer7 = realpathSync(join(shLayerHome7, '.alate', 'current'));
+    try {
+      rmSync(vendoredTree, { recursive: true, force: true });
+      r = run(['--data', shData, '--skip-plugins', '--layer'], shLayerHome7);
+      assert.equal(r.status, 1, 'a --layer run without the vendored tree refuses');
+      assert.match(r.stderr, /shipped\/ottr\/\.agents\/skills is missing or unreadable/, r.stderr);
+      assert.equal(realpathSync(join(shLayerHome7, '.alate', 'current')), priorLayer7, '.alate/current still points at the previous layer');
+      const layerDirs7 = readdirSync(join(shLayerHome7, '.alate', 'layers'));
+      assert.equal(layerDirs7.length, 1, 'no new layer folder was created');
+    } finally {
+      copyTree(fileURLToPath(new URL('./shipped/ottr', import.meta.url)), vendoredTree);
+    }
   }
 
   // The server image must carry the scanner the gate refuses to run without; the two pins

@@ -1320,6 +1320,9 @@ try {
         return reply(200, [{ sha: shippedHead, commit: { committer: { date: T.fresh2 } }, html_url: `https://github.com/ottr-ai/ottr/commit/${shippedHead}` }]);
       if (url.pathname === '/gh/repos/ottr-ai/ottr/git/trees/HEAD')
         return reply(200, { tree: shipped.filter(s => s.path !== shippedDrop).map(s => ({ path: s.path, type: 'tree', sha: `tree-${s.name}` })) });
+      // The rows tree-compare the pin against HEAD, so the pin commit's own tree is fetched too.
+      if (url.pathname === `/gh/repos/ottr-ai/ottr/git/trees/${SHIPPED_PIN.commit}`)
+        return reply(200, { tree: shipped.map(s => ({ path: s.path, type: 'tree', sha: `tree-${s.name}` })) });
       return reply(404, { message: 'no such gh fixture' });
     }
     if (url.pathname === '/npm/fake-demo-pkg')
@@ -3369,11 +3372,17 @@ try {
       const names = shipped.map(s => s.name);
       const fakeHead = sha => ({ sha, commit: { committer: { date: old30 } }, html_url: `https://github.com/ottr-ai/ottr/commit/${sha}` });
       let head = pin;
-      let drop = '';
+      let drop = ''; // HEAD loses this pin path: the removed-folder case
+      let pinDrop = ''; // the pin commit's tree loses this pin path: the broken-pin error case
+      let treeOverride = {}; // pin name -> HEAD tree sha: the genuinely-changed-tree case
       handler = url => {
         if (url.pathname === '/gh/repos/ottr-ai/ottr/commits') return [200, [fakeHead(head)]];
-        if (url.pathname === '/gh/repos/ottr-ai/ottr/git/trees/HEAD')
-          return [200, { tree: shipped.filter(s => s.path !== drop).map(s => ({ path: s.path, type: 'tree', sha: `t-${s.name}` })) }];
+        const treeTag = /^\/gh\/repos\/ottr-ai\/ottr\/git\/trees\/(.+)$/.exec(url.pathname);
+        if (treeTag) {
+          const atPin = decodeURIComponent(treeTag[1]) === SHIPPED_PIN.commit;
+          const gone = atPin ? pinDrop : drop;
+          return [200, { tree: shipped.filter(s => s.path !== gone).map(s => ({ path: s.path, type: 'tree', sha: atPin || treeOverride[s.name] == null ? `t-${s.name}` : treeOverride[s.name] })) }];
+        }
         return null;
       };
       // Fresh first seen: one row per vendored folder, current is the pinned commit, no target yet.
@@ -3392,7 +3401,9 @@ try {
       r = rows(db);
       for (const n of names) assert.equal(r[n].target, null, 'current equal to the pinned commit never targets');
 
-      // A moved head qualifies only once its own first-seen record clears the 7-day gate.
+      // A moved head whose folder trees still match the pin is a re-pin ancestor case: the
+      // commit compare would offer it, but the content already sits in the pin, so no target
+      // ever, soak or not. (This exact shape targeted the old head sha before the tree compare.)
       head = 'b'.repeat(40);
       await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
       r = rows(db);
@@ -3403,8 +3414,23 @@ try {
       db.prepare("UPDATE update_seen SET seenAt = ? WHERE key LIKE 'shipped-skill:%'").run(old30);
       await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
       r = rows(db);
-      for (const n of names) assert.equal(r[n].target, head, 'a soaked moved head qualifies');
+      for (const n of names) assert.equal(r[n].target, null, 'a soaked head whose folder tree matches the pin never targets');
+
+      // A head whose tree genuinely differs from the pin's tree qualifies after the soak, and
+      // only for the changed path. The head moves to a new sha first: one commit carries one
+      // tree, so the changed content arrives on a commit of its own, and its soak starts fresh.
+      head = 'c'.repeat(40);
+      treeOverride['ui-ux-check'] = 't-changed-ui-ux-check';
+      await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      r = rows(db);
+      for (const n of names) assert.equal(r[n].target, null, 'a changed tree soaks from its own first seen');
+      db.prepare("UPDATE update_seen SET seenAt = ? WHERE key LIKE 'shipped-skill:%'").run(old30);
+      await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+      r = rows(db);
+      assert.equal(r['ui-ux-check'].target, head, 'a soaked changed tree qualifies');
+      for (const n of names.filter(n => n !== 'ui-ux-check')) assert.equal(r[n].target, null, 'unchanged paths stay at no target');
       assert.ok(loadUpdates(db).updates.every(isValidUpdateRecord), 'targeted records still pass the board shape');
+      treeOverride = {};
 
       // Suppression: a snapshot skill folder of the same name wins, the shipped row is
       // skipped, and the other three pins keep their rows.
@@ -3415,6 +3441,15 @@ try {
       // A managed-skills copy suppresses too: the pattern's %skills/ tail matches both dirs.
       const supp2 = await run({ 'user/managed-skills/ui-ux-check/SKILL.md': 'x' });
       assert.equal(rows(supp2)['ui-ux-check'], undefined, 'a managed-skills copy suppresses the shipped row');
+      // The override root is the snapshot's user layer only: a docs copy is not an override
+      // and must not hide the row, and the installer skips by folder presence, so any file
+      // inside the user override dir (no SKILL.md needed) suppresses.
+      const docsCopy = await run({ 'docs/skills/check-ottr-board/SKILL.md': 'x' });
+      assert.ok(rows(docsCopy)['check-ottr-board'] != null, 'a docs/skills copy is not an override root');
+      const readmeOnly = await run({ 'user/agents/skills/ui-ux-check/README.md': 'x' });
+      assert.equal(rows(readmeOnly)['ui-ux-check'], undefined, 'a user override dir suppresses without a SKILL.md');
+      const bareRoot = await run({ 'user/skills/check-ottr-board/anything.txt': 'x' });
+      assert.equal(rows(bareRoot)['check-ottr-board'], undefined, 'a zero-middle-dir user override suppresses too');
 
       // Folder gone upstream: a removed notification row, never a target, no age gate.
       drop = '.agents/skills/check-ottr-board';
@@ -3422,6 +3457,38 @@ try {
       const g = rows(gone)['check-ottr-board'];
       assert.deepEqual([g.removed, g.target, g.latest, g.current], [true, null, head, pin], JSON.stringify(g));
       assert.ok(loadUpdates(gone).updates.every(isValidUpdateRecord), 'the removed record passes the board shape');
+      drop = '';
+
+      // Broken pin: the pin commit's tree lacks the folder, so the row errors out and never
+      // serves a target (the "broken pin surfaces an error row" precedent).
+      pinDrop = '.agents/skills/check-ottr-board';
+      const broken = await run({});
+      const b = rows(broken)['check-ottr-board'];
+      assert.deepEqual([b.target, b.latest, b.current ?? null], [null, null, null], JSON.stringify(b));
+      assert.ok(String(b.error).includes(`has no folder at .agents/skills/check-ottr-board`), JSON.stringify(b));
+      pinDrop = '';
+    }
+
+    // Fail-closed vendor: when the vendored skill tree is absent, shippedSkills throws and
+    // buildShippedRows plans no shipped rows instead of crashing the check. The tree is the
+    // real checkout's, so the catch branch runs in a child process against a copied tool
+    // layout with no shipped/ directory.
+    {
+      const bareRoot = mkdtempSync(join(tmpdir(), 'alate-noship-'));
+      cpSync(join(repoRoot, 'lib'), join(bareRoot, 'lib'), { recursive: true });
+      writeFileSync(join(bareRoot, 'probe.mjs'), `
+        import { DatabaseSync } from 'node:sqlite';
+        import { initUpdates, checkUpdates, loadUpdates } from './lib/updates.mjs';
+        const db = new DatabaseSync(':memory:');
+        initUpdates(db);
+        db.exec('CREATE TABLE files (path TEXT PRIMARY KEY, content TEXT)');
+        await checkUpdates(db, { dataRepo: 'demo/data', token: null });
+        const found = loadUpdates(db).updates.filter(u => u.pin?.file === 'lib/shipped.mjs');
+        console.log(JSON.stringify({ count: found.length }));
+      `);
+      const out = spawnSync(process.execPath, ['probe.mjs'], { cwd: bareRoot, encoding: 'utf8' });
+      assert.equal(out.status, 0, `probe failed: ${out.stderr}`);
+      assert.equal(JSON.parse(out.stdout).count, 0, 'an absent vendored tree plans no shipped rows');
     }
 
     // npm: created/modified exclusion, prerelease exclusion, pick, package fallback, empty doc.
