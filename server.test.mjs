@@ -6484,8 +6484,26 @@ try {
     const bulkSrv = spawnServer(['--port', '0', '--config', bulkCfg, '--db', join(tmp, 'state-bulk.db')], testServerEnv);
     try {
       const { apiKey: bulkKey, base: bulkBase } = await awaitStartup(bulkSrv);
+      // Reads must keep answering while the import transaction runs: a large import
+      // spills its cache and holds the writer lock, so a rollback-journal store would
+      // fail /api/state and /api/files with database-is-locked 500s here.
+      const reads = [];
+      let reading = true;
+      const readLoop = (async () => {
+        while (reading) {
+          for (const path of ['/api/state', '/api/files']) {
+            try {
+              const r = await fetch(new URL(path, bulkBase));
+              reads.push(`${path}:${r.status}`);
+            } catch (err) { reads.push(`${path}:${err.cause?.code ?? err.code ?? err.message}`); }
+          }
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+      })();
       const { result: importRes, times, elapsed } = await probeHealthWhile(bulkBase, () =>
         fetch(new URL(`${bulkBase}/api/import`), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bulkKey}` }, body: JSON.stringify({ source: bulkSource }) }));
+      reading = false;
+      await readLoop;
       // Heaviness floor: a synchronous import of this fixture must stall /health past
       // the 300 ms probe bound that assertFastProbes enforces, or the isolation check
       // could pass vacuously. 400 stays above that bound with headroom for faster CI
@@ -6498,6 +6516,8 @@ try {
       assert.equal(importBody.ok, true);
       assert.equal(importBody.state.inventory.rules.length, 14000);
       assertFastProbes(times, 'the bulk import');
+      assert.ok(reads.length >= 20, `reads ran during the import transaction (${reads.length})`);
+      assert.deepEqual(reads.filter(s => !s.endsWith(':200')), [], `every read during the import answered 200: ${reads.filter(s => !s.endsWith(':200')).join(', ')}`);
       const stored = await (await fetch(new URL('/api/files', bulkBase))).json();
       assert.equal(stored.files.length, 42000, 'the import stored every fixture file');
     } finally { await stopServer(bulkSrv); }
@@ -6538,10 +6558,10 @@ try {
       assert.equal(provRes.status, 200);
       const provBody = await provRes.json();
       assert.equal(typeof provBody.ok, 'boolean', 'provision responded with its result shape');
-      // 750 ms: the window also carries the child scripts' CPU and one spawnSync git
-      // per probe, so a scheduler hiccup can cost a few hundred ms; the defect class
-      // this test catches (a synchronous snapshot copy) stalls for about a second.
-      assertFastProbes(times, 'the 384 MB snapshot copy', 750);
+      // The defect class this test catches is a synchronous snapshot copy: it stalls
+      // /health for the whole copy, about a second at this fixture size. 300 ms keeps
+      // that failure visible and still clears the measured worst probe with margin.
+      assertFastProbes(times, 'the 384 MB snapshot copy');
       assert.deepEqual(freshSnapshots(), [], 'the temp snapshot dir is gone after provision responds');
     } finally { await stopServer(snapSrv); }
   }
@@ -6561,13 +6581,21 @@ try {
       const { apiKey: delayKey, base: delayBase } = await awaitStartup(delaySrv);
       const started = Date.now();
       const importP = fetch(new URL(`${delayBase}/api/import`), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${delayKey}` }, body: JSON.stringify({ source: delaySource }) });
-      const [stateR, healthR, checkR] = await Promise.all([
+      const [stateR, healthR, checkR, editR] = await Promise.all([
         fetch(new URL('/api/state', delayBase)),
         fetch(new URL('/health', delayBase)),
         fetch(new URL('/api/updates/check', delayBase), { method: 'POST', headers: { Authorization: `Bearer ${delayKey}` } }),
+        // An edit issued during the held import queues behind it in the worker and
+        // applies against the settled state; a stale base would be refused with 409.
+        fetch(new URL(`${delayBase}/api/file`), { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${delayKey}` }, body: JSON.stringify({ path: 'queued-edit.md', base: null, content: 'queued edit\n' }) }),
       ]);
       assert.equal(stateR.status, 200);
       assert.equal(healthR.status, 200);
+      const editBody = await editR.json().catch(() => ({}));
+      assert.equal(editR.status, 200, `the queued edit must apply after the import settles: ${JSON.stringify(editBody)}`);
+      assert.equal(editBody.ok, true);
+      const queued = await (await fetch(new URL('/api/file?path=queued-edit.md', delayBase))).json();
+      assert.equal(queued.content, 'queued edit\n', 'the queued edit ran against the settled snapshot');
       const checkText = await checkR.text();
       assert.equal(checkR.status, 200, `the deferred update check must not 500: ${checkText}`);
       const deferredAt = JSON.parse(checkText).checkedAt;
@@ -6747,6 +6775,40 @@ try {
         assert.ok((await fr.json()).error.includes('no local data repo at'));
       } finally { renameSync(goneDir, failSource); }
     } finally { await stopServer(failSrv); }
+
+    // Lock-retry bound: a check whose row writes collide with a held write lock retries
+    // a bounded number of times, logs the failure, and ends the run, so a later check is
+    // a fresh run. The test holds the writer lock itself, so the collision is exact and
+    // an unbounded retry would never reach the logged exhaustion this asserts.
+    const lockCfg = join(tmp, 'server-config-lock.json');
+    writeFileSync(lockCfg, JSON.stringify({ apiKey: null }));
+    const lockDb = join(tmp, 'state-lock.db');
+    const lockSrv = spawnServer(['--port', '0', '--config', lockCfg, '--db', lockDb], testServerEnv);
+    try {
+      const { apiKey: lockKey, base: lockBase } = await awaitStartup(lockSrv);
+      const errChunks = [];
+      lockSrv.stderr.on('data', chunk => errChunks.push(chunk));
+      // Let the boot-time check finish its own writes before the lock episode.
+      await new Promise(resolve => setTimeout(resolve, 400));
+      const holder = new DatabaseSync(lockDb);
+      try {
+        holder.exec('PRAGMA busy_timeout = 2000');
+        holder.exec('BEGIN IMMEDIATE');
+        const checkP = fetch(new URL('/api/updates/check', lockBase), { method: 'POST', headers: { Authorization: `Bearer ${lockKey}` } });
+        // Hold the writer lock far past the bounded retry's total budget, then release.
+        await new Promise(resolve => setTimeout(resolve, 1200).unref());
+        holder.exec('ROLLBACK');
+        const checkRes = await checkP;
+        assert.equal(checkRes.status, 200);
+      } finally { holder.close(); }
+      await new Promise(resolve => setTimeout(resolve, 250));
+      const stderr = Buffer.concat(errChunks).toString('utf8');
+      assert.match(stderr, /update check failed: .*(locked|busy)/i, 'the bounded retry logs its exhaustion instead of looping while the lock is held');
+      // The ended loop leaves updateRunning false: a later check is a fresh run.
+      const fresh = await fetch(new URL('/api/updates/check', lockBase), { method: 'POST', headers: { Authorization: `Bearer ${lockKey}` } });
+      assert.equal(fresh.status, 200);
+      assert.ok((await fresh.json()).checkedAt, 'a check after the lock episode runs fresh');
+    } finally { await stopServer(lockSrv); }
   }
 
   // Teardown escalation: a server that ignores SIGTERM (what a mutant can become) must still
