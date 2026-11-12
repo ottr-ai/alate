@@ -3,8 +3,12 @@
 // `check [snap]` re-walks and fails with one diff line per finding.
 // The platform's own runtime state (the omp databases and hour logs, .omp/cache,
 // .omp/run, the session stores under .omp — context-mode, custom-session-files,
-// snapcompact — and the two bookkeeping files under .alate) is excluded: a live
-// worker writes it during any chain run, and none of it is a test write.
+// snapcompact — the agent blob cache .omp/agent/blobs, the chrome-devtools browser
+// profiles .omp/browser-profiles, the live worker's .omp/plugins/cache downloads
+// (anything else under plugins/ stays checked), .omp/memories, .omp/oauth,
+// .omp/install-id, .omp/marketplaces.json, .omp/natives, and the two bookkeeping
+// files under .alate) is excluded: a live worker writes it during any chain run,
+// and none of it is a test write.
 // Exists because a Stryker mutant once dropped install-user.mjs's --home handling, so the
 // script fell back to os.homedir() and deleted files of the shared Ottr worker home.
 import assert from 'node:assert/strict';
@@ -18,7 +22,10 @@ const WATCHED = ['.alate', '.agents', '.omp'];
 // Platform runtime state churns while a live worker runs the chain; those writes are not
 // test writes, so the guard ignores them. That includes the chrome-devtools browser profiles
 // under .omp/browser-profiles: a live browser session rewrites caches and session stores
-// mid-chain. Everything else in the watched dirs — skills, rules, agent context,
+// mid-chain. A live worker also rewrites its plugin download cache (.omp/plugins/cache;
+// anything else under plugins/ stays checked), its memories, its oauth state, its native
+// grammar files (.omp/natives), and the install-id and marketplaces.json bookkeeping
+// files. Everything else in the watched dirs — skills, rules, agent context,
 // installed.json, layers, current — is checked for presence and mtime.
 const LIVE = {
   '.alate': rel => rel === 'in-use.json' || rel === 'skillspector-pass.json',
@@ -30,6 +37,12 @@ const LIVE = {
     || rel === 'snapcompact-savings.jsonl'
     || rel === 'agent/blobs' || rel.startsWith('agent/blobs/')
     || rel === 'browser-profiles' || rel.startsWith('browser-profiles/')
+    || rel === 'plugins/cache' || rel.startsWith('plugins/cache/')
+    || rel === 'memories' || rel.startsWith('memories/')
+    || rel === 'oauth' || rel.startsWith('oauth/')
+    || rel === 'install-id'
+    || rel === 'marketplaces.json'
+    || rel === 'natives' || rel.startsWith('natives/')
     || /^agent\/[A-Za-z0-9-]+\.db(?:\.|-|$)/.test(rel),
 };
 const resolveSnap = (argv) => argv[3] ?? process.env.ALATE_HOME_GUARD_SNAPSHOT ?? join(tmpdir(), 'alate-home-guard-snapshot.json');
@@ -103,11 +116,16 @@ const selfCheck = () => {
     '.agents/skills/x/SKILL.md', '.omp/agent/rules/r.md', '.omp/agent/agent.db', '.omp/agent/agent.db-wal',
     '.omp/agent/skill-descriptions.db-shm', '.omp/agent/skill-descriptions.db-wal',
     '.omp/logs/omp.231.log', '.omp/context-mode/sessions/s.db-shm', '.omp/agent/custom-session-files/a',
-    '.omp/snapcompact-savings.jsonl', 'unwatched.txt']) {
+    '.omp/snapcompact-savings.jsonl', 'unwatched.txt',
+    '.omp/plugins/cache/marketplaces/idx.json', '.omp/plugins/installed/p/manifest.json',
+    '.omp/memories/m.md', '.omp/oauth/tokens.json', '.omp/install-id',
+    '.omp/marketplaces.json', '.omp/natives/grammars/en.wasm']) {
     mkdirSync(join(fake, rel, '..'), { recursive: true });
     writeFileSync(join(fake, rel), rel);
   }
   // The blob cache dir pre-exists on any machine that has run omp once; its entries churn.
+  // So does the live worker's own state: the plugin download cache, memories, oauth,
+  // natives, install-id and marketplaces.json.
   mkdirSync(join(fake, '.omp/agent/blobs'), { recursive: true });
   const snap = join(tmp, 'snap.json');
   try {
@@ -128,7 +146,17 @@ const selfCheck = () => {
     writeFileSync(join(fake, '.omp/snapcompact-savings.jsonl'), 'more\n');
     writeFileSync(join(fake, '.omp/agent/blobs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'), 'blob\n');
     writeFileSync(join(fake, '.omp/agent/blobs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png'), 'blob\n');
+    writeFileSync(join(fake, '.omp/plugins/cache/marketplaces/idx.json'), '{}\n');
+    utimesSync(join(fake, '.omp/plugins/cache/marketplaces'), new Date(), new Date(Date.now() + 9000));
+    writeFileSync(join(fake, '.omp/memories/m.md'), 'more\n');
+    writeFileSync(join(fake, '.omp/oauth/tokens.json'), '{}\n');
+    writeFileSync(join(fake, '.omp/install-id'), 'id-2\n');
+    writeFileSync(join(fake, '.omp/marketplaces.json'), '[]\n');
+    writeFileSync(join(fake, '.omp/natives/grammars/en.wasm'), 'wasm\n');
     assert.equal(run('check', fake, snap).status, 0, 'live runtime churn passes');
+    // Anything under plugins/ outside cache/ stays checked.
+    utimesSync(join(fake, '.omp/plugins/installed/p/manifest.json'), new Date(), new Date(Date.now() + 9000));
+    assert.notEqual(run('check', fake, snap).status, 0, 'plugins entry outside cache fails');
     // Adding a file under a watched dir fails.
     writeFileSync(join(fake, '.alate', 'extra.txt'), 'x');
     assert.equal(run('check', fake, snap).status !== 0, true, 'added entry fails');
@@ -147,9 +175,14 @@ const selfCheck = () => {
     assert.match(missing.stderr, /snapshot missing/);
     // The recorded snapshot contains the watched entries and no unwatched one.
     const recorded = JSON.parse(readFileSync(snap, 'utf8'));
-    assert.deepEqual(Object.keys(recorded).sort(), ['agent', 'agent/rules', 'agent/rules/r.md', 'skills', 'skills/x', 'skills/x/SKILL.md', 'state.json']);
+    assert.deepEqual(Object.keys(recorded).sort(), ['agent', 'agent/rules', 'agent/rules/r.md',
+      'plugins', 'plugins/installed', 'plugins/installed/p', 'plugins/installed/p/manifest.json',
+      'skills', 'skills/x', 'skills/x/SKILL.md', 'state.json']);
     assert.ok(!('agent/agent.db' in recorded) && !('logs' in recorded) && !('in-use.json' in recorded)
-      && !('context-mode' in recorded) && !('snapcompact-savings.jsonl' in recorded), 'live runtime entries stay out of the snapshot');
+      && !('context-mode' in recorded) && !('snapcompact-savings.jsonl' in recorded)
+      && !('plugins/cache' in recorded) && !('memories' in recorded) && !('oauth' in recorded)
+      && !('install-id' in recorded) && !('marketplaces.json' in recorded) && !('natives' in recorded),
+      'live runtime entries stay out of the snapshot');
     console.log('home-guard ok');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
