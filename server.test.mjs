@@ -2775,6 +2775,25 @@ try {
       assert.ok(ghHits.length >= 2 && ghHits.every(h => h.auth === 'Bearer tok-xyz'), 'the token rides GitHub calls only');
     }
 
+    // The stored token belongs to the configured ALATE_GITHUB_HOST. With a foreign host,
+    // the github.com API calls of this checker must carry no Authorization header at all.
+    {
+      handler = url => url.pathname === '/gh/repos/fake/gho1/releases' ? [200, [{ tag_name: 'v2.0.0', draft: false, prerelease: false, published_at: old30, html_url: 'o1' }]] : null;
+      const savedHost = process.env.ALATE_GITHUB_HOST;
+      process.env.ALATE_GITHUB_HOST = 'acme.ghe.com';
+      let db;
+      try {
+        hits.length = 0;
+        db = await run({ 'upstreams.json': UP([item('gho1', { check: { type: 'github-release' } })]) });
+      } finally {
+        if (savedHost === undefined) delete process.env.ALATE_GITHUB_HOST;
+        else process.env.ALATE_GITHUB_HOST = savedHost;
+      }
+      assert.equal(rows(db).gho1.latest, 'v2.0.0', 'the foreign-host run still checks the row');
+      const ghHits = hits.filter(h => h.p.startsWith('/gh/'));
+      assert.ok(ghHits.length >= 1 && ghHits.every(h => h.auth === null), 'a foreign-host token rides no GitHub call');
+    }
+
     // bun.lock is JSONC: comments (with quote and brace lookalikes), trailing commas and a
     // block comment must survive the strip, so the dep row still parses and reaches npm.
     {

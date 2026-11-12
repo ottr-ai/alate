@@ -9,7 +9,7 @@ import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, 
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_GITHUB_HOST, GITHUB_HOST_ENV, assertSourceInside, checkDestination, cleanupData, cloneCommand, dataHost, dataRepoUrl, descriptionText, forAll, githubHost, keepTemp, parseDataSpec, parseGithubHost, redactSecrets, resolveDataDir, ruleProblems } from './lib/data.mjs';
+import { DEFAULT_GITHUB_HOST, GITHUB_HOST_ENV, assertSourceInside, checkDestination, cleanupData, cloneCommand, dataHost, dataRepoUrl, descriptionText, forAll, gitAuthEnv, githubHost, keepTemp, parseDataSpec, parseGithubHost, redactSecrets, resolveDataDir, ruleProblems } from './lib/data.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-clone-'));
 const TOKEN = 'ghp_abc123/+=XYZ'; // fake: '/' '+' '=' stress the encoded/base64 shapes
@@ -132,18 +132,56 @@ try {
   cmd = cloneCommand('http://github.com/own/repo', '', TOKEN, dir);
   assert.ok(!('GIT_CONFIG_COUNT' in cmd.env), 'http:// needs no auth config');
 
-  // --- Token isolation across hosts: each clone's config names only its own host.
-  cmd = cloneCommand('https://acme.ghe.com/own/repo', '', TOKEN, dir);
-  assert.deepEqual(cmd.args.at(-2), 'https://acme.ghe.com/own/repo', 'clone URL in argv for ghe.com tenant');
-  assert.equal(cmd.env.GIT_CONFIG_KEY_0, 'http.https://acme.ghe.com/.extraheader');
-  assert.equal(cmd.env.GIT_CONFIG_VALUE_0, `AUTHORIZATION: basic ${basic}`);
-  assert.equal(cmd.env.GIT_CONFIG_COUNT, '1');
-  assert.ok(!cmd.args.join(' ').includes('github.com'), 'ghe clone argv never names github.com');
-  for (const [k, v] of Object.entries(cmd.env)) assert.ok(k.startsWith('GIT_CONFIG') ? !String(v).includes('github.com') : true, `ghe clone env ${k} never names github.com`);
-  cmd = cloneCommand('https://github.com/own/repo', '', TOKEN, dir);
-  assert.deepEqual(cmd.args.at(-2), 'https://github.com/own/repo', 'clone URL in argv for github.com');
-  assert.equal(cmd.env.GIT_CONFIG_KEY_0, 'http.https://github.com/.extraheader');
-  assert.ok(!JSON.stringify(cmd.env).includes('acme.ghe.com'), 'github.com clone never names the GHE tenant');
+  // --- Token isolation across hosts: the token rides only to the configured host
+  // (ALATE_GITHUB_HOST, github.com by default); a clone URL on any other host gets no auth.
+  const savedHost = process.env[GITHUB_HOST_ENV];
+  try {
+    delete process.env[GITHUB_HOST_ENV]; // default env: github.com is the configured host
+    cmd = cloneCommand('https://acme.ghe.com/own/repo', '', TOKEN, dir);
+    assert.deepEqual(cmd.args.at(-2), 'https://acme.ghe.com/own/repo', 'clone URL in argv for ghe.com tenant');
+    assert.ok(!('GIT_CONFIG_COUNT' in cmd.env), 'foreign host gets no auth config by default');
+    assert.ok(!JSON.stringify(cmd.env).includes('AUTHORIZATION: basic'), 'no basic credential for a foreign host');
+    assert.ok(!JSON.stringify(cmd.env).includes(basic), 'encoded credential absent for a foreign host');
+    assert.ok(!cmd.args.join(' ').includes('github.com'), 'ghe clone argv never names github.com');
+
+    process.env[GITHUB_HOST_ENV] = 'acme.ghe.com';
+    cmd = cloneCommand('https://acme.ghe.com/own/repo', '', TOKEN, dir);
+    assert.equal(cmd.env.GIT_CONFIG_KEY_0, 'http.https://acme.ghe.com/.extraheader');
+    assert.equal(cmd.env.GIT_CONFIG_VALUE_0, `AUTHORIZATION: basic ${basic}`);
+    assert.equal(cmd.env.GIT_CONFIG_COUNT, '1', 'exactly one injected config entry for the configured host');
+    for (const [k, v] of Object.entries(cmd.env)) assert.ok(k.startsWith('GIT_CONFIG') ? !String(v).includes('github.com') : true, `ghe clone env ${k} never names github.com`);
+    cmd = cloneCommand('https://github.com/own/repo', '', TOKEN, dir);
+    assert.deepEqual(cmd.args.at(-2), 'https://github.com/own/repo', 'clone URL in argv for github.com');
+    assert.ok(!('GIT_CONFIG_COUNT' in cmd.env), 'github.com is now the foreign host: no auth config');
+  } finally {
+    if (savedHost === undefined) delete process.env[GITHUB_HOST_ENV];
+    else process.env[GITHUB_HOST_ENV] = savedHost;
+  }
+
+  // --- Parse-to-clone path: a spec naming a foreign host yields an auth-free clone env.
+  const spec = parseDataSpec('attacker.example/o/n');
+  assert.deepEqual(spec, { name: 'o/n', ref: '', host: 'attacker.example' });
+  const specUrl = dataRepoUrl(spec);
+  assert.equal(specUrl, 'https://attacker.example/o/n');
+  cmd = cloneCommand(specUrl, spec.ref, TOKEN, dir);
+  assert.ok(!('GIT_CONFIG_COUNT' in cmd.env), 'foreign-host spec gets no auth config');
+  assert.ok(!('GIT_CONFIG_KEY_0' in cmd.env) && !('GIT_CONFIG_VALUE_0' in cmd.env), 'no extraheader keys for a foreign host');
+  for (const shape of [basic, TOKEN, encoded]) assert.ok(!JSON.stringify(cmd.env).includes(shape), 'credential shape absent from env for a foreign host');
+
+  const savedHost2 = process.env[GITHUB_HOST_ENV];
+  try {
+    process.env[GITHUB_HOST_ENV] = 'attacker.example';
+    cmd = cloneCommand(dataRepoUrl(spec), spec.ref, TOKEN, dir);
+    assert.equal(cmd.env.GIT_CONFIG_KEY_0, 'http.https://attacker.example/.extraheader');
+    assert.equal(cmd.env.GIT_CONFIG_COUNT, '1');
+
+    process.env[GITHUB_HOST_ENV] = 'not a host';
+    cmd = cloneCommand('https://github.com/o/n', '', TOKEN, dir);
+    assert.ok(!('GIT_CONFIG_COUNT' in cmd.env), 'invalid ALATE_GITHUB_HOST fails closed: no auth config');
+  } finally {
+    if (savedHost2 === undefined) delete process.env[GITHUB_HOST_ENV];
+    else process.env[GITHUB_HOST_ENV] = savedHost2;
+  }
 
   // --- dataHost / dataRepoUrl: ambient host decides plain specs; explicit host wins.
   assert.equal(dataRepoUrl({ name: 'own/repo', ref: '', host: '' }), 'https://github.com/own/repo');
@@ -365,6 +403,25 @@ try {
     // An existing local path wins whole, including one that contains '@'.
     writeFileSync(join(tmp, 'at@path'), 'x');
     assert.deepEqual(parseDataSpec(join(tmp, 'at@path')), { name: join(tmp, 'at@path'), ref: '', host: '' }, 'a local path containing @ wins whole');
+
+    // gitAuthEnv: the env carries auth only when the clone URL's host equals the configured
+    // host, whatever host shape arrives; look-alike hosts never pass.
+    forAll(rand => {
+      const hosts = ['github.com', 'acme.ghe.com', 'github.com.evil', 'www.github.com', 'evil.example'];
+      return `${hosts[Math.floor(rand() * hosts.length)]} ${hosts[Math.floor(rand() * hosts.length)]}`;
+    }, pair => {
+      const [configuredHost, urlHost] = pair.split(' ');
+      const saved = process.env[GITHUB_HOST_ENV];
+      process.env[GITHUB_HOST_ENV] = configuredHost;
+      try {
+        const env = gitAuthEnv(`https://${urlHost}/o/n`, TOKEN);
+        if (urlHost !== configuredHost) assert.ok(!('GIT_CONFIG_COUNT' in env), `no auth for ${urlHost} under ${configuredHost}`);
+        else assert.equal(env.GIT_CONFIG_KEY_0, `http.https://${configuredHost}/.extraheader`);
+      } finally {
+        if (saved === undefined) delete process.env[GITHUB_HOST_ENV];
+        else process.env[GITHUB_HOST_ENV] = saved;
+      }
+    });
   }
 
   console.log('clone.test.mjs ok');

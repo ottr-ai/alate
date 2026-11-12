@@ -129,7 +129,7 @@ The SkillSpector scan gate therefore applies to every provision. A provision nee
 | `sync-user.mjs` | Capture this machine's omp user layer into the repo. | `--home` |
 | `sync-projects.mjs` | Refresh per-project snapshots into the repo. | `--root` |
 
-All install scripts take `--data <dir>` or `--repo <owner/name[@ref]>` (set `GH_TOKEN` for private repos). The repo form also accepts `<host>/owner/name[@ref]` for a GitHub Enterprise Cloud tenant (`acme.ghe.com`) or Enterprise Server host (`git.example.com`), or a full `https://` URL; `ALATE_GITHUB_HOST` is the ambient default host, and the token goes only to the configured host. Capture scripts take `--data <dir>` only.
+All install scripts take `--data <dir>` or `--repo <owner/name[@ref]>` (set `GH_TOKEN` for private repos). The repo form also accepts `<host>/owner/name[@ref]` for a GitHub Enterprise Cloud tenant (`acme.ghe.com`) or Enterprise Server host (`git.example.com`), or a full `https://` URL; `ALATE_GITHUB_HOST` is the ambient default host. The token rides only to the configured host: a repo spec on another host clones without it, and the update checker queries github.com without a token unless the configured host is github.com. Capture scripts take `--data <dir>` only.
 
 Before any target write or SkillSpector call, `install-user.mjs` checks every source skill directory for a readable `SKILL.md`.
 Each file needs frontmatter at byte 0, a complete closing marker, a non-empty `name` and `description`, and no forbidden hidden characters.
