@@ -116,6 +116,11 @@ const db = new DatabaseSync(dbFile)
 // anyway (one already in flight from boot) fails fast and its bounded retry absorbs it.
 // The worker gets a generous bound instead: its waits never touch the loop.
 db.exec('PRAGMA busy_timeout = 50')
+// WAL keeps main-thread reads working while the worker's import transaction runs: a
+// large import spills its page cache and then holds the writer lock until COMMIT, and
+// in rollback-journal mode every /api/state, /api/files and /api/file read would wait
+// out the busy timeout and fail. WAL readers see the last committed snapshot instead.
+db.exec('PRAGMA journal_mode = WAL')
 if (process.platform !== 'win32') chmodSync(dbFile, 0o600)
 db.exec(`
   CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL);
@@ -611,15 +616,17 @@ function updateCheck(): Promise<void> {
   if (updateRunning) return updatePromise
   updateRunning = true
   updatePromise = (async () => {
+    // One counter for the whole run. A per-attempt counter would reset on every
+    // retry and loop for as long as a lock is held, blocking the loop every 50 ms.
+    let lockRetries = 0
     for (;;) {
       rerunNeeded = false
-      let lockRetries = 0
       try {
         await checkUpdates(db, { token: dashToken(), securityFastPath: config.securityFastPath, dataRepo: dashState.source ? (dashState.source.kind === 'repo' ? dashState.source.name : dashState.source.spec) : null, dataHost: config.tokenHost ?? (dashState.source && dashState.source.kind === 'repo' ? (dashState.source.host ?? '') : undefined) })
       } catch (err) {
         const msg = redactSecrets((err as Error).message, dashToken())
         // A lock hit between worker ops is transient: retry a bounded number of times,
-        // then leave the rows to the next timer tick.
+        // then log the failure and leave the rows to the next timer tick.
         if (/locked|busy/i.test(msg) && lockRetries < 3) {
           lockRetries++
           await delay(50)
