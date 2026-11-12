@@ -113,7 +113,7 @@ try {
   put('.omp/agent/mcp.json', '{\n  "mcpServers": {\n    "s": {\n      "env": {\n        "api\\u004bey": "placeholder"\n      }\n    }\n  }\n}\n');
   r = run();
   assert.equal(r.status, 1);
-  assert.ok(r.stderr.includes('~/.omp/agent/mcp.json: "apiKey" holds a literal value; use "$VAR" in mcp.json, put the value in workers/<project>/env.txt, and set it in Ottr Settings -> Env'), r.stderr);
+  assert.ok(r.stderr.includes('~/.omp/agent/mcp.json: "apiKey" holds a literal value; use "$VAR" in mcp.json, put the name VAR in workers/<project>/env.txt, and set it in Ottr Settings -> Env'), r.stderr);
   put('.omp/agent/mcp.json', '{oops\n');
   r = run();
   assert.equal(r.status, 1);
@@ -470,7 +470,7 @@ try {
     assert.equal(r.status, 1, r.stderr);
     // The literal-value tail is the mcp.json fix this branch added; the scalar edges
     // under it are the pulled pins, kept verbatim.
-    const jsonFix = 'use "$VAR" in mcp.json, put the value in workers/<project>/env.txt, and set it in Ottr Settings -> Env';
+    const jsonFix = 'use "$VAR" in mcp.json, put the name VAR in workers/<project>/env.txt, and set it in Ottr Settings -> Env';
     assert.ok(r.stderr.includes(`~/${rel}: "API_KEY2" holds a literal value; ${jsonFix}`), r.stderr);
     assert.ok(r.stderr.includes(`~/${rel}: "TOKEN2" holds a literal value; ${jsonFix}`), r.stderr);
     assert.ok(r.stderr.includes(`~/${rel}: "PASSWORD2" holds a literal value; ${jsonFix}`), r.stderr);

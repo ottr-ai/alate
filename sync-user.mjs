@@ -111,10 +111,10 @@ const jsonProblems = (text, say) => {
     if (!node || typeof node !== 'object') return;
     for (const [key, value] of Object.entries(node)) {
       if (SECRET_NAME_RE.test(key)) {
-        // mcp.json names the concrete fix: quote the env reference in the JSON, park the
-        // value in the project's env.txt, and set it once in Ottr's Settings -> Env.
+        // mcp.json names the concrete fix: quote the env reference in the JSON, put the
+        // name in the project's env.txt, and set its value once in Ottr's Settings -> Env.
         const bad = typeof value === 'string'
-          ? scalarProblem(value, 'use "$VAR" in mcp.json, put the value in workers/<project>/env.txt, and set it in Ottr Settings -> Env')
+          ? scalarProblem(value, 'use "$VAR" in mcp.json, put the name VAR in workers/<project>/env.txt, and set it in Ottr Settings -> Env')
           : typeof value === 'number' ? 'holds a numeric literal; reference an env var instead'
           : typeof value === 'boolean' || value === null ? null
           : 'holds a nested value; use a flat env reference';
