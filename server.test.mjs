@@ -817,6 +817,9 @@ try {
   body = await r.json();
   assert.deepEqual(body.results.map(x => x.code), [1], 'the fatal refusal stops the pipeline');
   assert.equal(body.ok, false);
+  body = await (await get('/api/state')).json();
+  assert.deepEqual(body.provision.failures.map(f => [f.script, f.code]), [['sync.mjs', 1]], 'state carries the failing script');
+  assert.ok(body.provision.failures[0].output.includes('Nothing installed') && body.provision.failures[0].output.includes('upstreams.json'), 'the stored output names the refusal cause');
   assert.equal(readFileSync(join(tmpHome, '.omp', 'agent', 'config.yml'), 'utf8'), 'model: test\n', 'the fatal source never reaches install-user, so the home keeps the last installed bytes');
 
   // 4b4. A non-zero child that leaves no results file fails closed the same way: the gate
@@ -867,6 +870,8 @@ try {
     assert.equal(body.ok, false, 'a null exit code fails the provision');
     assert.deepEqual(body.results.map(x => [x.script, x.code]), [['sync.mjs', null]], 'the null exit code stops the pipeline');
     assert.equal(readFileSync(join(tmpHome, '.omp', 'agent', 'config.yml'), 'utf8'), 'model: test\n', 'install-user never ran on the killed provision');
+    body = await (await get('/api/state')).json();
+    assert.deepEqual(body.provision.failures.map(f => [f.script, f.code]), [['sync.mjs', null]], 'state carries the killed script');
   }
 
   // restore the repo source for later cases; a provision refreshes the update state
@@ -4853,6 +4858,87 @@ try {
       dbS.prepare('INSERT INTO files (path, content) VALUES (?, ?)').run(bad, Buffer.from(`x`));
       e = err10(() => leak10(() => dash.snapshotData(dbS)));
       assert.equal(e.message, `unsafe snapshot path: ${bad}`, bad);
+    }
+  }
+
+  // Dashboard check: the overview renders whole-run provision failures (web/app.js) ====
+  {
+    // Minimal DOM shim: only what h() and the app.js top-level wiring touch during import.
+    // load() awaits a fetch that never settles, so no render ever runs. The touched globals
+    // are saved and restored: later sections use the real fetch and setInterval.
+    const saved = ['document', 'window', 'Node', 'navigator', 'location', 'matchMedia', 'localStorage', 'fetch', 'setInterval']
+      .map(k => [k, globalThis[k]]);
+    const setGlobal = (name, value) => {
+      try { globalThis[name] = value; } catch { Object.defineProperty(globalThis, name, { value, configurable: true, writable: true }); }
+    };
+    try {
+      class StubNode {}
+      class StubText extends StubNode { constructor(text) { super(); this.text = String(text); } }
+      class StubElement extends StubNode {
+        constructor(tag) {
+          super();
+          this.tag = tag;
+          this.className = '';
+          this.dataset = {};
+          this.classList = { toggle() {}, add() {}, remove() {}, contains: () => false };
+          this.children = [];
+        }
+        get textContent() { return this.children.map(c => (c instanceof StubElement ? c.textContent : c.text)).join(''); }
+        set textContent(v) { this.children = [new StubText(String(v))]; }
+        setAttribute() {}
+        addEventListener() {}
+        append(...kids) { for (const kid of kids.flat()) this.children.push(kid instanceof StubNode ? kid : new StubText(String(kid))); }
+      }
+      const el = () => new StubElement('div');
+      for (const [k, v] of Object.entries({
+        document: { createElement: tag => new StubElement(tag), createTextNode: t => new StubText(t), getElementById: () => el(), body: el(), documentElement: el(), hidden: true },
+        window: { addEventListener() {} },
+        Node: StubNode,
+        navigator: {},
+        location: { hash: '' },
+        matchMedia: () => ({ matches: false, addEventListener() {} }),
+        localStorage: { getItem: () => null, setItem() {} },
+        fetch: () => new Promise(() => {}),
+        setInterval: () => ({ unref() {} }),
+      })) setGlobal(k, v);
+      const app = await import('./web/app.js?alat129');
+
+      // a. One failed script: the alert line names it, one details block carries the output.
+      const one = app.provisionFailureView({ ok: false, failures: [{ script: 'sync.mjs', code: 1, output: 'refused: bad upstreams', truncated: false }] });
+      assert.equal(one.length, 2);
+      assert.equal(one[0].className, 'meta alert');
+      assert.equal(one[0].textContent, 'Provision failed: sync.mjs');
+      assert.equal(one[1].tag, 'details');
+      assert.equal(one[1].className, 'report');
+      assert.equal(one[1].children[0].tag, 'summary');
+      assert.equal(one[1].children[0].textContent, 'sync.mjs output');
+      assert.equal(one[1].children[1].tag, 'pre');
+      assert.equal(one[1].children[1].textContent, 'refused: bad upstreams');
+
+      // b. A truncated output keeps the ellipsis marker.
+      const trunc = app.provisionFailureView({ ok: false, failures: [{ script: 'sync.mjs', code: 1, output: 'refused', truncated: true }] });
+      assert.ok(trunc[1].children[1].textContent.endsWith('…'), 'truncated output ends with the ellipsis');
+
+      // c. Two failed scripts: one line names both in order, two details blocks follow.
+      const two = app.provisionFailureView({ ok: false, failures: [
+        { script: 'sync.mjs', code: 1, output: 'a', truncated: false },
+        { script: 'install-user.mjs', code: null, output: 'b', truncated: false },
+      ] });
+      assert.equal(two[0].textContent, 'Provision failed: sync.mjs, install-user.mjs');
+      assert.equal(two.length, 3);
+      assert.ok(two.slice(1).every(d => d.tag === 'details' && d.className === 'report'));
+
+      // d. A clean run and a missing state render nothing.
+      assert.deepEqual(app.provisionFailureView({ ok: true }), []);
+      assert.deepEqual(app.provisionFailureView(null), []);
+
+      // e. State from before failures were stored: the bare line, no details blocks.
+      const legacy = app.provisionFailureView({ ok: false });
+      assert.equal(legacy.length, 1);
+      assert.equal(legacy[0].className, 'meta alert');
+      assert.equal(legacy[0].textContent, 'Provision failed');
+    } finally {
+      for (const [k, v] of saved) { if (v === undefined) delete globalThis[k]; else setGlobal(k, v); }
     }
   }
 

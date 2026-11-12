@@ -54,7 +54,9 @@ interface ProvisionResult { script: string; code: number | null; output: string;
 interface ProvisionItem { item: string; status: 'installed' | 'unchanged' | 'rejected' | 'no-origin'; rule: string | null; at: string | null; report?: string }
 // Stored on the dashboard state after every provision run; served by GET /api/state. sha pins
 // the results to the imported snapshot, so a stale set is never shown for a newer snapshot.
-interface ProvisionState { at: string; sha: string | null; ok: boolean; items: ProvisionItem[] }
+// failures holds the scripts of a whole-run failure (non-zero exit or null code) with their
+// captured output, so a refusal or a crashed child is visible when items alone show nothing.
+interface ProvisionState { at: string; sha: string | null; ok: boolean; items: ProvisionItem[]; failures: ProvisionResult[] }
 
 function loadConfig(): Config {
   try {
@@ -190,6 +192,7 @@ async function provision(): Promise<ProvisionResult[]> {
       sha: dashState.source?.importedSha || null,
       ok: results.every(r => r.code === 0),
       items: [...merged.values()].sort((a, b) => (a.item < b.item ? -1 : a.item > b.item ? 1 : 0)),
+      failures: results.filter(r => r.code !== 0),
     } satisfies ProvisionState
     persistDash()
     return results

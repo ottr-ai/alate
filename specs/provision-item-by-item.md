@@ -137,13 +137,17 @@ failure; `provisionedSha` still moves only on `ok`.
 
 ## Server and UI
 
-- `dashState.provision` = `{ at, sha, ok, items }`, persisted with the dashboard
+- `dashState.provision` = `{ at, sha, ok, items, failures }`, persisted with the dashboard
   state, served by `GET /api/state`. `sha` is the imported snapshot sha, so a stale
   result set is never shown for a newer snapshot. Items are merged by key from both
   scripts; the worse status wins (`rejected` > `no-origin` > `installed` >
   `unchanged`).
+- `failures` lists the scripts that exited non-zero or closed with a null code, in
+  run order, with their captured (redacted, truncated) output.
 - The dashboard shows each item's status next to it in the Rules, Skills, and User
   layer sections, alert-styled for failures, with the report in a details block.
+  When `ok` is false the overview also shows the danger line "Provision failed"
+  with the failing scripts, each output in a details block under the meta line.
 
 ## Acceptance checks (tests that fail before the change)
 
@@ -164,6 +168,10 @@ f. `upstreams.json` that is not JSON refuses the whole run; a structurally broke
    entry refuses the whole run.
 g. The server pipeline continues past a per-item failure and stops on a killed
    child; `ok` stays false; `GET /api/state` carries the per-item results.
+h. A fatal refusal or a killed child stores the failing script and its output on
+   `GET /api/state`.
+i. The overview renders the "Provision failed" line and per-script output
+   disclosures for a failed run, and nothing for a clean run.
 
 ## Non-goals
 

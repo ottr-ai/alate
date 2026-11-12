@@ -294,8 +294,8 @@ body.no-source .desk { grid-template-columns: minmax(0, 1fr); }
 .entries .aside { font: 400 0.75rem var(--mono); color: var(--ink-2); text-align: right; white-space: nowrap; }
 .entries .aside.alert, .alert { color: var(--red); }
 .entries > li details.report { grid-column: 1 / -1; }
-.entries > li details.report summary { font: 400 0.75rem var(--mono); color: var(--ink-2); cursor: pointer; }
-.entries > li details.report pre {
+.entries > li details.report summary, .sheet-head details.report summary { font: 400 0.75rem var(--mono); color: var(--ink-2); cursor: pointer; }
+.entries > li details.report pre, .sheet-head details.report pre {
   font: 400 0.75rem/1.5 var(--mono);
   color: var(--ink-2);
   /* A scan report holds wide ASCII tables: keep lines intact and scroll sideways

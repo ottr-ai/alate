@@ -251,6 +251,19 @@ function part(title, count, ...body) {
 const STATUS_COPY = { sync: 'in sync', changed: 'changed on this machine', missing: 'missing on this machine', uncaptured: 'not captured', unknown: 'not checked' };
 const DRIFT = new Set(['changed', 'missing', 'uncaptured']);
 
+// Whole-run provision failure (a refusal or a crashed child): a danger meta line, then one
+// disclosure per failed script with its captured output. A clean run, a run hidden as stale,
+// or a state stored before failures shows nothing.
+export function provisionFailureView(prov) {
+  if (!prov || prov.ok) return [];
+  const failures = prov.failures || [];
+  const scripts = failures.map((f) => f.script).join(', ');
+  return [
+    h('p', { class: 'meta alert', text: 'Provision failed' + (scripts ? ': ' + scripts : '') }),
+    ...failures.map((f) => h('details', { class: 'report' }, h('summary', { text: f.script + ' output' }), h('pre', { text: f.output + (f.truncated ? '…' : '') }))),
+  ];
+}
+
 function overviewView() {
   const inv = state.inventory || {};
   const user = inv.user || { configFiles: [], others: [], skills: [], extensions: [], plugins: [] };
@@ -286,6 +299,7 @@ function overviewView() {
   sheet.append(h('header', { class: 'sheet-head' },
     h('h1', { text: src.kind === 'repo' ? spec : src.name.split(/[\\/]/).filter(Boolean).pop() || spec }),
     h('p', { class: 'meta', text: (src.kind === 'repo' ? 'GitHub repo' : 'Local path ' + src.name) + (src.importedSha ? ' · commit ' + src.importedSha.slice(0, 7) : '') + ' · imported ' + relTime(src.importedAt) + provMeta }),
+    ...provisionFailureView(prov),
     h('p', { class: 'totals' },
       plural(rules.length, 'rule'), ', ', plural(user.skills.length, 'skill'), ', ', plural(user.plugins.length, 'plugin'), ', ',
       plural(projects.named.length, 'project'), ', and ', plural(files.length, 'file'), ' in total. Pick a file in the index to edit it, or ',

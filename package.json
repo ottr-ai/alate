@@ -6,6 +6,7 @@
   "license": "MIT",
   "scripts": {
     "start": "node server.ts",
+    "test": "node server.test.mjs",
     "typecheck": "tsc --noEmit",
     "test:mutation": "stryker run && stryker run stryker.cli.config.mjs"
   },
