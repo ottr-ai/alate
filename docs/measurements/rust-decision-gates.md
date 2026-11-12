@@ -12,11 +12,14 @@ are not product requirements and set no service-level target.
 
 | Gate | Threshold | Measured | Verdict |
 | --- | --- | --- | --- |
-| Alate 1 — provision cost | own CPU above 1 s and above 30% of repeated provision wall time reopens native planning | warm repeated provision: own CPU 5.4–5.7 s of an 8.7–8.8 s wall (about 64%); cold provision: 3.7 s of 12.7 s (29%) | **fail (warm)** — a bounded native planning prototype comparison is on the table, per the gate |
 | Alate 2 — responsiveness after work isolation | health p99 below 100 ms and no host-limit breach during imports and provisions | health p99 46–57 ms, max 53–237 ms across cold, warm, and three-concurrent runs at about 1 GB; peak process-tree RSS 1.3–2.3 GiB against the 8 GiB compose cap | **pass** — bounded Node isolation holds |
+| Alate 1 — provision cost | after safe design changes: own CPU above 1 s and above 30% of repeated provision wall time reopens native planning | warm repeated provision: own CPU 5.4–5.7 s of an 8.7–8.8 s wall (about 64%); cold provision: 3.7 s of 12.7 s (29%) — measured **before** any provision design change | **not evaluable yet** — this card changed no provision-path design, so the gate's precondition is unmet; the numbers are the before-design baseline for the design work first |
 
 A failed gate permits one bounded-component prototype comparison. It never
-approves a rewrite by itself. A passed gate keeps the current stack.
+approves a rewrite by itself. A passed gate keeps the current stack. The
+Alate 1 numbers above do not fail the gate: the gate measures own CPU after
+the safe design changes of ADR-0001 (decision 2), and no such change has
+landed in the provision path yet.
 
 ## Method
 
@@ -70,12 +73,15 @@ approves a rewrite by itself. A passed gate keeps the current stack.
 | own CPU share | 29% | about 64% |
 | tree CPU (incl. scanner children) | 47.4 s | 8.3–8.7 s |
 
-Reads: the repeated (warm) provision fails the gate because Alate's own CPU
-walks, hashes and compares the whole 754 MiB snapshot on every run, and that
-work is 64% of the wall once the scanner is cached. The cold provision sits
-just under the 30% leg (29%). The residual CPU is content verification, not
-dispatch overhead; a native comparison would target the file-guard walker.
-Scanner and security behavior stayed identical throughout.
+Reads: on repeated (warm) provisions Alate's own CPU is above both numeric
+thresholds, but this is the before-design-work number. The residual CPU
+walks, hashes and compares the whole 754 MiB snapshot on every run — the
+repeated-work design cost that ADR-0001 (decision 2) and the report's
+cheaper choices name for the provision path (for example, avoiding duplicate
+layer-rule installation and repeated inventory scans). The gate runs after
+that design work lands; until then these numbers are its baseline, and they
+open no prototype discussion. Scanner and security behavior stayed
+identical throughout.
 
 ## Alate 2 — responsiveness after work isolation (final code)
 

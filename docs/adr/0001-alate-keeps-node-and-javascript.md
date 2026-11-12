@@ -66,7 +66,7 @@ design costs; a language change does not.
 
 - The full-rewrite, FFI and Rust-service options stay rejected until a gate
   fails after the design work.
-- The measured numbers for both gates and their pass/fail verdicts are
-  recorded in `docs/measurements/rust-decision-gates.md`; later measurement
+- The measured numbers for both gates and their verdicts are recorded in
+  `docs/measurements/rust-decision-gates.md`; later measurement
   cards update that file.
 - A decision to port any component supersedes this ADR with a new one.
