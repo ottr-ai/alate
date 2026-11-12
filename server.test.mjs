@@ -1669,6 +1669,21 @@ try {
     assert.ok(ghAuth.every(a => a.authorization === 'Bearer updates-gh-token-3f9'));
     assert.deepEqual(authSeen.filter(a => a.prefix !== 'gh' && a.authorization), [], 'the GitHub key never travels to npm, node or cft');
 
+    // A failed foreign-host import must silence the token too: the clone throws before
+    // any source host is stored, so the checker would otherwise keep riding the stored
+    // PAT to github.com from the older github.com source, the boot check and the timer.
+    {
+      r = await postImport(JSON.stringify({ source: 'https://acme.ghe.com/demo/missing.git', kind: 'repo' }));
+      assert.equal(r.status, 400);
+      assert.equal(JSON.parse(readFileSync(upConfig, 'utf8')).tokenHost, 'acme.ghe.com', 'the attempted foreign host is persisted');
+      const before = authSeen.length;
+      r = await postJson('/api/updates/check', {}, true);
+      assert.equal(r.status, 200);
+      const delta = authSeen.slice(before);
+      assert.ok(delta.some(a => a.prefix === 'gh'), 'the check after a failed foreign import still reached the GitHub fake');
+      assert.deepEqual(delta.filter(a => a.prefix === 'gh' && a.authorization), [], 'a failed foreign-host import silences the stored token');
+    }
+
     // The documented Enterprise import: a <host>/owner/name source with ALATE_GITHUB_HOST
     // unset and a token stored for that host. The token belongs to the source host, so
     // every update check that starts after the import must reach github.com with no

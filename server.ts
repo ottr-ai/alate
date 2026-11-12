@@ -10,7 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { AddressInfo } from 'node:net'
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
-import { cleanupData, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
+import { cleanupData, DEFAULT_GITHUB_HOST, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
 import { applyFileEdit, importSource, isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead, snapshotData } from './web/dashboard.mjs'
 import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
 import { ensureEnvProxy } from './lib/env-proxy.mjs'
@@ -51,6 +51,9 @@ interface Config {
   repo: string | null
   path: string | null
   token: string | null
+  // A repo import named this host: the stored token is presumed to belong to it, so the
+  // update checker never sends the token to github.com. Sticky by design; see noteTokenHost.
+  tokenHost: string | null
   autoUpdate: boolean
   securityFastPath: boolean
   update: UpdateState
@@ -70,10 +73,11 @@ function loadConfig(): Config {
     const cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) as Config
     cfg.autoUpdate ??= false
     cfg.securityFastPath ??= true
+    cfg.tokenHost ??= null
     cfg.update ??= { lastChecked: null, remoteSha: '', provisionedSha: '' }
     return cfg
   } catch {
-    const cfg: Config = { apiKey: null, repo: null, path: null, token: null, autoUpdate: false, securityFastPath: true, update: { lastChecked: null, remoteSha: '', provisionedSha: '' } }
+    const cfg: Config = { apiKey: null, repo: null, path: null, token: null, tokenHost: null, autoUpdate: false, securityFastPath: true, update: { lastChecked: null, remoteSha: '', provisionedSha: '' } }
     saveConfig(cfg)
     return cfg
   }
@@ -466,7 +470,23 @@ function persistDash(): void {
 // Dashboard git calls trust the stored key first, then the process environment.
 const dashToken = (): string | undefined => config.token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
 
+// A repo import named a host other than github.com: the stored token is presumed to
+// belong to that host, so the update checker never sends it to github.com. Recorded
+// before the clone runs, so a failed import (a private repo clone throws before any
+// source host is stored) is remembered too, and it stays sticky across later github.com
+// imports and restarts. The fail-closed cost is only the unauthenticated GitHub rate
+// limit; set ALATE_GITHUB_HOST to the foreign host to use the token there instead.
+function noteTokenHost(spec: string, kind?: string): void {
+  if (kind === 'path') return
+  const parsed = parseDataSpec(spec)
+  if (parsed?.host && parsed.host !== DEFAULT_GITHUB_HOST && config.tokenHost !== parsed.host) {
+    config.tokenHost = parsed.host
+    saveConfig(config)
+  }
+}
+
 function selectSource(spec: string, kind?: string, token = dashToken()): boolean {
+  noteTokenHost(spec, kind)
   const next = importSource(dashState, spec, kind, token, db)
   const changed = dashState.source?.spec !== next.source.spec || dashState.source?.kind !== next.source.kind
   const newCommit = next.source.kind === 'repo' && !!next.source.importedSha && next.source.importedSha !== dashState.source?.importedSha
@@ -526,7 +546,7 @@ function updateCheck(): Promise<void> {
     for (;;) {
       rerunNeeded = false
       try {
-        await checkUpdates(db, { token: dashToken(), securityFastPath: config.securityFastPath, dataRepo: dashState.source ? (dashState.source.kind === 'repo' ? dashState.source.name : dashState.source.spec) : null, dataHost: dashState.source && dashState.source.kind === 'repo' ? (dashState.source.host ?? '') : undefined })
+        await checkUpdates(db, { token: dashToken(), securityFastPath: config.securityFastPath, dataRepo: dashState.source ? (dashState.source.kind === 'repo' ? dashState.source.name : dashState.source.spec) : null, dataHost: config.tokenHost ?? (dashState.source && dashState.source.kind === 'repo' ? (dashState.source.host ?? '') : undefined) })
       } catch (err) {
         console.error(`update check failed: ${redactSecrets((err as Error).message, dashToken())}`)
       }
