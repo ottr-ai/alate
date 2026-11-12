@@ -2614,6 +2614,10 @@ try {
     if (r === 'hang') return;
     // [code, body, 'abort']: send headers and part of the body, then cut the connection.
     if (r?.[2] === 'abort') { res.writeHead(r[0], { 'content-length': '1000' }); return void res.write(String(r[1]), () => setTimeout(() => res.destroy(), 20)); }
+    // [code, body, 'stall']: send headers and part of the body, then hold the connection
+    // open forever (the stalled upstream for body-timeout tests; the section's teardown
+    // runs closeAllConnections).
+    if (r?.[2] === 'stall') { res.writeHead(r[0], { 'content-length': '1000' }); return void res.write(String(r[1])); }
     // [code, body, { header: value ]: extra response headers (rate-limit fixtures).
     res.writeHead(r ? r[0] : 404, {
       'content-type': typeof r?.[1] === 'string' ? 'application/xml' : 'application/json',
@@ -3290,6 +3294,27 @@ try {
       } finally {
         process.env.ALATE_TEST_CISA_BASE = `${upBase}/cisa`;
         process.env.ALATE_TEST_CERTEU_BASE = `${upBase}/certeu`;
+      }
+      // A feed that accepts the request and then stalls mid-body (headers sent, the rest
+      // never comes) must also fail closed: the timeout cap fires while getText reads the
+      // body, and without the chain catch that rejection would poison the memoized alerts
+      // promise and turn every alerts-reading row into an error row.
+      // ALATE_TEST_FETCH_TIMEOUT_MS shortens the cap so this test waits 300 ms, not 15 s.
+      {
+        const savedTimeout = process.env.ALATE_TEST_FETCH_TIMEOUT_MS;
+        try {
+          process.env.ALATE_TEST_FETCH_TIMEOUT_MS = '300';
+          feeds = { cisa: [200, cisaXml.slice(0, 40), 'stall'], eu: [200, euXml] };
+          hits.length = 0;
+          const s = rows(await run(files(['p1'])));
+          assert.deepEqual([s.p1.security?.tier, s.p1.security?.sources, s.p1.target, s.p1.error ?? null],
+            ['A', [], null, null], 'a stalled feed body fails closed to tier A');
+          assert.deepEqual(feedHits().filter(h => h.startsWith('/cisa')), ['/cisa/cybersecurity-advisories/all.xml'],
+            'the stalled CISA feed was fetched exactly once, the poisoned-promise way');
+        } finally {
+          if (savedTimeout === undefined) delete process.env.ALATE_TEST_FETCH_TIMEOUT_MS; else process.env.ALATE_TEST_FETCH_TIMEOUT_MS = savedTimeout;
+          feeds = { cisa: [200, cisaXml], eu: [200, euXml] };
+        }
       }
     }
 
