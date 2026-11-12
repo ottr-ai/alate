@@ -11,8 +11,8 @@ import type { AddressInfo } from 'node:net'
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
 import { DEFAULT_GITHUB_HOST, keepTemp, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
-import { runCleanup, runImport, runSnapshot } from './lib/server-worker.mjs'
-import { applyFileEdit, isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead } from './web/dashboard.mjs'
+import { runCleanup, runEdit, runImport, runSnapshot } from './lib/server-worker.mjs'
+import { isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead } from './web/dashboard.mjs'
 import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
 import { ensureEnvProxy } from './lib/env-proxy.mjs'
 
@@ -110,8 +110,8 @@ if (!config.apiKey) {
 const dbFile = flagValue('--db') ?? join(dirname(CONFIG_FILE), 'alate.db')
 mkdirSync(dirname(dbFile), { recursive: true })
 const db = new DatabaseSync(dbFile)
-// The worker thread writes the same file during imports: a main-thread write that lands
-// inside the worker's transaction waits instead of throwing or blocking on a bare lock.
+// The worker thread writes the same file during imports and edits: a main-thread write that
+// lands inside the worker's transaction waits instead of throwing or blocking on a bare lock.
 db.exec('PRAGMA busy_timeout = 5000')
 if (process.platform !== 'win32') chmodSync(dbFile, 0o600)
 db.exec(`
@@ -121,8 +121,9 @@ db.exec(`
 initUpdates(db)
 
 let running = false
-// One file edit at a time, and never during a provision. In-process edits run synchronously,
-// so `writing` is preventive only; `running` (provision) is the check tests can reach.
+// One file edit at a time, and never during a provision. Edits run in the worker thread, but
+// `writing` still serializes concurrent edit requests in-process; `running` (provision) is the
+// check tests can reach.
 let writing = false
 
 
@@ -501,6 +502,8 @@ let importChain: Promise<unknown> = Promise.resolve()
 // on the worker's write transaction (OTTR-807).
 let importing = false
 let checkDeferred = false
+// True from before an edit dispatch until it settles; update checks treat it like importing because the edit holds the SQLite write lock in the worker.
+let editing = false
 
 async function selectSource(spec: string, kind?: string, token = dashToken()): Promise<boolean> {
   noteTokenHost(spec, kind)
@@ -542,7 +545,7 @@ async function selectSource(spec: string, kind?: string, token = dashToken()): P
 
 // Periodic remote check for a repo source: refresh update state, optionally auto re-import.
 async function dashCheck(): Promise<void> {
-  if (running || importing || dashState.source?.kind !== 'repo') return
+  if (running || importing || editing || dashState.source?.kind !== 'repo') return
   const sha = remoteHead(dashState.source.name, dashState.source.ref, dashToken(), dashState.source.host ?? '')
   dashState.update = { checkedAt: new Date().toISOString(), remoteSha: sha, available: sha !== '' && sha !== dashState.source.importedSha }
   if (sha) config.update.remoteSha = sha
@@ -568,9 +571,9 @@ let rerunNeeded = false
 // never waits for the next timer tick. The promise never rejects, so the
 // fire-and-forget callers stay safe.
 function updateCheck(): Promise<void> {
-  // An import holds the SQLite write lock in the worker: defer exactly one check to
-  // the end of the import instead of blocking the event loop on the busy timeout.
-  if (importing) {
+  // An import or edit holds the SQLite write lock in the worker: defer exactly one check to
+  // the end of the op instead of blocking the event loop on the busy timeout.
+  if (importing || editing) {
     checkDeferred = true
     return updatePromise
   }
@@ -679,8 +682,9 @@ async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) 
   if (running || writing) return reply.code(409).send({ error: running ? 'provision already running' : 'another file write is running' })
   const body = (req.body ?? {}) as FileEditBody
   writing = true
+  editing = true
   try {
-    const res = applyFileEdit(dashState, db, { ...body, delete: del }, dashToken())
+    const res = await runEdit({ dbFile, state: dashState, edit: { ...body, delete: del }, token: dashToken() })
     dashState = res.state
     // Same refresh selectSource does after an import: the repo source now sits on the new commit.
     dashState.update = dashState.source.kind === 'repo'
@@ -702,7 +706,15 @@ async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) 
     // commit or push still changed the stored snapshot.
     if (err && typeof err === 'object' && 'snapshotChanged' in err && err.snapshotChanged === true) void updateCheckAfterChange()
     return clientError(reply, err)
-  } finally { writing = false }
+  } finally {
+    writing = false
+    editing = false
+    // A check that arrived during the edit was deferred: run exactly one now.
+    if (checkDeferred) {
+      checkDeferred = false
+      void updateCheckAfterChange()
+    }
+  }
 }
 
 app.put('/api/file', { bodyLimit: 2 * 1024 * 1024, preHandler: dashGuard }, async (req, reply) => fileEdit(req, reply, false))

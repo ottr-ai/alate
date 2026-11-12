@@ -6578,6 +6578,130 @@ try {
     } finally { await stopServer(delaySrv); }
   }
 
+  {
+    // Edit isolation: a path-source file edit also runs as a worker op, so /health keeps
+    // answering while the commit+push runs, and an update check that arrives during the
+    // edit is deferred exactly like one that arrives during an import.
+    const editDelayCfg = join(tmp, 'server-config-edit-delay.json');
+    writeFileSync(editDelayCfg, JSON.stringify({ apiKey: null }));
+    // Own tiny fixture: a git work tree with a bare upstream, so the edit can commit and push.
+    const editDelaySeed = join(tmp, 'edit-delay-seed');
+    const editDelayBare = join(tmp, 'edit-delay-bare.git');
+    const editDelaySource = join(tmp, 'edit-delay-source');
+    mkdirSync(editDelaySeed, { recursive: true });
+    writeFileSync(join(editDelaySeed, 'notes.md'), 'seed notes\n');
+    assert.equal(git(['init', '-q', '-b', 'main', editDelaySeed]).status, 0);
+    git(['-C', editDelaySeed, 'config', 'user.name', 't']);
+    git(['-C', editDelaySeed, 'config', 'user.email', 't@t']);
+    assert.equal(git(['-C', editDelaySeed, 'add', '-A']).status, 0);
+    assert.equal(git(['-C', editDelaySeed, 'commit', '-qm', 'seed']).status, 0);
+    assert.equal(git(['init', '-q', '--bare', '-b', 'main', editDelayBare]).status, 0);
+    assert.equal(git(['-C', editDelaySeed, 'push', '-q', editDelayBare, 'main']).status, 0);
+    assert.equal(git(['clone', '-q', editDelayBare, editDelaySource]).status, 0);
+    git(['-C', editDelaySource, 'config', 'user.name', 't']);
+    git(['-C', editDelaySource, 'config', 'user.email', 't@t']);
+    const editDelaySrv = spawnServer(['--port', '0', '--config', editDelayCfg, '--db', join(tmp, 'state-edit-delay.db')], { ...testServerEnv, ALATE_TEST_WORKER_DELAY_MS: '1500' });
+    try {
+      const { apiKey: editDelayKey, base: editDelayBase } = await awaitStartup(editDelaySrv);
+      const editAuth = { 'Content-Type': 'application/json', Authorization: `Bearer ${editDelayKey}` };
+      // The import eats one worker delay too: it must be settled before the hash read below.
+      const started = Date.now();
+      const importRes = await fetch(new URL(`${editDelayBase}/api/import`), { method: 'POST', headers: editAuth, body: JSON.stringify({ source: editDelaySource }) });
+      assert.ok(Date.now() - started >= 1000, 'the worker delay held the import open');
+      const importText = await importRes.text();
+      assert.equal(importRes.status, 200, `delayed import failed: ${importText}`);
+      assert.equal(JSON.parse(importText).ok, true);
+      const before = await (await fetch(new URL('/api/file?path=notes.md', editDelayBase), { headers: { Authorization: `Bearer ${editDelayKey}` } })).json();
+      const moved = `${before.content}edited on the worker\n`;
+      let deferredCheck = null;
+      const { result: editRes, times, elapsed } = await probeHealthWhile(editDelayBase, () => {
+        const editP = fetch(new URL('/api/file', editDelayBase), { method: 'PUT', headers: editAuth, body: JSON.stringify({ path: 'notes.md', content: moved, base: before.hash, message: 'test: edit through the worker' }) });
+        // Fired while the edit holds the worker: the route defers it, it must not block or 500.
+        deferredCheck = fetch(new URL('/api/updates/check', editDelayBase), { method: 'POST', headers: { Authorization: `Bearer ${editDelayKey}` } });
+        return editP;
+      });
+      assert.ok(elapsed >= 1000, 'the worker delay held the edit open');
+      const editText = await editRes.text();
+      assert.equal(editRes.status, 200, `the delayed edit failed: ${editText}`);
+      const edit = JSON.parse(editText);
+      assert.equal(edit.ok, true);
+      assert.match(edit.commit, /^[0-9a-f]{40}$/);
+      assert.equal(edit.pushed, true, 'the edit reached the bare upstream');
+      assertFastProbes(times, 'the file edit');
+      const deferredRes = await deferredCheck;
+      const deferredText = await deferredRes.text();
+      assert.equal(deferredRes.status, 200, `the deferred update check must not 500: ${deferredText}`);
+      const deferredAt = JSON.parse(deferredText).checkedAt;
+      // The check that arrived during the edit ran after it settled: a fresh checkedAt.
+      const check2 = await fetch(new URL('/api/updates/check', editDelayBase), { method: 'POST', headers: { Authorization: `Bearer ${editDelayKey}` } });
+      assert.equal(check2.status, 200);
+      const check2Body = await check2.json();
+      assert.ok(check2Body.checkedAt, 'the post-edit check reports a checkedAt');
+      assert.ok(String(check2Body.checkedAt) > String(deferredAt ?? ''), 'the deferred check ran after the edit settled, not before');
+      const after = await (await fetch(new URL('/api/file?path=notes.md', editDelayBase), { headers: { Authorization: `Bearer ${editDelayKey}` } })).json();
+      assert.equal(after.content, moved, 'snapshot re-imported after the edit');
+    } finally { await stopServer(editDelaySrv); }
+  }
+
+  {
+    // Route contract across the worker hop: a path-source edit whose push fails answers
+    // 502 with the client-safe text while the snapshot was still re-imported and the check
+    // re-ran, and a vanished source dir answers 400, as the in-loop editor always did.
+    const failCfg = join(tmp, 'server-config-edit-fail.json');
+    writeFileSync(failCfg, JSON.stringify({ apiKey: null }));
+    const failSeed = join(tmp, 'fail-edit-seed');
+    const failBare = join(tmp, 'fail-edit-bare.git');
+    const failSource = join(tmp, 'fail-edit-source');
+    mkdirSync(failSeed, { recursive: true });
+    writeFileSync(join(failSeed, 'notes.md'), 'seed notes\n');
+    assert.equal(git(['init', '-q', '-b', 'main', failSeed]).status, 0);
+    git(['-C', failSeed, 'config', 'user.name', 't']);
+    git(['-C', failSeed, 'config', 'user.email', 't@t']);
+    assert.equal(git(['-C', failSeed, 'add', '-A']).status, 0);
+    assert.equal(git(['-C', failSeed, 'commit', '-qm', 'seed']).status, 0);
+    assert.equal(git(['init', '-q', '--bare', '-b', 'main', failBare]).status, 0);
+    assert.equal(git(['-C', failSeed, 'push', '-q', failBare, 'main']).status, 0);
+    assert.equal(git(['clone', '-q', failBare, failSource]).status, 0);
+    git(['-C', failSource, 'config', 'user.name', 't']);
+    git(['-C', failSource, 'config', 'user.email', 't@t']);
+    const failSrv = spawnServer(['--port', '0', '--config', failCfg, '--db', join(tmp, 'state-edit-fail.db')], testServerEnv);
+    try {
+      const { apiKey: failKey, base: failBase } = await awaitStartup(failSrv);
+      const failAuth = { 'Content-Type': 'application/json', Authorization: `Bearer ${failKey}` };
+      const failPut = async b => fetch(new URL('/api/file', failBase), { method: 'PUT', headers: failAuth, body: JSON.stringify(b) });
+      const failGet = async route => fetch(new URL(route, failBase), { headers: { Authorization: `Bearer ${failKey}` } });
+      const failCheck = () => fetch(new URL('/api/updates/check', failBase), { method: 'POST', headers: { Authorization: `Bearer ${failKey}` } });
+      let fr = await fetch(new URL(`${failBase}/api/import`), { method: 'POST', headers: failAuth, body: JSON.stringify({ source: failSource }) });
+      assert.equal(fr.status, 200, JSON.stringify(await fr.json()));
+      // Case A: the upstream is unreachable, so the push fails after the commit -> 502,
+      // but the snapshot was still re-imported and the check re-ran (snapshotChanged).
+      const baselineCheck = await (await failCheck()).json();
+      assert.ok(baselineCheck.checkedAt, 'the baseline check reports a checkedAt');
+      const updatesBefore = await (await failGet('/api/updates')).json();
+      assert.equal(updatesBefore.checkedAt, baselineCheck.checkedAt, 'the served board shows the settled check');
+      // The clone tracks the bare remote; repoint origin where no repository can live.
+      assert.equal(git(['-C', failSource, 'remote', 'set-url', 'origin', join(tmp, 'no-such-alate-remote')]).status, 0);
+      const notes = await (await failGet('/api/file?path=notes.md')).json();
+      fr = await failPut({ path: 'notes.md', content: `${notes.content}edited line\n`, base: notes.hash, message: 'test: push fails through the worker' });
+      assert.equal(fr.status, 502);
+      const pushErr = (await fr.json()).error;
+      assert.ok(pushErr.includes('git push failed'), pushErr);
+      const stored = await (await failGet('/api/file?path=notes.md')).json();
+      assert.equal(stored.content, `${notes.content}edited line\n`, 'snapshot re-imported even though the push failed (the committed edit stays in the tree)');
+      await waitFor(async () => String((await (await failGet('/api/updates')).json()).checkedAt) > String(updatesBefore.checkedAt ?? ''), 20_000);
+      assert.ok(String((await (await failGet('/api/updates')).json()).checkedAt) > String(updatesBefore.checkedAt ?? ''), 'the failed push still re-ran the check');
+      // Case B: a source dir that vanished after the import refuses with the same 400.
+      const goneDir = join(tmp, 'fail-edit-source-gone');
+      renameSync(failSource, goneDir);
+      try {
+        const ghost = await (await failGet('/api/file?path=notes.md')).json();
+        fr = await failPut({ path: 'notes.md', content: 'late\n', base: ghost.hash, message: 'test: source dir gone' });
+        assert.equal(fr.status, 400);
+        assert.ok((await fr.json()).error.includes('no local data repo at'));
+      } finally { renameSync(goneDir, failSource); }
+    } finally { await stopServer(failSrv); }
+  }
+
   // Teardown escalation: a server that ignores SIGTERM (what a mutant can become) must still
   // die, and no process may be left behind. Windows cannot ignore SIGTERM, so the check is
   // POSIX-only.
