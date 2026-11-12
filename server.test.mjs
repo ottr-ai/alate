@@ -740,11 +740,12 @@ try {
   try {
     assert.equal(stored.prepare('SELECT path FROM files WHERE path = ?').get('new-rule.md'), undefined, 'failed import rolls back file writes');
     for (const path of ['../escape.txt', 'C:\\escape.txt', '/escape.txt', 'nested\\escape.txt', 'nested:escape.txt', 'nested/./escape.txt', 'nested//escape.txt', 'nested/../escape.txt', 'nul\0.txt']) {
-      stored.prepare('INSERT INTO files (path, content) VALUES (?, ?)').run(path, new TextEncoder().encode('unsafe'));
+      // A live server's checker holds the write lock for seconds; wait the tick out.
+      await retryOnLocked(() => stored.prepare('INSERT INTO files (path, content) VALUES (?, ?)').run(path, new TextEncoder().encode('unsafe')));
       try {
         r = await postJson('/provision', {}, true);
         assert.equal(r.status, 500, 'stored traversal cannot provision outside the temporary snapshot');
-      } finally { stored.prepare('DELETE FROM files WHERE path = ?').run(path); }
+      } finally { await retryOnLocked(() => stored.prepare('DELETE FROM files WHERE path = ?').run(path)); }
     }
   } finally { stored.close(); }
 
@@ -1667,6 +1668,27 @@ try {
     assert.ok(ghAuth.length > 0, 'the checker authenticated against GitHub');
     assert.ok(ghAuth.every(a => a.authorization === 'Bearer updates-gh-token-3f9'));
     assert.deepEqual(authSeen.filter(a => a.prefix !== 'gh' && a.authorization), [], 'the GitHub key never travels to npm, node or cft');
+
+    // The documented Enterprise import: a <host>/owner/name source with ALATE_GITHUB_HOST
+    // unset and a token stored for that host. The token belongs to the source host, so
+    // every update check that starts after the import must reach github.com with no
+    // Authorization header. Import first, then drain once: one-second checker ticks mean
+    // a run holding the older github.com source can still be in flight, and the drain
+    // retires it before the window opens.
+    {
+      r = await postImport(JSON.stringify({ source: 'https://acme.ghe.com/demo/updates.git' }));
+      assert.equal(r.status, 200, JSON.stringify(await r.json()));
+      r = await postJson('/api/updates/check', {}, true);
+      assert.equal(r.status, 200);
+      const before = authSeen.length;
+      r = await postJson('/api/updates/check', {}, true);
+      assert.equal(r.status, 200);
+      const delta = authSeen.slice(before);
+      assert.ok(delta.some(a => a.prefix === 'gh'), 'the foreign-source check still reached the GitHub fake');
+      assert.deepEqual(delta.filter(a => a.prefix === 'gh' && a.authorization), [], 'a foreign source host sends no token to github.com');
+      r = await postImport(JSON.stringify({ source: 'https://github.com/demo/updates.git' }));
+      assert.equal(r.status, 200, JSON.stringify(await r.json()));
+    }
 
     // Backdate the first-seen records: the cft version and the skill head now clear the age gate.
     await retryOnLocked(() => {
@@ -2792,6 +2814,30 @@ try {
       assert.equal(rows(db).gho1.latest, 'v2.0.0', 'the foreign-host run still checks the row');
       const ghHits = hits.filter(h => h.p.startsWith('/gh/'));
       assert.ok(ghHits.length >= 1 && ghHits.every(h => h.auth === null), 'a foreign-host token rides no GitHub call');
+    }
+
+    // The docs' Enterprise flow: a <host>/owner/name source with ALATE_GITHUB_HOST unset
+    // and a token stored for that host. The github.com API calls still carry no token,
+    // while a github.com source host keeps it.
+    {
+      handler = url => url.pathname === '/gh/repos/fake/gho1/releases' ? [200, [{ tag_name: 'v2.0.0', draft: false, prerelease: false, published_at: old30, html_url: 'o1' }]] : null;
+      const savedHost = process.env.ALATE_GITHUB_HOST;
+      delete process.env.ALATE_GITHUB_HOST;
+      let db;
+      try {
+        hits.length = 0;
+        db = await run({ 'upstreams.json': UP([item('gho1', { check: { type: 'github-release' } })]) }, { dataHost: 'acme.ghe.com' });
+        assert.equal(rows(db).gho1.latest, 'v2.0.0', 'the foreign-source-host run still checks the row');
+        let ghHits = hits.filter(h => h.p.startsWith('/gh/'));
+        assert.ok(ghHits.length >= 1 && ghHits.every(h => h.auth === null), 'a token stored for a foreign source host rides no GitHub call');
+        hits.length = 0;
+        db = await run({ 'upstreams.json': UP([item('gho1', { check: { type: 'github-release' } })]) }, { dataHost: 'github.com' });
+        ghHits = hits.filter(h => h.p.startsWith('/gh/'));
+        assert.ok(ghHits.length >= 1 && ghHits.every(h => h.auth === 'Bearer tok-xyz'), 'a github.com source host keeps the token');
+      } finally {
+        if (savedHost === undefined) delete process.env.ALATE_GITHUB_HOST;
+        else process.env.ALATE_GITHUB_HOST = savedHost;
+      }
     }
 
     // bun.lock is JSONC: comments (with quote and brace lookalikes), trailing commas and a

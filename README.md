@@ -37,7 +37,7 @@ alate provisions an [omp](https://github.com/can1357/oh-my-pi) agent on any mach
 
    The named volumes keep the server key, the SQLite db, and the provisioned omp home across restarts.
 
-4. Open <http://127.0.0.1:4570>, import your repo as `owner/name` — or `<host>/owner/name` when your repo sits on a GitHub Enterprise Cloud tenant (`acme.ghe.com`) or Enterprise Server host — with a GitHub token, and provision.
+4. Open <http://127.0.0.1:4570>, import your repo as `owner/name`, and provision. When your repo sits on a GitHub Enterprise Cloud tenant (`acme.ghe.com`) or an Enterprise Server host, set `ALATE_GITHUB_HOST` to that host before you start the server, then import as `<host>/owner/name`. The token rides only to the `ALATE_GITHUB_HOST` host: without that setting, a private Enterprise clone fails, and the update check queries github.com without a token.
 
 Capture is the prepared way to get a usable setup. Docker Compose is the prepared way to run the server.
 
@@ -129,7 +129,7 @@ The SkillSpector scan gate therefore applies to every provision. A provision nee
 | `sync-user.mjs` | Capture this machine's omp user layer into the repo. | `--home` |
 | `sync-projects.mjs` | Refresh per-project snapshots into the repo. | `--root` |
 
-All install scripts take `--data <dir>` or `--repo <owner/name[@ref]>` (set `GH_TOKEN` for private repos). The repo form also accepts `<host>/owner/name[@ref]` for a GitHub Enterprise Cloud tenant (`acme.ghe.com`) or Enterprise Server host (`git.example.com`), or a full `https://` URL; `ALATE_GITHUB_HOST` is the ambient default host. The token rides only to the configured host: a repo spec on another host clones without it, and the update checker queries github.com without a token unless the configured host is github.com. Capture scripts take `--data <dir>` only.
+All install scripts take `--data <dir>` or `--repo <owner/name[@ref]>` (set `GH_TOKEN` for private repos). The repo form also accepts `<host>/owner/name[@ref]` for a GitHub Enterprise Cloud tenant (`acme.ghe.com`) or Enterprise Server host (`git.example.com`), or a full `https://` URL; `ALATE_GITHUB_HOST` is the ambient default host. The token rides only to the configured host: a repo spec on another host clones without it, and the update checker queries github.com without a token unless the configured host and the repo source host are both github.com. Capture scripts take `--data <dir>` only.
 
 Before any target write or SkillSpector call, `install-user.mjs` checks every source skill directory for a readable `SKILL.md`.
 Each file needs frontmatter at byte 0, a complete closing marker, a non-empty `name` and `description`, and no forbidden hidden characters.

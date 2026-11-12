@@ -68,5 +68,5 @@ A failed step stops this skill. Show the error.
 
 ## 6. Tell the user the next steps
 
-1. Point alate at the repo. Open the dashboard at http://127.0.0.1:4570 and import the repo with a GitHub token: `<host>/owner/name` when the host is not github.com, otherwise `owner/name` plus `ALATE_GITHUB_HOST` set to the host. In Ottr, use Settings -> Alate.
+1. Point alate at the repo. Open the dashboard at http://127.0.0.1:4570 and import the repo with a GitHub token: when the host is not github.com, set `ALATE_GITHUB_HOST` to the host first and import as `<host>/owner/name` — the token rides only to that host; otherwise import as `owner/name`. In Ottr, use Settings -> Alate.
 2. Seed the Ottr board: `docker compose run --rm board-seed --repo <owner/name>`

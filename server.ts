@@ -526,7 +526,7 @@ function updateCheck(): Promise<void> {
     for (;;) {
       rerunNeeded = false
       try {
-        await checkUpdates(db, { token: dashToken(), securityFastPath: config.securityFastPath, dataRepo: dashState.source ? (dashState.source.kind === 'repo' ? dashState.source.name : dashState.source.spec) : null })
+        await checkUpdates(db, { token: dashToken(), securityFastPath: config.securityFastPath, dataRepo: dashState.source ? (dashState.source.kind === 'repo' ? dashState.source.name : dashState.source.spec) : null, dataHost: dashState.source && dashState.source.kind === 'repo' ? (dashState.source.host ?? '') : undefined })
       } catch (err) {
         console.error(`update check failed: ${redactSecrets((err as Error).message, dashToken())}`)
       }
