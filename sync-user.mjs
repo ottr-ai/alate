@@ -8,7 +8,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertSourceInside, checkDestination, normText, parseArgs, resolveDataDir, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, normText, parseArgs, resolveDataDir, toStoredForm, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
 import { SHIPPED_SKILLS_DIR, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
@@ -42,6 +42,10 @@ const ITEMS = [
   '.agents/.skill-lock.json',
   '.agents/skills',
 ];
+// The capture roots: the first segments of ITEMS (.omp, .pi, .agents), the root list
+// toStoredForm matches absolute paths against; install-user derives the same set from the
+// snapshot's top-level dirs.
+const roots = new Set(ITEMS.map(item => item.split('/')[0]));
 const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
 // No item is required: a missing ITEMS entry is 'not present', never an error, because every
 // omp home differs and a fresh one misses most entries. Refusal stays for secrets and
@@ -340,6 +344,14 @@ for (const item of ITEMS) {
     }
     for (let [rel, bytes, origin] of found) {
       const configItem = configOrigins.get(origin); // origin of the bytes, not the path
+      // Absolute paths of either platform form store under the snapshot home before any
+      // gate, so a sync from Windows and from Linux write equal bytes and the gates judge
+      // the stored text.
+      if (rel.endsWith('.json')) {
+        const stored = toStoredForm(rel, bytes, { roots });
+        for (const note of stored.notes) console.log('note: ~/' + note);
+        bytes = stored.bytes;
+      }
       let text = bytes.toString('utf8');
       if (configItem !== undefined && configItem.endsWith('.yml')) {
         // Machine-only content leaves FIRST: deployment settings stay on the target, the

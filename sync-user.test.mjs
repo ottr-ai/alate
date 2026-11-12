@@ -886,6 +886,59 @@ try {
   }
   assert.ok(existsSync(join(rtData4, 'user/omp/agent/skills/custom/SKILL.md')), 'the bridged custom skill still captures');
 
+  // Stored JSON path form (specs/stored-json-path-form.md): every absolute path of either
+  // platform form in a captured .json file stores under the snapshot home /root, so a sync
+  // from Windows and a sync from Linux write equal bytes.
+  const mcpWinDoc = { mcpServers: { x: { command: 'node', args: ['C:\\Users\\domin\\.omp\\plugins\\node_modules\\context-mode\\server.bundle.mjs'] } } };
+  const mcpStoredDoc = { mcpServers: { x: { command: 'node', args: ['/root/.omp/plugins/node_modules/context-mode/server.bundle.mjs'] } } };
+  // Acceptance 1 (equal bytes): capture the same file as a Windows path and as the POSIX
+  // stored path into separate data dirs; both captures write byte-equal output. Fails
+  // while capture keeps the machine bytes: the Windows bytes differ from the POSIX bytes.
+  const homeStoredWin = join(tmp, 'home-stored-win');
+  const homeStoredPosix = join(tmp, 'home-stored-posix');
+  const dataStoredWin = join(tmp, 'data-stored-win');
+  const dataStoredPosix = join(tmp, 'data-stored-posix');
+  mkdirSync(join(homeStoredWin, '.omp/agent'), { recursive: true });
+  mkdirSync(join(homeStoredPosix, '.omp/agent'), { recursive: true });
+  mkdirSync(dataStoredWin); // a capture refuses a missing data dir
+  mkdirSync(dataStoredPosix);
+  writeFileSync(join(homeStoredWin, '.omp/agent/mcp.json'), JSON.stringify(mcpWinDoc, null, 2) + '\n');
+  writeFileSync(join(homeStoredPosix, '.omp/agent/mcp.json'), JSON.stringify(mcpStoredDoc, null, 2) + '\n');
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', homeStoredWin, '--data', dataStoredWin], { encoding: 'utf8' });
+  assert.equal(r2.status, 0, r2.stderr);
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', homeStoredPosix, '--data', dataStoredPosix], { encoding: 'utf8' });
+  assert.equal(r2.status, 0, r2.stderr);
+  const winStored = readFileSync(join(dataStoredWin, 'user/omp/agent/mcp.json'));
+  const posixStored = readFileSync(join(dataStoredPosix, 'user/omp/agent/mcp.json'));
+  assert.ok(winStored.equals(posixStored), 'a Windows capture and a POSIX capture must store equal bytes: the Windows capture keeps its C:\\ bytes, which differ from the POSIX bytes');
+  assert.ok(winStored.toString().includes('/root/.omp/plugins/'), `the stored form holds the snapshot home path: ${winStored}`);
+
+  // Acceptance 2 (round trip): stored bytes through forTarget() to either platform, then
+  // through toStoredForm(), give the stored bytes again. The dynamic import is the
+  // contract API surface check: toStoredForm must exist beside forTarget.
+  const storedBytes = Buffer.from(JSON.stringify(mcpStoredDoc, null, 2) + '\n');
+  const { forTarget, toStoredForm } = await import('./lib/data.mjs');
+  for (const [targetHome, platform] of [['C:\\Users\\domin', 'win32'], ['/root', 'linux']]) {
+    const installed = forTarget('omp/agent/mcp.json', storedBytes, { home: targetHome, platform, roots: new Set(['.omp']) });
+    if (platform === 'win32') assert.ok(!installed.bytes.equals(storedBytes), 'the Windows install re-roots the stored path at the Windows home');
+    const recaptured = toStoredForm('.omp/agent/mcp.json', installed.bytes, { roots: new Set(['.omp']) });
+    assert.ok(recaptured.bytes.equals(storedBytes), `the stored form round trips through a ${platform} install`);
+  }
+
+  // Acceptance 3 (a path outside the known roots stores without a change): absolute but
+  // no known root segment, so the capture writes the input bytes exactly, no rewrite.
+  const outsideDoc = { mcpServers: { x: { command: '/usr/bin/node', args: ['/usr/local/share/tools/server.mjs'] } } };
+  const outsideBytes = Buffer.from(JSON.stringify(outsideDoc, null, 2) + '\n');
+  const homeStoredOutside = join(tmp, 'home-stored-outside');
+  const dataStoredOutside = join(tmp, 'data-stored-outside');
+  mkdirSync(join(homeStoredOutside, '.omp/agent'), { recursive: true });
+  mkdirSync(dataStoredOutside);
+  writeFileSync(join(homeStoredOutside, '.omp/agent/mcp.json'), outsideBytes);
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', homeStoredOutside, '--data', dataStoredOutside], { encoding: 'utf8' });
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.ok(readFileSync(join(dataStoredOutside, 'user/omp/agent/mcp.json')).equals(outsideBytes),
+    'a path outside the known roots stores byte for byte');
+
   // Property checks (fuzz tier via forAll in lib/data.mjs). Gate: 200 runs, fixed seed
   // 42; PROP_RUNS=<n> re-seeds randomly for the review deep tier.
   {
