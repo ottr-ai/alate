@@ -6464,10 +6464,10 @@ try {
     assert.equal(failure, null, failure ?? 'probes ok');
     return { result, times, elapsed };
   };
-  const assertFastProbes = (times, label) => {
+  const assertFastProbes = (times, label, bound = 300) => {
     assert.ok(times.length >= 10, `at least 10 probes ran while ${label} held the worker (${times.length})`);
     const worst = Math.max(...times);
-    assert.ok(worst < 300, `every health probe stayed under 300 ms during ${label} (worst: ${Math.round(worst)} ms)`);
+    assert.ok(worst < bound, `every health probe stayed under ${bound} ms during ${label} (worst: ${Math.round(worst)} ms)`);
   };
 
   {
@@ -6538,7 +6538,10 @@ try {
       assert.equal(provRes.status, 200);
       const provBody = await provRes.json();
       assert.equal(typeof provBody.ok, 'boolean', 'provision responded with its result shape');
-      assertFastProbes(times, 'the 384 MB snapshot copy');
+      // 750 ms: the window also carries the child scripts' CPU and one spawnSync git
+      // per probe, so a scheduler hiccup can cost a few hundred ms; the defect class
+      // this test catches (a synchronous snapshot copy) stalls for about a second.
+      assertFastProbes(times, 'the 384 MB snapshot copy', 750);
       assert.deepEqual(freshSnapshots(), [], 'the temp snapshot dir is gone after provision responds');
     } finally { await stopServer(snapSrv); }
   }

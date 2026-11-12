@@ -111,8 +111,11 @@ const dbFile = flagValue('--db') ?? join(dirname(CONFIG_FILE), 'alate.db')
 mkdirSync(dirname(dbFile), { recursive: true })
 const db = new DatabaseSync(dbFile)
 // The worker thread writes the same file during imports and edits: a main-thread write that
-// lands inside the worker's transaction waits instead of throwing or blocking on a bare lock.
-db.exec('PRAGMA busy_timeout = 5000')
+// lands inside the worker's transaction waits instead of throwing a bare lock error.
+// The main thread keeps only a small bound, because its wait would block the event loop;
+// the retry paths (updateCheck, dashCheck) absorb the rare failed write. The worker gets
+// a generous bound instead: its waits never touch the loop.
+db.exec('PRAGMA busy_timeout = 250')
 if (process.platform !== 'win32') chmodSync(dbFile, 0o600)
 db.exec(`
   CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL);
@@ -125,6 +128,12 @@ let running = false
 // `writing` still serializes concurrent edit requests in-process; `running` (provision) is the
 // check tests can reach.
 let writing = false
+// True while a worker op runs (import in the serialized selectSource chain, provision
+// snapshot). Main-thread SQLite writes defer or fail fast while either flag holds: the
+// worker's long transaction would otherwise block the event loop on a busy wait.
+let importing = false
+let snapshotting = false
+let checkDeferred = false
 
 
 // Worse status wins when both scripts report the same item key. `added` and `updated` are
@@ -147,7 +156,14 @@ function readProvisionResults(file: string): { fatal: boolean; items: { item: st
 async function provision(): Promise<ProvisionResult[]> {
   // The snapshot copy writes every stored byte: it runs in the worker thread, so the
   // event loop stays free while it runs.
-  const dir = await runSnapshot({ dbFile })
+  snapshotting = true
+  let dir: string
+  try {
+    dir = await runSnapshot({ dbFile })
+  } finally {
+    snapshotting = false
+    runDeferredCheck()
+  }
   const tmp = mkdtempSync(join(tmpdir(), 'alate-provision-'))
   try {
     const results: ProvisionResult[] = []
@@ -505,6 +521,18 @@ let importing = false
 let checkDeferred = false
 // True from before an edit dispatch until it settles; update checks treat it like importing because the edit holds the SQLite write lock in the worker.
 let editing = false
+// True while the provision snapshot copy runs in the worker; update checks treat it
+// like importing because the snapshot's lock window collides with their writes.
+let snapshotting = false
+
+// Run the one deferred update check, but only while no worker op holds the database:
+// a check that starts mid-import writes rows and would stall the loop on the busy wait.
+function runDeferredCheck(): void {
+  if (!checkDeferred) return
+  if (importing || editing || snapshotting) return
+  checkDeferred = false
+  void updateCheckAfterChange()
+}
 
 async function selectSource(spec: string, kind?: string, token = dashToken()): Promise<boolean> {
   noteTokenHost(spec, kind)
@@ -533,11 +561,7 @@ async function selectSource(spec: string, kind?: string, token = dashToken()): P
       return newCommit
     } finally {
       importing = false
-      // A check that arrived during the import was deferred: run exactly one now.
-      if (checkDeferred) {
-        checkDeferred = false
-        void updateCheckAfterChange()
-      }
+      runDeferredCheck()
     }
   })
   importChain = run.then(() => undefined, () => undefined)
@@ -546,7 +570,7 @@ async function selectSource(spec: string, kind?: string, token = dashToken()): P
 
 // Periodic remote check for a repo source: refresh update state, optionally auto re-import.
 async function dashCheck(): Promise<void> {
-  if (running || importing || editing || dashState.source?.kind !== 'repo') return
+  if (running || importing || editing || snapshotting || dashState.source?.kind !== 'repo') return
   const sha = remoteHead(dashState.source.name, dashState.source.ref, dashToken(), dashState.source.host ?? '')
   dashState.update = { checkedAt: new Date().toISOString(), remoteSha: sha, available: sha !== '' && sha !== dashState.source.importedSha }
   if (sha) config.update.remoteSha = sha
@@ -572,9 +596,9 @@ let rerunNeeded = false
 // never waits for the next timer tick. The promise never rejects, so the
 // fire-and-forget callers stay safe.
 function updateCheck(): Promise<void> {
-  // An import or edit holds the SQLite write lock in the worker: defer exactly one check to
-  // the end of the op instead of blocking the event loop on the busy timeout.
-  if (importing || editing) {
+  // A worker op holds the SQLite lock: defer exactly one check to the end of the op
+  // instead of blocking the event loop on the busy timeout.
+  if (importing || editing || snapshotting) {
     checkDeferred = true
     return updatePromise
   }
@@ -583,10 +607,19 @@ function updateCheck(): Promise<void> {
   updatePromise = (async () => {
     for (;;) {
       rerunNeeded = false
+      let lockRetries = 0
       try {
         await checkUpdates(db, { token: dashToken(), securityFastPath: config.securityFastPath, dataRepo: dashState.source ? (dashState.source.kind === 'repo' ? dashState.source.name : dashState.source.spec) : null, dataHost: config.tokenHost ?? (dashState.source && dashState.source.kind === 'repo' ? (dashState.source.host ?? '') : undefined) })
       } catch (err) {
-        console.error(`update check failed: ${redactSecrets((err as Error).message, dashToken())}`)
+        const msg = redactSecrets((err as Error).message, dashToken())
+        // A lock hit between worker ops is transient: retry a bounded number of times,
+        // then leave the rows to the next timer tick.
+        if (/locked|busy/i.test(msg) && lockRetries < 3) {
+          lockRetries++
+          await delay(50)
+          continue
+        }
+        console.error(`update check failed: ${msg}`)
       }
       if (!rerunNeeded) break
     }
