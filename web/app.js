@@ -383,11 +383,12 @@ function overviewView() {
     projects.contextFiles.length ? h('p', { class: 'note', text: 'Context files captured per project: ' + projects.contextFiles.join(', ') + '.' }) : null,
     ...(projectBlocks.length ? projectBlocks : [h('p', { class: 'note', text: 'No projects in projects/projects.json.' })])));
 
-  // No failure may be invisible: a failed item whose key matched no row above (a worker
-  // list, or a per-server key with no mcp.json row) is listed here with its status and
-  // report (specs/provision-item-by-item.md).
-  const unshown = prov ? prov.items.filter((i) => (i.status === 'rejected' || i.status === 'no-origin') && !claimed.has(i.item)) : [];
-  if (unshown.length) sheet.append(part('Failed items not shown above', String(unshown.length),
+  // Every key that matched no row above (a worker list, the plugins item, or a
+  // per-server key with no mcp.json row) is listed here with its status, failed ones
+  // alert-styled with their report, so no item is invisible
+  // (specs/provision-item-by-item.md).
+  const unshown = prov ? prov.items.filter((i) => !claimed.has(i.item)) : [];
+  if (unshown.length) sheet.append(part('Items not shown above', String(unshown.length),
     h('ul', { class: 'entries' }, unshown.map((i) => {
       const p = provAside(i.item, '');
       const li = entry(null, i.item, 'No row above', p.aside, p.alert);

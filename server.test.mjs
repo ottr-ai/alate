@@ -5551,12 +5551,13 @@ try {
         ok: false,
         items: [
           { item: 'a.md', status: 'installed', rule: null, at: null },
-          { item: 'user/omp/agent/config.yml', status: 'unchanged', rule: null, at: null },
+          { item: 'user/omp/agent/config.yml', status: 'rejected', rule: 'RULE-FRONTMATTER', at: 'config.yml:3', report: 'config.yml:3: description line is missing' },
           { item: 'user/omp/agent/mcp.json', status: 'unchanged', rule: null, at: null },
           { item: 'user/omp/agent/mcp.json "mcp-server"', status: 'rejected', rule: 'MCP-SECRET', at: 'mcp.json:7', report: 'env block carries GITHUB_TOKEN' },
           { item: 'user/omp/agent/mcp.json "safe-server"', status: 'installed', rule: null, at: null },
           { item: 'user/omp/agent/skills/demo', status: 'installed', rule: null, at: null },
           { item: 'workers/ottr/apt.txt', status: 'no-origin', rule: null, at: null },
+          { item: 'workers/demo/requirements.txt', status: 'installed', rule: null, at: null },
         ],
       },
       updates: { updates: [], checkedAt: new Date().toISOString() },
@@ -5594,14 +5595,18 @@ try {
       const flat80 = (el, out = []) => { out.push(el); for (const c of el.children || []) flat80(c, out); return out; };
       const nodes80 = flat80(galley80.children[0]);
       const part80 = (label) => nodes80.find((e) => e.attrs && e.attrs['aria-label'] === label);
-      // The meta line still counts both failures.
+      // The meta line still counts the failures.
       const meta80 = nodes80.find((e) => e.attrs && e.attrs.class === 'meta');
-      assert.ok(meta80 && meta80.textContent.includes(', 2 failed'), 'the meta line counts the two failed items');
-      // Exact-key rows keep working: the rule row shows its own item status.
+      assert.ok(meta80 && meta80.textContent.includes(', 3 failed'), 'the meta line counts the three failed items');
+      // Exact-key rows keep working: the rule row shows its own item status, and a failed
+      // exact-key row carries alert aside and report on its own row.
       assert.ok(flat80(part80('Rules')).some((e) => e.attrs && e.attrs.class === 'aside' && e.textContent === '120 B · installed'), 'the rule row still shows its exact-key status');
-      // The mcp.json row owns the per-server items: name, status, and report per server.
       const user80 = part80('User layer');
       assert.ok(user80, 'the User layer part rendered');
+      const configRow80 = flat80(user80).find((e) => e.tag === 'li' && e.children.length && e.children[0].textContent === 'omp/agent/config.yml');
+      assert.ok(configRow80, 'the config.yml config row rendered');
+      assert.ok(flat80(configRow80).some((e) => e.attrs && e.attrs.class === 'aside alert' && e.textContent === 'rejected: RULE-FRONTMATTER at config.yml:3'), 'the failed exact-key config row carries its alert status');
+      assert.ok(flat80(configRow80).some((e) => e.tag === 'pre' && e.textContent === 'config.yml:3: description line is missing'), 'the failed exact-key row shows its report');
       const mcpRow80 = flat80(user80).find((e) => e.tag === 'li' && e.children.length && e.children[0].textContent === 'omp/agent/mcp.json');
       assert.ok(mcpRow80, 'the mcp.json config row rendered');
       const inRow80 = flat80(mcpRow80);
@@ -5610,12 +5615,14 @@ try {
       const report80 = inRow80.find((e) => e.tag === 'details' && e.attrs.class === 'report');
       assert.ok(report80 && flat80(report80).some((e) => e.tag === 'pre' && e.textContent === 'env block carries GITHUB_TOKEN'), 'the failed server report shows in the row details block');
       assert.ok(inRow80.some((e) => e.textContent === '"safe-server"') && inRow80.some((e) => e.attrs && e.attrs.class === 'aside' && e.textContent === 'installed'), 'the passing server shows its installed status without alert styling');
-      // Failed keys that match no row are listed with their status, and only those.
-      const rest80 = part80('Failed items not shown above');
-      assert.ok(rest80, 'the fallback part lists failed keys with no row');
+      // Every key that matched no row above is listed with its status, and only those:
+      // the fallback holds ok items too, and no claimed key leaks in.
+      const rest80 = part80('Items not shown above');
+      assert.ok(rest80, 'the fallback part lists the keys with no row');
       const restText80 = rest80.textContent;
-      assert.ok(restText80.includes('workers/ottr/apt.txt') && restText80.includes('no origin'), 'the unmatched worker-list item shows with its status');
-      for (const claimed of ['a.md', 'user/omp/agent/skills/demo', 'user/omp/agent/mcp.json "mcp-server"', '"safe-server"']) {
+      assert.ok(restText80.includes('workers/ottr/apt.txt') && restText80.includes('no origin'), 'the unmatched worker-list item shows with its failed status');
+      assert.ok(restText80.includes('workers/demo/requirements.txt') && restText80.includes('installed'), 'the unmatched installed worker-list item shows with its status too');
+      for (const claimed of ['a.md', 'user/omp/agent/skills/demo', 'user/omp/agent/mcp.json "mcp-server"', '"safe-server"', 'user/omp/agent/config.yml']) {
         assert.ok(!restText80.includes(claimed), `claimed key not repeated in the fallback list: ${claimed}`);
       }
     } finally {

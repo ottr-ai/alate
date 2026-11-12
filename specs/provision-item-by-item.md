@@ -149,10 +149,11 @@ failure; `provisionedSha` still moves only on `ok`.
   When `ok` is false the overview also shows the danger line "Provision failed"
   with the failing scripts, each output in a details block under the meta line.
 - A per-server MCP item (`user/omp/agent/mcp.json "<name>"`) shows on the `mcp.json`
-  row of the User layer section, with each server's status and report. A failed item
-  whose key matches no row above (a worker list, or a per-server key with no
-  `mcp.json` row) is listed with its status and report under "Failed items not shown
-  above", so no failure is invisible.
+  row of the User layer section, with each server's status and report. Every item
+  whose key matches no row above (a worker list, the `user/omp/plugins` item, or a
+  per-server key with no `mcp.json` row) is listed with its status under "Items not
+  shown above" — failed ones alert-styled, with the report in a details block — so
+  no item is invisible.
 
 ## Acceptance checks (tests that fail before the change)
 
