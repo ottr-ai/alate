@@ -15,9 +15,9 @@ import { applyFileEdit, importSource, isGitWorkTree, isWritableDir, listStoredFi
 import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
 import { ensureEnvProxy } from './lib/env-proxy.mjs'
 
-// Node parses proxy env vars for fetch at startup only, and only with NODE_USE_ENV_PROXY=1;
-// when a proxy is configured without the flag (host runs; the image sets it), re-spawn so
-// fetch honors the proxy.
+// Node honors proxy env vars for fetch only with proxy support enabled: the built-in
+// http.setGlobalProxyFromEnv() (Node 24.14+) applies them in-process, and on 24.12-24.13
+// lib/env-proxy.mjs re-spawns once with NODE_USE_ENV_PROXY=1 (the image sets it).
 await ensureEnvProxy()
 
 const repoRoot = import.meta.dirname

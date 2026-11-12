@@ -442,13 +442,14 @@ try {
 
   // Child env allowlist: provision script children see only documented keys plus the
   // ALATE_TEST_* family; ALATE_API_KEY never crosses the spawn boundary. The proxy var with
-  // the flag unset forces the env-proxy re-spawn, and provision children then inherit
-  // NODE_USE_ENV_PROXY=1; 127.0.0.1:9 stays closed and no fetch happens in this test.
+  // the flag unset makes the server enable proxy support (the built-in API, or a re-spawn on
+  // 24.12-24.13) and provision children then inherit NODE_USE_ENV_PROXY=1; 127.0.0.1:9 stays
+  // closed and no fetch happens in this test.
   {
     const childEnvCapture = join(tmp, 'child-env-capture.json');
     const childKey = 'k'.repeat(40);
     const childServerEnv = { ...serverEnv, ALATE_API_KEY: childKey, SKILLSPECTOR_BIN: join(tmp, 'trusted-skillspector'), ALATE_TEST_CHILD_ENV: childEnvCapture, HTTP_PROXY: 'http://127.0.0.1:9' };
-    // Force the re-spawn path even where the outer environment pre-sets the flag.
+    // Keep the entry env free of the flag even where the outer environment pre-sets it.
     delete childServerEnv.NODE_USE_ENV_PROXY;
     const envChild = spawnServer(
       ['--port', '0', '--config', join(tmp, 'server-config-childenv.json')],

@@ -41,7 +41,7 @@ Every script needs a data repo, passed with `--data <dir>` (`examples/data`
 works for a dry run).
 - "Verified" means this exact chain passes from the repo root (the same chain
   `.github/workflows/sync.yml` runs):
-  `npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node crlf.test.mjs && node home-guard.test.mjs && node home-guard.test.mjs record && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && node scripts/mutant-run.test.mjs && npx tsc --noEmit && node server.test.mjs && node home-guard.test.mjs check`
+  `npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node crlf.test.mjs && node home-guard.test.mjs && node home-guard.test.mjs record && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && node scripts/mutant-run.test.mjs && npx tsc --noEmit && node lib/env-proxy.test.mjs && node server.test.mjs && node home-guard.test.mjs check`
   The smoke sync passes a throwaway target dir, so the chain never writes the example rule
   into the rules dir of the home that runs it. Each install or sync child in the
   self-checks gets HOME and USERPROFILE of a scratch dir beside the fixtures, and the
