@@ -111,11 +111,11 @@ const dbFile = flagValue('--db') ?? join(dirname(CONFIG_FILE), 'alate.db')
 mkdirSync(dirname(dbFile), { recursive: true })
 const db = new DatabaseSync(dbFile)
 // The worker thread writes the same file during imports and edits: a main-thread write that
-// lands inside the worker's transaction waits instead of throwing a bare lock error.
-// The main thread keeps only a small bound, because its wait would block the event loop;
-// the retry paths (updateCheck, dashCheck) absorb the rare failed write. The worker gets
-// a generous bound instead: its waits never touch the loop.
-db.exec('PRAGMA busy_timeout = 250')
+// lands inside the worker's transaction waits instead of throwing a bare lock error. The
+// bound stays small because a main-thread wait blocks the event loop; a check that collides
+// anyway (one already in flight from boot) fails fast and its bounded retry absorbs it.
+// The worker gets a generous bound instead: its waits never touch the loop.
+db.exec('PRAGMA busy_timeout = 50')
 if (process.platform !== 'win32') chmodSync(dbFile, 0o600)
 db.exec(`
   CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL);
@@ -236,6 +236,7 @@ async function provision(): Promise<ProvisionResult[]> {
     // Same guard cleanupData applied: ALATE_KEEP_TEMP keeps every temp dir for
     // strict no-delete runs. The rm itself runs in the worker thread.
     if (!keepTemp()) await runCleanup(dir)
+    runDeferredCheck()
   }
 }
 
@@ -524,18 +525,22 @@ let editing = false
 // True while the provision snapshot copy runs in the worker; update checks treat it
 // like importing because the snapshot's lock window collides with their writes.
 let snapshotting = false
+// Imports queued or running. The deferred check waits for zero: a check that starts
+// between two queued imports still writes rows inside the next import's transaction.
+let opsQueued = 0
 
-// Run the one deferred update check, but only while no worker op holds the database:
+// Run the one deferred update check, but only while no worker op is running or queued:
 // a check that starts mid-import writes rows and would stall the loop on the busy wait.
 function runDeferredCheck(): void {
   if (!checkDeferred) return
-  if (importing || editing || snapshotting) return
+  if (importing || editing || snapshotting || opsQueued > 0) return
   checkDeferred = false
   void updateCheckAfterChange()
 }
 
 async function selectSource(spec: string, kind?: string, token = dashToken()): Promise<boolean> {
   noteTokenHost(spec, kind)
+  opsQueued++
   const run = importChain.then(async () => {
     importing = true
     try {
@@ -561,6 +566,7 @@ async function selectSource(spec: string, kind?: string, token = dashToken()): P
       return newCommit
     } finally {
       importing = false
+      opsQueued--
       runDeferredCheck()
     }
   })
