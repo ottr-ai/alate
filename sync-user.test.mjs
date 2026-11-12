@@ -891,39 +891,58 @@ try {
   // from Windows and a sync from Linux write equal bytes.
   const mcpWinDoc = { mcpServers: { x: { command: 'node', args: ['C:\\Users\\domin\\.omp\\plugins\\node_modules\\context-mode\\server.bundle.mjs'] } } };
   const mcpStoredDoc = { mcpServers: { x: { command: 'node', args: ['/root/.omp/plugins/node_modules/context-mode/server.bundle.mjs'] } } };
-  // Acceptance 1 (equal bytes): capture the same file as a Windows path and as the POSIX
-  // stored path into separate data dirs; both captures write byte-equal output. Fails
-  // while capture keeps the machine bytes: the Windows bytes differ from the POSIX bytes.
+  // Acceptance 1 (equal bytes): capture the same file as a Windows path, as the POSIX
+  // stored path, and as a POSIX path under a different home (/home/u) into separate data
+  // dirs; all three captures write byte-equal output. Fails while capture keeps the machine
+  // bytes: the Windows bytes differ from the POSIX bytes, and the /home/u capture kills the
+  // missing absolute check — without it the /home/u bytes keep their own prefix.
   const homeStoredWin = join(tmp, 'home-stored-win');
   const homeStoredPosix = join(tmp, 'home-stored-posix');
+  const homeStoredOther = join(tmp, 'home-stored-other');
   const dataStoredWin = join(tmp, 'data-stored-win');
   const dataStoredPosix = join(tmp, 'data-stored-posix');
+  const dataStoredOther = join(tmp, 'data-stored-other');
   mkdirSync(join(homeStoredWin, '.omp/agent'), { recursive: true });
   mkdirSync(join(homeStoredPosix, '.omp/agent'), { recursive: true });
+  mkdirSync(join(homeStoredOther, '.omp/agent'), { recursive: true });
   mkdirSync(dataStoredWin); // a capture refuses a missing data dir
   mkdirSync(dataStoredPosix);
+  mkdirSync(dataStoredOther);
+  const mcpOtherDoc = { mcpServers: { x: { command: 'node', args: ['/home/u/.omp/plugins/node_modules/context-mode/server.bundle.mjs'] } } };
   writeFileSync(join(homeStoredWin, '.omp/agent/mcp.json'), JSON.stringify(mcpWinDoc, null, 2) + '\n');
   writeFileSync(join(homeStoredPosix, '.omp/agent/mcp.json'), JSON.stringify(mcpStoredDoc, null, 2) + '\n');
+  writeFileSync(join(homeStoredOther, '.omp/agent/mcp.json'), JSON.stringify(mcpOtherDoc, null, 2) + '\n');
   r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', homeStoredWin, '--data', dataStoredWin], { encoding: 'utf8' });
   assert.equal(r2.status, 0, r2.stderr);
   r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', homeStoredPosix, '--data', dataStoredPosix], { encoding: 'utf8' });
   assert.equal(r2.status, 0, r2.stderr);
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', homeStoredOther, '--data', dataStoredOther], { encoding: 'utf8' });
+  assert.equal(r2.status, 0, r2.stderr);
   const winStored = readFileSync(join(dataStoredWin, 'user/omp/agent/mcp.json'));
   const posixStored = readFileSync(join(dataStoredPosix, 'user/omp/agent/mcp.json'));
-  assert.ok(winStored.equals(posixStored), 'a Windows capture and a POSIX capture must store equal bytes: the Windows capture keeps its C:\\ bytes, which differ from the POSIX bytes');
+  const otherStored = readFileSync(join(dataStoredOther, 'user/omp/agent/mcp.json'));
+  assert.ok(winStored.equals(posixStored) && winStored.equals(otherStored),
+    'the Windows, /root, and /home/u captures must store equal bytes: the Windows capture keeps its C:\\ bytes and the /home/u capture keeps its /home/u bytes, which differ from the stored bytes');
   assert.ok(winStored.toString().includes('/root/.omp/plugins/'), `the stored form holds the snapshot home path: ${winStored}`);
 
   // Acceptance 2 (round trip): stored bytes through forTarget() to either platform, then
   // through toStoredForm(), give the stored bytes again. The dynamic import is the
   // contract API surface check: toStoredForm must exist beside forTarget.
   const storedBytes = Buffer.from(JSON.stringify(mcpStoredDoc, null, 2) + '\n');
-  const { forTarget, toStoredForm } = await import('./lib/data.mjs');
+  const { CAPTURE_ROOTS, forTarget, toStoredForm } = await import('./lib/data.mjs');
   for (const [targetHome, platform] of [['C:\\Users\\domin', 'win32'], ['/root', 'linux']]) {
-    const installed = forTarget('omp/agent/mcp.json', storedBytes, { home: targetHome, platform, roots: new Set(['.omp']) });
+    const installed = forTarget('omp/agent/mcp.json', storedBytes, { home: targetHome, platform, roots: CAPTURE_ROOTS });
     if (platform === 'win32') assert.ok(!installed.bytes.equals(storedBytes), 'the Windows install re-roots the stored path at the Windows home');
-    const recaptured = toStoredForm('.omp/agent/mcp.json', installed.bytes, { roots: new Set(['.omp']) });
+    const recaptured = toStoredForm('.omp/agent/mcp.json', installed.bytes, { roots: CAPTURE_ROOTS });
     assert.ok(recaptured.bytes.equals(storedBytes), `the stored form round trips through a ${platform} install`);
   }
+
+  // Acceptance 5 (layer prefix): a POSIX path whose prefix is a layer dir stores as the
+  // plain form: the matcher matches the root segment, never the prefix.
+  const layerBytes = Buffer.from(`${JSON.stringify({ mcpServers: { x: { command: 'node', args: ['/root/.alate/layers/65ea69b7e0bd-1/.omp/plugins/x'] } } }, null, 2)}\n`);
+  const layered = toStoredForm('.omp/agent/mcp.json', layerBytes, { roots: CAPTURE_ROOTS });
+  assert.ok(layered.bytes.toString().includes('/root/.omp/plugins/x'), `the layer prefix disappears from the stored form: ${layered.bytes}`);
+  assert.ok(!layered.bytes.toString().includes('.alate/layers/'), 'no layer prefix remains in the stored form');
 
   // Acceptance 3 (a path outside the known roots stores without a change): absolute but
   // no known root segment, so the capture writes the input bytes exactly, no rewrite.

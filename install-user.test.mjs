@@ -9,7 +9,7 @@ import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { tmpdir, homedir, availableParallelism } from 'node:os';
 import { delimiter, dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, remapHomePaths, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
+import { CAPTURE_ROOTS, fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, remapHomePaths, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
 import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-install-'));
@@ -576,6 +576,31 @@ try {
     r = run(['--data', data, '--skip-plugins'], linuxHome);
     assert.match(r.stdout, /0 installed, 21 unchanged/, 'an adapted file counts as unchanged on the rerun');
   }
+
+  // Acceptance clause 4 of specs/stored-json-path-form.md: install moves a path back through
+  // a capture root the snapshot lacks. The snapshot holds no pi/ item, so a root set derived
+  // from the snapshot's top-level dirs misses .pi: the .pi path installs unchanged while the
+  // .omp control moves. The full capture-root list (lib/data.mjs) must decide, as capture
+  // already does. A Linux install leaves stored POSIX forms in place by design (spec), so
+  // the install-level check uses the captured-on-Windows form, which a Linux target re-roots
+  // at the home; the stored form's own direction is the win32 unit check below.
+  const piData = join(tmp, 'pi-root-data');
+  const piHome = join(tmp, 'pi-root-home');
+  mkdirSync(join(piData, 'user/omp/agent'), { recursive: true });
+  writeFileSync(join(piData, 'user/omp/agent/mcp.json'), `${JSON.stringify({ mcpServers: { x: { command: 'node', args: ['C:\\Users\\domin\\.pi\\agent\\pix.json', 'C:\\root\\.omp\\agent\\keep.json'] } } }, null, 2)}\n`);
+  r = run(['--data', piData, '--skip-plugins'], piHome);
+  assert.equal(r.status, 0, r.stderr);
+  const piInstalled = JSON.parse(readFileSync(join(piHome, '.omp/agent/mcp.json'), 'utf8'));
+  assert.equal(piInstalled.mcpServers.x.args[0], join(piHome, '.pi/agent/pix.json'),
+    'a captured .pi path installs rooted at the home even though the snapshot holds no pi/ item');
+  assert.equal(piInstalled.mcpServers.x.args[1], join(piHome, '.omp/agent/keep.json'),
+    'the .omp control still moves');
+  // Clause 4 verbatim in the stored form: a snapshot whose JSON holds /root/.pi/x re-roots
+  // at the Windows home, again through the root the snapshot lacks.
+  const piStored = forTarget('omp/agent/mcp.json', Buffer.from(`${JSON.stringify({ mcpServers: { x: { command: 'node', args: ['/root/.pi/agent/pix.json', '/root/.omp/agent/keep.json'] } } }, null, 2)}\n`), { home: 'C:\\Users\\domin', platform: 'win32', roots: CAPTURE_ROOTS });
+  assert.deepEqual(JSON.parse(piStored.bytes.toString('utf8')).mcpServers.x.args,
+    ['C:\\Users\\domin\\.pi\\agent\\pix.json', 'C:\\Users\\domin\\.omp\\agent\\keep.json'],
+    'the stored /root/.pi form re-roots at the Windows home through the .pi root');
 
   // omp stamps updatedAt on each catalog refresh: that drift alone is no conflict, a changed path is.
   const registry = stamp => `${JSON.stringify({ version: 1, marketplaces: [{ name: 'm', catalogPath: '/x/marketplace.json', updatedAt: stamp }] }, null, 2)}\n`;

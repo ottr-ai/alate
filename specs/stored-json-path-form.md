@@ -27,9 +27,14 @@ Every captured file whose snapshot rel path ends in `.json`: `.omp/agent/mcp.jso
 
 ## Rules
 
-- `lib/data.mjs` holds the one segment matcher (`rootedParts`) and `SNAP_HOME`.
-  `forTarget()` and the new capture-side `toStoredForm()` both use them, so the two
-  directions stay inverse.
+- `lib/data.mjs` holds the one root list (`CAPTURE_ROOTS`), the one segment matcher
+  (`rootedParts`) and `SNAP_HOME`. `forTarget()` and the capture-side `toStoredForm()`
+  use all three, so the two directions stay inverse.
+- `CAPTURE_ROOTS` is the full capture root list (`.omp`, `.pi`, `.agents`), the same on
+  both sides. Install uses the full list, never the top-level dirs present in one
+  snapshot: a home can reference `~/.pi` through another captured file, so a stored
+  `/root/.pi/...` path must move back even when the snapshot holds no `pi/` item. A new
+  top-level capture item needs its segment added here, the same way `ITEMS` needs a line.
 - `forTarget()` stays the only install-side port. With the workers' home `/root`, a
   Linux install passes the stored form through untouched, and a Windows install re-roots
   it at the Windows home. Capture inverts both.
@@ -45,12 +50,18 @@ Every captured file whose snapshot rel path ends in `.json`: `.omp/agent/mcp.jso
 ## Acceptance checks
 
 1. Equal bytes: capture a JSON file whose `.omp` path is a Windows path, then capture
-   the same file with the `/root` POSIX path. Both captures write equal bytes to
-   `user/`. This test fails before the fix.
+   the same file with the `/root` POSIX path, and with a POSIX path under a different
+   home (`/home/u`). All captures write equal bytes to `user/`. This test fails before
+   the fix.
 2. Round trip: stored bytes through `forTarget()` with platform `win32` and home
    `C:\Users\domin`, then through `toStoredForm()`, give the stored bytes again. The
    same holds for `linux` with home `/root`.
 3. A path outside the known roots stores without a change.
+4. Install moves a stored path back through a root the snapshot lacks: a snapshot with
+   no `pi/` top-level item whose JSON holds `/root/.pi/x` installs `<home>/.pi/x` on
+   Windows. This test fails while install derives its roots from the snapshot's dirs.
+5. A POSIX path whose prefix is a layer dir (`/root/.alate/layers/<id>/.omp/x`) stores
+   as `/root/.omp/x`: the matcher matches the root segment, never the prefix.
 
 ## Non-goals
 
