@@ -23,7 +23,13 @@ with `--data`. `examples/data` is a neutral fixture used by tests and CI.
   own self-check against fake homes. Chain runs that share one machine set
   `ALATE_HOME_GUARD_SNAPSHOT` to separate snapshot paths. The guard ignores the
   platform's own runtime files (the omp databases, logs, cache, run, the session
-  stores under `.omp` — context-mode, custom-session-files, snapcompact — the agent
+  stores under `.omp` — context-mode, custom-session-files, snapcompact — the cache
+  and session stores of the browser profiles under `.omp/browser-profiles` (the
+  `Cache`, `Code Cache` and the GPU shader cache trees (`GPUCache`, `GPUPersistentCache`,
+  `GrShaderCache`, `ShaderCache`, `GraphiteDawnCache`, `DawnGraphiteCache`,
+  `DawnWebGPUCache`) plus the
+  `Cookies` and `History` stores with their `-wal` and `-journal` files; the rest of
+  each profile stays watched), the agent
   blob cache `agent/blobs`, the plugin download cache `plugins/cache` (anything
   else under `plugins/` stays checked), the live worker's `memories`, `oauth`,
   `install-id`, `marketplaces.json` and `natives` files, and the two

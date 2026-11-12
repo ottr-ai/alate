@@ -183,7 +183,7 @@ One manifest, one lockfile, no build step. The verified chain:
 npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node crlf.test.mjs && node home-guard.test.mjs && node home-guard.test.mjs record && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && node scripts/mutant-run.test.mjs && npx tsc --noEmit && node lib/env-proxy.test.mjs && node server.test.mjs && node home-guard.test.mjs check
 ```
 
-home-guard.test.mjs brackets the chain: the early record snapshots the home's `.alate`, `.agents` and `.omp`, and the final check fails the run when a path or an mtime there changed. The platform's own runtime files (the omp databases, logs, cache, run, the session stores under `.omp`, and the two bookkeeping files under `.alate`) stay excluded: a live worker writes them during any chain.
+home-guard.test.mjs brackets the chain: the early record snapshots the home's `.alate`, `.agents` and `.omp`, and the final check fails the run when a path or an mtime there changed. The platform's own runtime files (the omp databases, logs, cache, run, the session stores under `.omp`, the cache and session stores of the browser profiles under `.omp/browser-profiles`, and the two bookkeeping files under `.alate`) stay excluded: a live worker writes them during any chain.
 
 `npm test` runs this chain's checks after an `npm ci`.
 

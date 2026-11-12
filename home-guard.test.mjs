@@ -3,12 +3,12 @@
 // `check [snap]` re-walks and fails with one diff line per finding.
 // The platform's own runtime state (the omp databases and hour logs, .omp/cache,
 // .omp/run, the session stores under .omp — context-mode, custom-session-files,
-// snapcompact — the agent blob cache .omp/agent/blobs, the chrome-devtools browser
-// profiles .omp/browser-profiles, the live worker's .omp/plugins/cache downloads
-// (anything else under plugins/ stays checked), .omp/memories, .omp/oauth,
-// .omp/install-id, .omp/marketplaces.json, .omp/natives, and the two bookkeeping
-// files under .alate) is excluded: a live worker writes it during any chain run,
-// and none of it is a test write.
+// snapcompact — the cache and session stores of the browser profiles under
+// .omp/browser-profiles, the live worker's .omp/plugins/cache downloads (anything
+// else under plugins/ stays checked), .omp/memories, .omp/oauth, .omp/install-id,
+// .omp/marketplaces.json, .omp/natives, and the two bookkeeping files under .alate)
+// is excluded: a live worker writes it during any chain run, and none of it is a
+// test write.
 // Exists because a Stryker mutant once dropped install-user.mjs's --home handling, so the
 // script fell back to os.homedir() and deleted files of the shared Ottr worker home.
 import assert from 'node:assert/strict';
@@ -20,13 +20,16 @@ import { fileURLToPath } from 'node:url';
 
 const WATCHED = ['.alate', '.agents', '.omp'];
 // Platform runtime state churns while a live worker runs the chain; those writes are not
-// test writes, so the guard ignores them. That includes the chrome-devtools browser profiles
-// under .omp/browser-profiles: a live browser session rewrites caches and session stores
-// mid-chain. A live worker also rewrites its plugin download cache (.omp/plugins/cache;
-// anything else under plugins/ stays checked), its memories, its oauth state, its native
-// grammar files (.omp/natives), and the install-id and marketplaces.json bookkeeping
-// files. Everything else in the watched dirs — skills, rules, agent context,
-// installed.json, layers, current — is checked for presence and mtime.
+// test writes, so the guard ignores them. Inside the chrome-devtools browser profiles
+// under .omp/browser-profiles that is only the cache trees (Cache, Code Cache, and the
+// GPU shader caches GPUCache, GPUPersistentCache, GrShaderCache, ShaderCache, GraphiteDawnCache,
+// DawnGraphiteCache, DawnWebGPUCache) and the Cookies and History session stores with
+// their -wal and -journal files: a live browser rewrites those mid-chain. A live worker
+// also rewrites its plugin download cache (.omp/plugins/cache; anything else under
+// plugins/ stays checked), its memories, its oauth state, its native grammar files
+// (.omp/natives), and the install-id and marketplaces.json bookkeeping files.
+// Everything else in the watched dirs — skills, rules, agent context, installed.json,
+// layers, current, the rest of a browser profile — is checked for presence and mtime.
 const LIVE = {
   '.alate': rel => rel === 'in-use.json' || rel === 'skillspector-pass.json',
   '.agents': () => false,
@@ -36,7 +39,9 @@ const LIVE = {
     || rel === 'agent/custom-session-files' || rel.startsWith('agent/custom-session-files/')
     || rel === 'snapcompact-savings.jsonl'
     || rel === 'agent/blobs' || rel.startsWith('agent/blobs/')
-    || rel === 'browser-profiles' || rel.startsWith('browser-profiles/')
+    || (/^browser-profiles\//.test(rel)
+      && (/\/(?:Cache|Code Cache|GPUCache|GPUPersistentCache|GrShaderCache|ShaderCache|GraphiteDawnCache|DawnGraphiteCache|DawnWebGPUCache)(?:\/|$)/.test(rel)
+        || /\/(?:Cookies|History)(?:-wal|-journal)?$/.test(rel)))
     || rel === 'plugins/cache' || rel.startsWith('plugins/cache/')
     || rel === 'memories' || rel.startsWith('memories/')
     || rel === 'oauth' || rel.startsWith('oauth/')
@@ -113,6 +118,15 @@ const selfCheck = () => {
   const fake = join(tmp, 'home');
   for (const rel of ['.alate/state.json', '.alate/in-use.json', '.alate/skillspector-pass.json',
     '.omp/browser-profiles/chrome-x/Default/Preferences',
+    '.omp/browser-profiles/chrome-x/Default/Cache/Cache_Data/sqldb',
+    '.omp/browser-profiles/chrome-x/Default/Code Cache/js',
+    '.omp/browser-profiles/chrome-x/Default/GPUCache/data_1',
+    '.omp/browser-profiles/chrome-x/GrShaderCache/data_1',
+    '.omp/browser-profiles/chrome-x/GPUPersistentCache/store',
+    '.omp/browser-profiles/chrome-x/Default/Cookies',
+    '.omp/browser-profiles/chrome-x/Default/Cookies-wal',
+    '.omp/browser-profiles/chrome-x/Default/History',
+    '.omp/browser-profiles/chrome-x/Default/History-journal',
     '.agents/skills/x/SKILL.md', '.omp/agent/rules/r.md', '.omp/agent/agent.db', '.omp/agent/agent.db-wal',
     '.omp/agent/skill-descriptions.db-shm', '.omp/agent/skill-descriptions.db-wal',
     '.omp/logs/omp.231.log', '.omp/context-mode/sessions/s.db-shm', '.omp/agent/custom-session-files/a',
@@ -140,8 +154,15 @@ const selfCheck = () => {
     writeFileSync(join(fake, '.omp/agent/skill-descriptions.db-wal'), 'more\n');
     writeFileSync(join(fake, '.omp/logs/omp.231.log'), 'more\n');
     writeFileSync(join(fake, '.alate/skillspector-pass.json'), '{}\n');
-    writeFileSync(join(fake, '.omp/browser-profiles/chrome-x/Default/Preferences'), '{}\n');
-    utimesSync(join(fake, '.omp/browser-profiles/chrome-x/Default/Preferences'), new Date(), new Date(Date.now() + 9000));
+    // A live browser writes only cache and session stores: the ignored class.
+    writeFileSync(join(fake, '.omp/browser-profiles/chrome-x/Default/Cache/Cache_Data/sqldb-wal'), 'wal\n');
+    utimesSync(join(fake, '.omp/browser-profiles/chrome-x/Default/Cache/Cache_Data/sqldb'), new Date(), new Date(Date.now() + 9000));
+    utimesSync(join(fake, '.omp/browser-profiles/chrome-x/Default/Code Cache/js'), new Date(), new Date(Date.now() + 9000));
+    utimesSync(join(fake, '.omp/browser-profiles/chrome-x/Default/GPUCache/data_1'), new Date(), new Date(Date.now() + 9000));
+    utimesSync(join(fake, '.omp/browser-profiles/chrome-x/GrShaderCache/data_1'), new Date(), new Date(Date.now() + 9000));
+    utimesSync(join(fake, '.omp/browser-profiles/chrome-x/GPUPersistentCache/store'), new Date(), new Date(Date.now() + 9000));
+    writeFileSync(join(fake, '.omp/browser-profiles/chrome-x/Default/Cookies-wal'), 'wal\n');
+    utimesSync(join(fake, '.omp/browser-profiles/chrome-x/Default/History-journal'), new Date(), new Date(Date.now() + 9000));
     writeFileSync(join(fake, '.omp/context-mode/sessions/s.db-shm'), 'more\n');
     writeFileSync(join(fake, '.omp/snapcompact-savings.jsonl'), 'more\n');
     writeFileSync(join(fake, '.omp/agent/blobs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'), 'blob\n');
@@ -169,6 +190,10 @@ const selfCheck = () => {
     const mtime = statSync(join(fake, '.agents/skills/x/SKILL.md')).mtime;
     utimesSync(join(fake, '.agents/skills/x/SKILL.md'), mtime, new Date(mtime.getTime() + 5000));
     assert.notEqual(run('check', fake, snap).status, 0, 'mtime change fails');
+    // A write into a watched browser-profile file fails: only the profile's cache
+    // and session stores are live state.
+    writeFileSync(join(fake, '.omp/browser-profiles/chrome-x/Default/Preferences'), '{}\n');
+    assert.notEqual(run('check', fake, snap).status, 0, 'watched browser-profile write fails');
     // A missing snapshot file fails with a clear message.
     const missing = run('check', fake, join(tmp, 'no-such-snap.json'));
     assert.notEqual(missing.status, 0, 'missing snapshot fails');
@@ -176,12 +201,20 @@ const selfCheck = () => {
     // The recorded snapshot contains the watched entries and no unwatched one.
     const recorded = JSON.parse(readFileSync(snap, 'utf8'));
     assert.deepEqual(Object.keys(recorded).sort(), ['agent', 'agent/rules', 'agent/rules/r.md',
+      'browser-profiles', 'browser-profiles/chrome-x', 'browser-profiles/chrome-x/Default',
+      'browser-profiles/chrome-x/Default/Preferences',
       'plugins', 'plugins/installed', 'plugins/installed/p', 'plugins/installed/p/manifest.json',
       'skills', 'skills/x', 'skills/x/SKILL.md', 'state.json']);
     assert.ok(!('agent/agent.db' in recorded) && !('logs' in recorded) && !('in-use.json' in recorded)
       && !('context-mode' in recorded) && !('snapcompact-savings.jsonl' in recorded)
       && !('plugins/cache' in recorded) && !('memories' in recorded) && !('oauth' in recorded)
-      && !('install-id' in recorded) && !('marketplaces.json' in recorded) && !('natives' in recorded),
+      && !('install-id' in recorded) && !('marketplaces.json' in recorded) && !('natives' in recorded)
+      && !('browser-profiles/chrome-x/Default/Cache' in recorded)
+      && !('browser-profiles/chrome-x/Default/GPUCache' in recorded)
+      && !('browser-profiles/chrome-x/GrShaderCache' in recorded)
+      && !('browser-profiles/chrome-x/GPUPersistentCache' in recorded)
+      && !('browser-profiles/chrome-x/Default/Cookies' in recorded)
+      && !('browser-profiles/chrome-x/Default/History-journal' in recorded),
       'live runtime entries stay out of the snapshot');
     console.log('home-guard ok');
   } finally {
