@@ -7,7 +7,9 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { assertSourceInside, checkDestination, normText, parseArgs, resolveDataDir, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
+import { SHIPPED_SKILLS_DIR, shippedSkills } from './lib/shipped.mjs';
 
 // --repo is a valued option so resolveDataDir can refuse cloning with the capture-specific
 // message; capture takes no flags and no positional arguments.
@@ -206,6 +208,47 @@ for (const item of CONFIG) {
   } catch { /* missing: the item is absent, so nothing aliases it */ }
 }
 
+// The vendored shipped skills (lib/shipped.mjs) install to .agents/skills/<name> on every
+// provision, and the capture must never copy them back into the data repo: a captured copy
+// sits at user/agents/skills/<name> with no recorded origin, so the next provision rejects
+// it — and a gate-rejected copy also suppressed the shipped install, so the round trip
+// deleted the shipped skills from the home (ALAT-124). A name leaves out only when its
+// bytes equal the vendored copy — same file list, byte-identical files; an edited skill
+// still captures, because a machine edit is state the data repo must hold. Computed
+// lazily: a home without .agents/skills never reads the vendored tree. Fail closed, like
+// install-user: with the tree unreadable the shipped set is unknown, and copying every
+// child back is exactly the bug this gate exists to stop, so the capture refuses.
+const toolRoot = dirname(fileURLToPath(import.meta.url));
+let shippedDirs = null;
+let shippedProblem = null;
+const vendoredShipped = () => {
+  if (shippedDirs !== null || shippedProblem !== null) return shippedDirs;
+  try {
+    shippedDirs = new Map(shippedSkills(toolRoot).map(s => [s.name, s.dir]));
+  } catch (err) {
+    shippedProblem = `~/.${SHIPPED_SKILLS_DIR}: the vendored shipped skills tree is missing or unreadable (${err.message}); copying .agents/skills back would capture the shipped skills into the data repo, and a provision with upstreams.json would then delete them from the home`;
+  }
+  return shippedDirs;
+};
+// The vendored skill's files as [rel, bytes], with the same SKIP_DIRS rule as captureDir,
+// so the comparison sees the same file set. A special file (null bytes) or an unreadable
+// tree never compares equal, so the skill captures.
+const vendoredFiles = dir => {
+  const out = [];
+  const visit = (d, sub) => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      const rel = sub ? `${sub}/${entry.name}` : entry.name;
+      const child = join(d, entry.name);
+      if (entry.isDirectory()) visit(child, rel);
+      else if (entry.isFile()) out.push([rel, readFileSync(child)]);
+      else out.push([rel, null]);
+    }
+  };
+  visit(dir, '');
+  return out;
+};
+
 const problems = [];
 const plan = [];
 const summary = [];
@@ -226,7 +269,40 @@ for (const item of ITEMS) {
     }
     const st = statSync(src);
     if (!st.isDirectory() && !st.isFile()) throw new Error(`~/${item}: is not a regular file`);
-    const found = st.isDirectory() ? captureDir(src, item, root) : [[item, readFileSync(src), `${st.dev}:${st.ino}`]];
+    let found = st.isDirectory() ? captureDir(src, item, root) : [[item, readFileSync(src), `${st.dev}:${st.ino}`]];
+    if (item === SHIPPED_SKILLS_DIR && st.isDirectory()) {
+      const shipped = vendoredShipped();
+      if (shippedProblem) problems.push(shippedProblem);
+      if (shipped) {
+        // Group the capture entries under each shipped name; children outside the vendored
+        // set and top-level files keep their entries untouched.
+        const groups = new Map();
+        const kept = [];
+        const prefix = `${SHIPPED_SKILLS_DIR}/`;
+        for (const entry of found) {
+          const rest = entry[0].startsWith(prefix) ? entry[0].slice(prefix.length) : null;
+          const slash = rest === null ? -1 : rest.indexOf('/');
+          const name = slash > 0 ? rest.slice(0, slash) : null;
+          if (name === null || !shipped.has(name)) { kept.push(entry); continue; }
+          if (!groups.has(name)) groups.set(name, []);
+          groups.get(name).push([rest.slice(slash + 1), entry[1], entry]);
+        }
+        const skipped = [];
+        for (const [name, files] of groups) {
+          const byRel = new Map(vendoredFiles(shipped.get(name)));
+          const equal = files.length === byRel.size && files.every(([rel, bytes]) => {
+            const v = byRel.get(rel);
+            return v !== undefined && v !== null && bytes.equals(v);
+          });
+          if (equal) skipped.push(name);
+          else for (const file of files) kept.push(file[2]);
+        }
+        skipped.sort();
+        for (const name of skipped)
+          console.log(`note: user/agents/skills/${name}: the bytes equal the vendored shipped copy; left out of the capture`);
+        found = kept;
+      }
+    }
     for (let [rel, bytes, origin] of found) {
       const configItem = configOrigins.get(origin); // origin of the bytes, not the path
       let text = bytes.toString('utf8');

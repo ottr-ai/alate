@@ -45,11 +45,18 @@ in the same order as for snapshot skills; nothing about them is weaker.
    judged by the structure gate), and the SkillSpector scan gate (same pinned
    scanner, `--no-llm`, the skill's own shipped `.skillspector-baseline.yaml`, same scan
    cache). A gate rejection fails that one skill per item and never stops the others.
-2. A data repo skill of the same name wins: when the snapshot holds any skill folder named
-   like the pin (any `skills/` or `managed-skills/` dir under `user/`, the same set
-   `collectSkillDirs` scans), alate skips the shipped copy for that name and logs the skip
+2. A data repo skill of the same name wins, but only a copy the gates accept: when the
+   snapshot holds a skill folder named like the pin (any `skills/` or `managed-skills/`
+   dir under `user/`, the same set `collectSkillDirs` scans) that passed the origin and
+   structure gates, alate skips the shipped copy for that name and logs the skip
    (`shipped skill <name> skipped: the data repo has its own copy`). The snapshot's install
-   plan already covers the home path.
+   plan already covers the home path. A snapshot copy the origin or structure gate rejected
+   installs nothing, and its rels leave the plan and the manifest, so it never counts as
+   the data repo's own copy: counting it would skip the shipped install and then let the
+   deletion path remove the home's files — one capture round trip disabled every shipped
+   skill (ALAT-124). The skip decision sees the origin and structure verdicts; a snapshot
+   copy that only the later scan gate rejects still suppresses its name here, and the
+   capture rule below keeps the normal round trip from ever creating such a copy.
 3. Otherwise the shipped skill installs under `~/.agents/skills/<name>`, one plan entry per
    file, rel keys `agents/skills/<name>/...` (snapshot spelling, like
    `user/agents/skills/...`). Machine state rules are the snapshot's: an in-place install
@@ -64,6 +71,25 @@ in the same order as for snapshot skills; nothing about them is weaker.
    install-user refuses the whole run before deletions or a layer switch (fatal, exit 1,
    nothing written or deleted). A tree that exists but holds zero folders stays a visible
    note, not an error.
+
+## Capture (sync-user.mjs)
+
+A capture of `.agents/skills` must never copy the shipped skills back into the data repo:
+a captured copy sits at `user/agents/skills/<name>` with no recorded origin, so the next
+provision rejects it — and a rejected copy also suppressed the shipped install, so the
+round trip deleted the shipped files from the home (ALAT-124).
+
+- For each `.agents/skills` child named like a vendored skill, the capture leaves the name
+  out only when its file list and bytes equal the vendored copy, judged with the same
+  SKIP_DIRS rule as the capture walk. A byte change, an extra file, or a missing file
+  counts as an edit, and the edited skill captures: a machine edit is state the data repo
+  must hold.
+- Each left-out name logs
+  `note: user/agents/skills/<name>: the bytes equal the vendored shipped copy; left out of the capture`.
+- The vendored set is computed lazily: a home without `.agents/skills` never reads the
+  vendored tree. A tree that cannot be read refuses the capture (fail closed, like
+  install step 5), because without the shipped set the capture would copy every child
+  back.
 
 ## Update checker (lib/updates.mjs)
 
@@ -90,9 +116,11 @@ Each vendored skill folder gets a row beside the lock-driven skill rows, built a
 
 - `sync.mjs` and the origin gate are unchanged: shipped skills are not data repo items and
   need no `upstreams.json` entry. A data repo may still record an origin for its own copy.
-- The vendored tree is tool content, not snapshot content: the dashboard inventory, the file
-  editor and `sync-user.mjs` never see it. Its absence or unreadability refuses a provision
-  (fail closed, install step 5); it is never provisioned around.
+- The vendored tree is tool content, not snapshot content: the dashboard inventory and the
+  file editor never see it, and it never becomes snapshot content — `sync-user.mjs` reads
+  the vendored bytes only to judge which `.agents/skills` children match them (capture
+  section). Its absence or unreadability refuses a provision (fail closed, install step 5)
+  and refuses a capture of `.agents/skills`; it is never provisioned around.
 - No provision-time network access is added anywhere.
 
 ## Acceptance checks
@@ -118,6 +146,13 @@ Each vendored skill folder gets a row beside the lock-driven skill rows, built a
    `.agents/skills/<name>/SKILL.md` keeps its bytes, and a `--layer` run in the same state
    switches nothing — `.alate/current` stays on the previous layer and no new layer folder
    appears.
+9. The capture round trip: install-user into a fresh home, sync-user capture, install-user
+   again — the capture adds no `user/agents/skills/<name>` for any vendored name and logs
+   the note per left-out name; the second install reports 0 deleted and no skip lines, and
+   every shipped `SKILL.md` keeps the vendored bytes. An edited shipped skill (a byte
+   change, an extra file, or a missing file) captures, and a rejected stale copy in the
+   data repo (no origin) fails only its own item without deleting or skipping the shipped
+   copy.
 
 ## Non-goals
 

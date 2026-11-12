@@ -767,10 +767,15 @@ try {
   };
 
   const current = {};
+  // Which walk contributed each planned rel: 'snapshot' or the vendored shipped dir. The
+  // rel namespace is shared — agents/skills/<name> can hold either source's entries — so
+  // the rejection cleanup below strips only what the rejected dir itself contributed.
+  const relSource = new Map();
   for (const rel of walk(userRoot)) {
     // A skill left out by a gate contributes nothing: no plan entry, no manifest record, no
     // conflict, so its installed copy is deleted later like any path the snapshot dropped.
     if (inRejected(rel, rejectedSkills)) continue;
+    relSource.set(rel, 'snapshot');
     // Snapshot content must resolve inside the snapshot; links escaping it, or cyclic
     // ones, refuse the restore instead of being followed.
     const srcPath = join(userRoot, rel);
@@ -912,7 +917,13 @@ try {
   // are upstream content, never captured machine config, so no forTarget and no
   // remapHomePaths apply.
   const toolRoot = dirname(fileURLToPath(import.meta.url));
-  const snapshotSkillNames = new Set(skillDirs.map(dir => basename(dir)));
+  // Presence-based, but only for a copy the gates so far accept: a rejected snapshot skill
+  // (no origin, structure) installs nothing and its rels leave the plan, the manifest, and
+  // the conflicts, so counting it would suppress the shipped skill here and then let the
+  // deletion path remove the home's copy — one sync-user capture round trip disabled every
+  // shipped skill (ALAT-124). sync-user leaves a name out of the capture only when its
+  // bytes equal the vendored copy, so the normal round trip never creates such a copy.
+  const snapshotSkillNames = new Set(skillDirs.filter(dir => !rejectedSkills.has(dir)).map(dir => basename(dir)));
   const shippedScanDirs = [];
   const shippedDirKey = new Map();
   // Fail closed: shippedSkills throws when the vendored tree is absent or unreadable, and
@@ -978,6 +989,7 @@ try {
     }
     for (const file of walk(vendored)) {
       const rel = `agents/skills/${name}/${file}`;
+      relSource.set(rel, vendored);
       const srcPath = join(vendored, file);
       try {
         assertSourceInside(vendored, srcPath);
@@ -1029,16 +1041,25 @@ try {
       rejectedSkills.add(dir);
     }
     // Drop every rel inside a rejected skill from the plan, the manifest, and the conflicts.
-    const prefixes = [...rejectedSkills].map(dir => shippedDirKey.has(dir)
-      ? `agents/skills/${basename(dir)}`
-      : relative(userRoot, dir).split(sep).join('/'));
-    const relRejected = rel => prefixes.some(p => rel === p || rel.startsWith(`${p}/`));
+    // A rejection strips only the entries its own dir contributed (relSource): a rejected
+    // snapshot copy of a shipped name must never strip the shipped walk's rels of the same
+    // name, or the deletion path below removes the shipped files the home still holds
+    // (ALAT-124); and a scan-rejected shipped copy must never strip an accepted snapshot
+    // copy's rels of the same name.
+    const snapshotPrefixes = [...rejectedSkills].filter(dir => !shippedDirKey.has(dir))
+      .map(dir => relative(userRoot, dir).split(sep).join('/'));
+    const relRejected = rel => {
+      const source = relSource.get(rel);
+      if (source === 'snapshot')
+        return snapshotPrefixes.some(p => rel === p || rel.startsWith(`${p}/`));
+      return source !== undefined && rejectedSkills.has(source);
+    };
     for (let i = plan.length - 1; i >= 0; i--) if (relRejected(plan[i][3].slice('user/'.length))) plan.splice(i, 1);
     for (const rel of Object.keys(current)) if (relRejected(rel)) delete current[rel];
-    conflicts = conflicts.filter(dest => !prefixes.some(p => {
-      const guard = join(home, `.${p}`);
-      return dest === guard || dest.startsWith(`${guard}${sep}`);
-    }));
+    conflicts = conflicts.filter(dest => {
+      const rel = relative(home, dest).split(sep).join('/');
+      return !relRejected(rel.startsWith('.') ? rel.slice(1) : rel);
+    });
   }
   // A path the snapshot dropped: delete the machine copy when it still holds what alate last
   // installed (nobody changed it since), keep it with a note when it changed here, and drop
