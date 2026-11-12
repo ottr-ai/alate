@@ -2610,6 +2610,8 @@ try {
     const url = new URL(req.url, 'http://x');
     hits.push({ p: url.pathname, q: Object.fromEntries(url.searchParams), auth: req.headers.authorization ?? null });
     const r = handler ? handler(url) : null;
+    // 'hang': accept the request and never answer (the stalled upstream for timeout tests).
+    if (r === 'hang') return;
     // [code, body, 'abort']: send headers and part of the body, then cut the connection.
     if (r?.[2] === 'abort') { res.writeHead(r[0], { 'content-length': '1000' }); return void res.write(String(r[1]), () => setTimeout(() => res.destroy(), 20)); }
     // [code, body, { header: value ]: extra response headers (rate-limit fixtures).
@@ -4233,6 +4235,34 @@ try {
         globalThis.fetch = realFetch;
         proxyKeys.forEach((k, i) => { if (savedProxy[i] == null) delete process.env[k]; else process.env[k] = savedProxy[i]; });
         db.close();
+      }
+    }
+
+    // The per-fetch timeout cap: a stalled upstream (the request is accepted, the response
+    // never comes) fails its row with the TimeoutError text once the cap fires instead of
+    // holding the whole check for undici's default 300 s per call. ALATE_TEST_FETCH_TIMEOUT_MS
+    // shortens the cap so this test waits 300 ms, not 15 s.
+    {
+      const savedTimeout = process.env.ALATE_TEST_FETCH_TIMEOUT_MS;
+      const savedProxy = process.env.HTTPS_PROXY;
+      try {
+        process.env.ALATE_TEST_FETCH_TIMEOUT_MS = '300';
+        delete process.env.HTTPS_PROXY;
+        handler = url => url.pathname === '/npm/nslow' ? 'hang' : null;
+        const t0 = Date.now();
+        const db = await run({ 'upstreams.json': UP([item('nslow', { version: '0.0.1', check: { type: 'npm', package: 'nslow' } })]) });
+        const took = Date.now() - t0;
+        assert.equal(rows(db).nslow.error, 'The operation was aborted due to timeout (TimeoutError after 0.3 s)');
+        assert.ok(took < 10_000, `the cap bounds a stalled call instead of undici's 300 s: ${took} ms`);
+        // With a proxy env var set, the timeout text gains the same "proxy?" hint as the
+        // connection-level codes: a black-hole proxy is the likely stall.
+        process.env.HTTPS_PROXY = 'https://user:sekrit@proxy.corp.example:3128';
+        assert.equal(rowErrorText(new DOMException('The operation was aborted due to timeout', 'TimeoutError')),
+          'The operation was aborted due to timeout (TimeoutError after 0.3 s; proxy?)');
+      } finally {
+        if (savedTimeout === undefined) delete process.env.ALATE_TEST_FETCH_TIMEOUT_MS; else process.env.ALATE_TEST_FETCH_TIMEOUT_MS = savedTimeout;
+        if (savedProxy === undefined) delete process.env.HTTPS_PROXY; else process.env.HTTPS_PROXY = savedProxy;
+        handler = null;
       }
     }
 
