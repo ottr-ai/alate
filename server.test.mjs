@@ -6485,7 +6485,7 @@ try {
     try {
       const { apiKey: bulkKey, base: bulkBase } = await awaitStartup(bulkSrv);
       const { result: importRes, times, elapsed } = await probeHealthWhile(bulkBase, () =>
-        fetch(new URL('/api/import', bulkBase), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bulkKey}` }, body: JSON.stringify({ source: bulkSource }) }));
+        fetch(new URL(`${bulkBase}/api/import`), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bulkKey}` }, body: JSON.stringify({ source: bulkSource }) }));
       assert.ok(elapsed >= 500, `the bulk import is heavy enough to have stalled the old loop (${elapsed} ms)`);
       const importText = await importRes.text();
       assert.equal(importRes.status, 200, `bulk import failed: ${importText}`);
@@ -6552,7 +6552,7 @@ try {
     try {
       const { apiKey: delayKey, base: delayBase } = await awaitStartup(delaySrv);
       const started = Date.now();
-      const importP = fetch(new URL('/api/import', delayBase), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${delayKey}` }, body: JSON.stringify({ source: delaySource }) });
+      const importP = fetch(new URL(`${delayBase}/api/import`), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${delayKey}` }, body: JSON.stringify({ source: delaySource }) });
       const [stateR, healthR, checkR] = await Promise.all([
         fetch(new URL('/api/state', delayBase)),
         fetch(new URL('/health', delayBase)),
