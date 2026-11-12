@@ -88,9 +88,10 @@ export default {
   //   the concurrent-write window (fileEdit's running/writing check) is unreachable from a sequential
   //   fetch suite, which serves one origin over one connection.
   // ALAT-127 delta survivors (v0.3.0..9764e42) proven equivalent after the killing tests
-  // landed (delta rerun 2026-11-12: 90.49, these 40 are the remaining survivors; a prior
-  // rerun's higher score held 13 timeout verdicts that this run exposed as survivors). Each
-  // proof cites its command output or its pinned example input.
+  // landed (final delta rerun 2026-11-12 after the ready-report review fixes: 92.11, exit 0,
+  // these 34 are the remaining survivors; earlier reruns also held up to 13 timeout verdicts,
+  // which score as kills, so run-to-run scores above ~91 carry that noise). Each proof cites
+  // its command output or its pinned example input.
   // - server.ts readFileSync encoding literal (:120): `node -e 'const b=Buffer.from(JSON.stringify({fatal:false,items:[{item:"réglé.md"}]}),"utf8"); console.log(JSON.stringify(JSON.parse(b))===JSON.stringify(JSON.parse(b.toString("utf8"))))'`
   //   → `true` — JSON.parse of a Buffer calls ToString, which decodes the same UTF-8 bytes.
   // - server.ts readProvisionResults shape checks (:121): the only results-file writers are
@@ -153,14 +154,23 @@ export default {
   // - updates.mjs null files filler (:447): `node -e 'const t1=["Stryker was here"].map(f => f.upload_time_iso_8601 ?? f.upload_time).find(Boolean);const t2=[].map(f => f.upload_time_iso_8601 ?? f.upload_time).find(Boolean);console.log(t1,t2,t1===t2)'`
   //   → `undefined undefined true` — a filler entry has no upload timestamp and is skipped by
   //   `if (!t) continue` exactly like the empty array.
-  // - updates.mjs shipped-suppression root predicate (:775) and glob escaping (:779): sqlite proof
-  //   over candidate rows — every path matched by `user/*retro/*` carries a segment after the name
-  //   occurrence (`user/skills/retro` matches 0 rows, `user/skills/retro/x` matches 1), and on every
-  //   matched row the `> root+2` / `>= root+2` / `> root-2` verdicts are identical; the shipped pin
-  //   names (`shippedSkills` → check-ottr-board, diff-security-review, explain-project, llm-to-code,
-  //   retro, ui-ux-check, web-perf-audit) contain none of `[`, `*`, `?`, so the replace callback is
-  //   never invoked and `'user/skills/retro/SKILL.md' GLOB 'user/*[r][e][t][r][o]/*'` = 1 = the
-  //   unbracketed pattern (`'a?b' GLOB 'a[?]b'` = 1 shows the escape itself is faithful). A kill
-  //   would need a vendored skill named with a GLOB special.
+  // - updates.mjs shipped-suppression root predicate (:775): the surviving `root !== -1` → true
+  //   is equivalent: every row matched by `user/*<name>/*` starts with the literal `user/`, so
+  //   with root still -1 the mutant evaluates seg[0] === name, and no shipped pin is named
+  //   'user' (`shippedSkills` names: check-ottr-board, diff-security-review, explain-project,
+  //   llm-to-code, retro, ui-ux-check, web-perf-audit). The length-gate flips (`>= root + 2`,
+  //   `> root - 2`) are killed by the snapshot row `user/retro/skills/retro`: it matches the
+  //   GLOB (first `*` = 'retro/skills', trailing `*` = empty) with the pin name as the LAST
+  //   segment, so the override folder holds no file and the shipped retro row must stay
+  //   (`seg.length === root + 2` — sqlite probe: GLOB match 1, isOverridePath false); the
+  //   flipped operators return true and wrongly suppress it. The child-check drop
+  //   (`seg[root + 1] === name` → true) is killed by the snapshot row
+  //   `user/skills/other/SKILL.md`, which must not suppress `retro`.
+  // - updates.mjs glob escaping (:779): the shipped pin names contain none of `[`, `*`, `?`
+  //   (`shippedSkills` list above), so the replace callback is never invoked (174), bracketing
+  //   every character is a same-matching GLOB (173: `'user/skills/retro/SKILL.md' GLOB
+  //   'user/*[r][e][t][r][o]/*'` = 1, same as the unbracketed pattern), and `[c]` is a faithful
+  //   literal-class escape (175: `'a?b' GLOB 'a[?]b'` = 1). A kill would need a vendored skill
+  //   named with a GLOB special.
   thresholds: { high: 80, low: 60, break: 90 },
 };

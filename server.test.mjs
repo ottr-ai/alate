@@ -1216,18 +1216,60 @@ try {
       } finally { await stopServer(s2.p); }
     }
 
-    // The kind gate: a path source never passes its stored sha on, whatever the row says.
-    await seedSource(s => { s.source.kind = 'path'; s.source.name = orderSrc; s.source.importedSha = 'g'.repeat(64); });
+    // The kind gate in layer mode: a path source never passes its stored sha on, so the
+    // layer id falls back to "nogit" even when the stored sha is well-formed. Under a
+    // broken gate the commit reaches install-user and the layer id is ffffffffffff-1.
     {
-      const s2 = await bootSrv2(3600);
+      const kindHome = join(tmp, 'kind-home');
+      const kindCfg = join(tmp, 'server-config-kind.json');
+      const kindDb = join(tmp, 'kind.db');
+      mkdirSync(kindHome, { recursive: true });
+      const bootKind = async () => {
+        // Fresh config per boot: the server then prints a new API key line (bootSrv2's
+        // move); the source survives in the persisted state row, never in the config file.
+        rmSync(kindCfg, { force: true });
+        const p = spawnServer(['--port', '0', '--config', kindCfg, '--db', kindDb], { ...serverEnv, ALATE_LAYER: '1', HOME: kindHome, USERPROFILE: kindHome });
+        let key = '', listen = '';
+        await new Promise((res, rej) => {
+          let buf = '';
+          p.stdout.on('data', chunk => {
+            buf += chunk;
+            const k = /alate API key: (\S+)\n/.exec(buf);
+            const l = /alate server on (http:\/\/127\.0\.0\.1:\d+)\n/.exec(buf);
+            if (k) key = k[1];
+            if (l) listen = l[1];
+            if (k && l) res();
+          });
+          p.once('exit', code => rej(new Error(`kind-gate server exited early (${code})`)));
+          setTimeout(() => rej(new Error(`kind-gate server startup timeout: ${buf}`)), 10_000).unref();
+        });
+        const postJson = async (path, payload) => fetch(new URL(path, listen), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, body: JSON.stringify(payload) });
+        return { p, postJson };
+      };
+      const seedKindSource = async patch => {
+        const d2 = new DatabaseSync(kindDb);
+        try {
+          const state = JSON.parse(d2.prepare('SELECT value FROM state WHERE id = 1').get().value);
+          if (!state.source) throw new Error('seedKindSource: persisted state has no source; a green /config must run first');
+          patch(state);
+          d2.prepare('UPDATE state SET value = ? WHERE id = 1').run(JSON.stringify(state));
+        } finally { d2.close(); }
+      };
+      let kindSrv = await bootKind();
       try {
-        r = await s2.postJson2('/provision', {});
+        r = await kindSrv.postJson('/config', { path: orderSrc });
+        assert.equal(r.status, 200, 'the kind fixture accepts the order path source');
+      } finally { await stopServer(kindSrv.p); }
+      await seedKindSource(s => { s.source.kind = 'path'; s.source.importedSha = 'f'.repeat(40); });
+      kindSrv = await bootKind();
+      try {
+        r = await kindSrv.postJson('/provision', {});
         assert.equal(r.status, 200);
         body = await r.json();
-        assert.deepEqual(body.results.map(x => x.code), [0, 0], 'a path source passes no --commit even with a stored sha');
-        assert.equal(body.ok, true);
-        assert.ok(!body.results[1].output.includes('refusing: --commit'), 'the path source never handed the stored sha to install-user');
-      } finally { await stopServer(s2.p); }
+        assert.equal(body.ok, true, 'the seeded path source provisions green');
+        const kindLayers = join(kindHome, '.alate', 'layers');
+        assert.deepEqual(readdirSync(kindLayers), ['nogit-1'], 'a path source never passes its stored sha to install-user');
+      } finally { await stopServer(kindSrv.p); }
     }
   }
 
@@ -3936,6 +3978,14 @@ try {
       // A managed-skills copy suppresses too: the pattern's %skills/ tail matches both dirs.
       const supp2 = await run({ 'user/managed-skills/ui-ux-check/SKILL.md': 'x' });
       assert.equal(rows(supp2)['ui-ux-check'], undefined, 'a managed-skills copy suppresses the shipped row');
+      // A matched row whose override folder is empty (the pin name ends the path) never suppresses.
+      const suppEmptyRoot = await run({ 'user/retro/skills/retro': 'x' });
+      r = rows(suppEmptyRoot);
+      assert.ok(r['retro'] != null, 'a matched row whose override folder is empty never suppresses');
+      assert.deepEqual(names.filter(n => r[n] != null), names, 'the other pins keep their rows');
+      // An override root whose child is another skill suppresses nothing else.
+      const suppOtherChild = await run({ 'user/skills/other/SKILL.md': 'x' });
+      assert.ok(rows(suppOtherChild)['retro'] != null, 'an override root whose child is another skill suppresses nothing else');
       // The override root is the snapshot's user layer only: a docs copy is not an override
       // and must not hide the row, and the installer skips by folder presence, so any file
       // inside the user override dir (no SKILL.md needed) suppresses.
