@@ -171,6 +171,8 @@ Needs Node 24.12+. Flags: `--port` or `PORT`, `--host` or `ALATE_HOST`, `--confi
 
 `ALATE_API_KEY` sets the first-start API key from the environment, so a deployment can pair a board (for example Ottr's compose file) without a manual copy of the key. The value needs 32 characters or more: a shorter value makes the server exit with an error instead of generating a key, because the paired board would then fail silently. The value is saved to the config file and never printed. A key that is already in the config wins over the env value, and `POST /api/key` keeps rotating the key as before.
 
+Update checks go through a proxy when `HTTP_PROXY` or `HTTPS_PROXY` is set. `NO_PROXY` keeps named hosts on the direct route. Node reads these variables at startup and honors them for `fetch` only with `NODE_USE_ENV_PROXY=1` (Node 24+). The server sets that variable itself: when a proxy variable is set and `NODE_USE_ENV_PROXY` is unset, the server re-spawns once with the variable and continues in the new process. Set `NODE_USE_ENV_PROXY=0` to opt out. The Docker image carries the variable already. For Docker, export `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` in the shell that runs `docker compose up`; the compose file passes them to the container.
+
 ## Development
 
 One manifest, one lockfile, no build step. The verified chain:
@@ -180,6 +182,8 @@ npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && nod
 ```
 
 home-guard.test.mjs brackets the chain: the early record snapshots the home's `.alate`, `.agents` and `.omp`, and the final check fails the run when a path or an mtime there changed. The platform's own runtime files (the omp databases, logs, cache, run, the session stores under `.omp`, and the two bookkeeping files under `.alate`) stay excluded: a live worker writes them during any chain.
+
+`npm test` runs this chain's checks after an `npm ci`.
 
 CI runs this chain on every push. `release.yml` builds a multi-arch Docker image and publishes it to `ghcr.io/ottr-ai/alate` on each GitHub release, tagged `latest`, `vX.Y.Z` and `X.Y.Z`, and `vX.Y` and `X.Y`.
 

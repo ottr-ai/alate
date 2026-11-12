@@ -16,8 +16,10 @@ import { fileURLToPath } from 'node:url';
 
 const WATCHED = ['.alate', '.agents', '.omp'];
 // Platform runtime state churns while a live worker runs the chain; those writes are not
-// test writes, so the guard ignores them. Everything else in the watched dirs — skills,
-// rules, agent context, installed.json, layers, current — is checked for presence and mtime.
+// test writes, so the guard ignores them. That includes the chrome-devtools browser profiles
+// under .omp/browser-profiles: a live browser session rewrites caches and session stores
+// mid-chain. Everything else in the watched dirs — skills, rules, agent context,
+// installed.json, layers, current — is checked for presence and mtime.
 const LIVE = {
   '.alate': rel => rel === 'in-use.json' || rel === 'skillspector-pass.json',
   '.agents': () => false,
@@ -27,6 +29,7 @@ const LIVE = {
     || rel === 'agent/custom-session-files' || rel.startsWith('agent/custom-session-files/')
     || rel === 'snapcompact-savings.jsonl'
     || rel === 'agent/blobs' || rel.startsWith('agent/blobs/')
+    || rel === 'browser-profiles' || rel.startsWith('browser-profiles/')
     || /^agent\/[A-Za-z0-9-]+\.db(?:\.|-|$)/.test(rel),
 };
 const resolveSnap = (argv) => argv[3] ?? process.env.ALATE_HOME_GUARD_SNAPSHOT ?? join(tmpdir(), 'alate-home-guard-snapshot.json');
@@ -96,6 +99,7 @@ const selfCheck = () => {
   const tmp = mkdtempSync(join(tmpdir(), 'alate-home-guard-'));
   const fake = join(tmp, 'home');
   for (const rel of ['.alate/state.json', '.alate/in-use.json', '.alate/skillspector-pass.json',
+    '.omp/browser-profiles/chrome-x/Default/Preferences',
     '.agents/skills/x/SKILL.md', '.omp/agent/rules/r.md', '.omp/agent/agent.db', '.omp/agent/agent.db-wal',
     '.omp/agent/skill-descriptions.db-shm', '.omp/agent/skill-descriptions.db-wal',
     '.omp/logs/omp.231.log', '.omp/context-mode/sessions/s.db-shm', '.omp/agent/custom-session-files/a',
@@ -118,6 +122,8 @@ const selfCheck = () => {
     writeFileSync(join(fake, '.omp/agent/skill-descriptions.db-wal'), 'more\n');
     writeFileSync(join(fake, '.omp/logs/omp.231.log'), 'more\n');
     writeFileSync(join(fake, '.alate/skillspector-pass.json'), '{}\n');
+    writeFileSync(join(fake, '.omp/browser-profiles/chrome-x/Default/Preferences'), '{}\n');
+    utimesSync(join(fake, '.omp/browser-profiles/chrome-x/Default/Preferences'), new Date(), new Date(Date.now() + 9000));
     writeFileSync(join(fake, '.omp/context-mode/sessions/s.db-shm'), 'more\n');
     writeFileSync(join(fake, '.omp/snapcompact-savings.jsonl'), 'more\n');
     writeFileSync(join(fake, '.omp/agent/blobs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'), 'blob\n');

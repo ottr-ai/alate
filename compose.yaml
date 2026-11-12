@@ -14,6 +14,12 @@ services:
       # atomic rename, so a provision never changes files a running turn reads. Unset for the
       # in-place install.
       - ALATE_LAYER=1
+      # Proxy-only egress: update checks need the proxy. Node 24 reads these variables at
+      # startup; the image already sets NODE_USE_ENV_PROXY=1, and NO_PROXY keeps internal
+      # hosts on the direct route.
+      - HTTP_PROXY
+      - HTTPS_PROXY
+      - NO_PROXY
     volumes:
       - state:/state
       - home:/root

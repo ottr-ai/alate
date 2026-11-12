@@ -441,13 +441,18 @@ try {
   }
 
   // Child env allowlist: provision script children see only documented keys plus the
-  // ALATE_TEST_* family; ALATE_API_KEY never crosses the spawn boundary.
+  // ALATE_TEST_* family; ALATE_API_KEY never crosses the spawn boundary. The proxy var with
+  // the flag unset forces the env-proxy re-spawn, and provision children then inherit
+  // NODE_USE_ENV_PROXY=1; 127.0.0.1:9 stays closed and no fetch happens in this test.
   {
     const childEnvCapture = join(tmp, 'child-env-capture.json');
     const childKey = 'k'.repeat(40);
+    const childServerEnv = { ...serverEnv, ALATE_API_KEY: childKey, SKILLSPECTOR_BIN: join(tmp, 'trusted-skillspector'), ALATE_TEST_CHILD_ENV: childEnvCapture, HTTP_PROXY: 'http://127.0.0.1:9' };
+    // Force the re-spawn path even where the outer environment pre-sets the flag.
+    delete childServerEnv.NODE_USE_ENV_PROXY;
     const envChild = spawnServer(
       ['--port', '0', '--config', join(tmp, 'server-config-childenv.json')],
-      { ...serverEnv, ALATE_API_KEY: childKey, SKILLSPECTOR_BIN: join(tmp, 'trusted-skillspector'), ALATE_TEST_CHILD_ENV: childEnvCapture },
+      childServerEnv,
     );
     try {
       const childBase = await new Promise((resolve, reject) => {
@@ -469,6 +474,7 @@ try {
       assert.ok('PATH' in captured, 'PATH crosses to provision children');
       assert.equal(captured.SKILLSPECTOR_BIN, join(tmp, 'trusted-skillspector'), 'SKILLSPECTOR_BIN crosses to provision children');
       assert.ok('ALATE_TEST_CHILD_ENV' in captured, 'ALATE_TEST_* keys cross to provision children');
+      assert.equal(captured.NODE_USE_ENV_PROXY, '1', 'the re-spawned server passes NODE_USE_ENV_PROXY=1 to provision children');
     } finally {
       await new Promise(resolve => { envChild.once('close', resolve); envChild.kill(); });
     }
@@ -4233,7 +4239,7 @@ try {
 
     // A network-level failure names its cause: Node's fetch wraps the OS error in err.cause,
     // so the row shows "fetch failed (CODE)" and, when the code is ETIMEDOUT/ECONNREFUSED
-    // while a proxy env var is set, the "proxy?" hint. The proxy URL itself, often carrying
+    // while a proxy env var is set, the variable hint. The proxy URL itself, often carrying
     // credentials, is never printed.
     {
       const proxyKeys = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'];
@@ -4249,11 +4255,11 @@ try {
         process.env.HTTPS_PROXY = 'https://user:sekrit@proxy.corp.example:3128';
         failFetch('ETIMEDOUT');
         await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
-        assert.equal(rows(db).n1.error, 'fetch failed (ETIMEDOUT; proxy?)', 'the cause code and the proxy hint show next to fetch failed');
+        assert.equal(rows(db).n1.error, 'fetch failed (ETIMEDOUT; set HTTP_PROXY/HTTPS_PROXY and NODE_USE_ENV_PROXY=1)', 'the cause code and the proxy variable hint show next to fetch failed');
         assert.ok(!rows(db).n1.error.includes('proxy.corp.example') && !rows(db).n1.error.includes('sekrit'), 'the proxy URL and its credentials never show');
         failFetch('ECONNREFUSED');
         await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
-        assert.equal(rows(db).n1.error, 'fetch failed (ECONNREFUSED; proxy?)', 'ECONNREFUSED gets the hint too');
+        assert.equal(rows(db).n1.error, 'fetch failed (ECONNREFUSED; set HTTP_PROXY/HTTPS_PROXY and NODE_USE_ENV_PROXY=1)', 'ECONNREFUSED gets the hint too');
         failFetch('ENOTFOUND');
         await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
         assert.equal(rows(db).n1.error, 'fetch failed (ENOTFOUND)', 'a code outside the proxy pair shows bare');
@@ -4284,11 +4290,11 @@ try {
         const took = Date.now() - t0;
         assert.equal(rows(db).nslow.error, 'The operation was aborted due to timeout (TimeoutError after 0.3 s)');
         assert.ok(took < 10_000, `the cap bounds a stalled call instead of undici's 300 s: ${took} ms`);
-        // With a proxy env var set, the timeout text gains the same "proxy?" hint as the
+        // With a proxy env var set, the timeout text gains the same variable hint as the
         // connection-level codes: a black-hole proxy is the likely stall.
         process.env.HTTPS_PROXY = 'https://user:sekrit@proxy.corp.example:3128';
         assert.equal(rowErrorText(new DOMException('The operation was aborted due to timeout', 'TimeoutError')),
-          'The operation was aborted due to timeout (TimeoutError after 0.3 s; proxy?)');
+          'The operation was aborted due to timeout (TimeoutError after 0.3 s; set HTTP_PROXY/HTTPS_PROXY and NODE_USE_ENV_PROXY=1)');
       } finally {
         if (savedTimeout === undefined) delete process.env.ALATE_TEST_FETCH_TIMEOUT_MS; else process.env.ALATE_TEST_FETCH_TIMEOUT_MS = savedTimeout;
         if (savedProxy === undefined) delete process.env.HTTPS_PROXY; else process.env.HTTPS_PROXY = savedProxy;
@@ -4328,7 +4334,7 @@ try {
             const text = rowErrorText(err);
             assert.ok(text.startsWith(msg), `keeps the original message first: ${text}`);
             assert.ok(!text.includes('proxy.corp.example') && !text.includes('@'), `never leaks the proxy URL or its userinfo: ${text}`);
-            if (withProxy && (c === 'ETIMEDOUT' || c === 'ECONNREFUSED')) assert.ok(text.endsWith(`(${c}; proxy?)`), `the proxy pair gets the hint: ${text}`);
+            if (withProxy && (c === 'ETIMEDOUT' || c === 'ECONNREFUSED')) assert.ok(text.endsWith(`(${c}; set HTTP_PROXY/HTTPS_PROXY and NODE_USE_ENV_PROXY=1)`), `the proxy pair gets the hint: ${text}`);
             else assert.ok(text.endsWith(`(${c})`), `the code shows bare otherwise: ${text}`);
           });
       } finally {
@@ -5042,7 +5048,7 @@ try {
       assert.ok(!body.results[0].output.startsWith('Stryker was here!'), 'provision output is not prefixed');
       // A stored traversal path fails the snapshot with a plain-error 500 body.
       {
-        const raw = new DatabaseSync(dbA);
+        const raw = new DatabaseSync(dbA, { timeout: 10_000 }); // the server writes results during the provision; wait out its lock
         try {
           raw.prepare('INSERT INTO files (path, content) VALUES (?, ?)').run('../mut10-escape.md', Buffer.from(`evil`));
           [st, body] = await mut10Post(base, '/provision', {}, key);
@@ -5082,7 +5088,7 @@ try {
     // Server ENV: the child environment allowlist is exact. The capture file holds every
     // allowlisted name this process sets and nothing else (no ALATE_LAYER, no secrets).
     {
-      const envNames = ['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'SystemDrive', 'ComSpec', 'PATHEXT', 'PI_CODING_AGENT_DIR', 'ALATE_DATA', 'ALATE_KEEP_TEMP', 'SKILLSPECTOR_BIN', 'SKILLSPECTOR_VENV', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'];
+      const envNames = ['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'SystemDrive', 'ComSpec', 'PATHEXT', 'PI_CODING_AGENT_DIR', 'ALATE_DATA', 'ALATE_KEEP_TEMP', 'SKILLSPECTOR_BIN', 'SKILLSPECTOR_VENV', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'NODE_USE_ENV_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'];
       const capFile = join(tmp, 'child-env.json');
       const functional = { PATH: process.env.PATH, HOME: tmpHome, USERPROFILE: tmpHome, TEMP: serverTmp, TMP: serverTmp, TMPDIR: serverTmp };
       const E = mut10Spawn(['--port', '0', '--config', join(tmp, 'server-config-env.json'), '--db', join(tmp, 'state-env.db'), '--interval', '100000'],
@@ -5221,7 +5227,7 @@ try {
       // Offline restart: an unreadable remote must leave baseline and update state intact.
       const X = mut10ReadRow(dbB).source.importedSha;
       {
-        const raw = new DatabaseSync(dbB);
+        const raw = new DatabaseSync(dbB, { timeout: 10_000 }); // a prior server may still hold the write lock
         const row = mut10ReadRow(dbB);
         row.update = null;
         raw.prepare('UPDATE state SET value = ? WHERE id = 1').run(JSON.stringify(row));
@@ -5252,7 +5258,7 @@ try {
       const dbB4 = join(tmp, 'state-mutB4.db');
       writeFileSync(cfgB4, JSON.stringify({ apiKey: 'mut10-key-b4', repo: 'WRONG', path: 'WRONG' }));
       {
-        const raw = new DatabaseSync(dbB4);
+        const raw = new DatabaseSync(dbB4, { timeout: 10_000 });
         raw.exec('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)');
         raw.prepare('INSERT OR REPLACE INTO state (id, value) VALUES (1, ?)').run(JSON.stringify({
           source: { kind: 'path', spec: mixedDir, name: mixedDir, ref: '', importedSha: '', importedAt: '2026-01-01T00:00:00.000Z' },

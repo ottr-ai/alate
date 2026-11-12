@@ -13,14 +13,21 @@ import fastify from 'fastify'
 import { cleanupData, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
 import { applyFileEdit, importSource, isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead, snapshotData } from './web/dashboard.mjs'
 import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
+import { ensureEnvProxy } from './lib/env-proxy.mjs'
+
+// Node parses proxy env vars for fetch at startup only, and only with NODE_USE_ENV_PROXY=1;
+// when a proxy is configured without the flag (host runs; the image sets it), re-spawn so
+// fetch honors the proxy.
+await ensureEnvProxy()
 
 const repoRoot = import.meta.dirname
 const CONFIG_FILE = flagValue('--config') ?? join(repoRoot, 'server-config.json')
 const CAP = 200000
 const SCRIPTS = ['sync.mjs', 'install-user.mjs']
 // Allowlisted child environment: keeps ALATE_API_KEY and every other secret inside the server
-// process. Children and their children never see it.
-const CHILD_ENV_KEYS = ['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'SystemDrive', 'ComSpec', 'PATHEXT', 'PI_CODING_AGENT_DIR', 'ALATE_LAYER', 'ALATE_DATA', 'ALATE_KEEP_TEMP', 'SKILLSPECTOR_BIN', 'SKILLSPECTOR_VENV', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
+// process. Children and their children never see it. NODE_USE_ENV_PROXY crosses so provision
+// children inherit the flag and their fetches honor the proxy too.
+const CHILD_ENV_KEYS = ['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'SystemDrive', 'ComSpec', 'PATHEXT', 'PI_CODING_AGENT_DIR', 'ALATE_LAYER', 'ALATE_DATA', 'ALATE_KEEP_TEMP', 'SKILLSPECTOR_BIN', 'SKILLSPECTOR_VENV', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'NODE_USE_ENV_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
 function childEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {}
   for (const key of CHILD_ENV_KEYS) {
