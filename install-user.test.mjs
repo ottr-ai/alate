@@ -581,13 +581,18 @@ try {
   // a capture root the snapshot lacks. The snapshot holds no pi/ item, so a root set derived
   // from the snapshot's top-level dirs misses .pi: the .pi path installs unchanged while the
   // .omp control moves. The full capture-root list (lib/data.mjs) must decide, as capture
-  // already does. A Linux install leaves stored POSIX forms in place by design (spec), so
-  // the install-level check uses the captured-on-Windows form, which a Linux target re-roots
-  // at the home; the stored form's own direction is the win32 unit check below.
+  // already does. Install ports with the platform it runs on, so the snapshot carries the
+  // form that platform moves: a Windows form on a Linux host (a Linux target re-roots
+  // captured Windows paths), the stored POSIX form on a Windows host (a win32 target
+  // re-roots the stored form; also clause 4's literal shape). The stored form's own
+  // direction is additionally the platform-independent win32 unit check below.
   const piData = join(tmp, 'pi-root-data');
   const piHome = join(tmp, 'pi-root-home');
+  const piArgs = process.platform === 'win32'
+    ? ['/root/.pi/agent/pix.json', '/root/.omp/agent/keep.json']
+    : ['C:\\Users\\domin\\.pi\\agent\\pix.json', 'C:\\root\\.omp\\agent\\keep.json'];
   mkdirSync(join(piData, 'user/omp/agent'), { recursive: true });
-  writeFileSync(join(piData, 'user/omp/agent/mcp.json'), `${JSON.stringify({ mcpServers: { x: { command: 'node', args: ['C:\\Users\\domin\\.pi\\agent\\pix.json', 'C:\\root\\.omp\\agent\\keep.json'] } } }, null, 2)}\n`);
+  writeFileSync(join(piData, 'user/omp/agent/mcp.json'), `${JSON.stringify({ mcpServers: { x: { command: 'node', args: piArgs } } }, null, 2)}\n`);
   r = run(['--data', piData, '--skip-plugins'], piHome);
   assert.equal(r.status, 0, r.stderr);
   const piInstalled = JSON.parse(readFileSync(join(piHome, '.omp/agent/mcp.json'), 'utf8'));
