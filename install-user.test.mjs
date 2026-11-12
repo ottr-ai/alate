@@ -2210,6 +2210,29 @@ exit 0
   assert.equal(gotRule('.omp/agent/rules/clean.md'), '---\ndescription: clean rule\n---\n\nClean body\n', 'the clean rule installs beside the rejected .mdc');
   assert.ok(!existsSync(join(backdoorHome, '.omp/agent/rules/backdoor.mdc')), 'the rejected .mdc never lands');
 
+  // A hidden character in a non-entrypoint Markdown file inside a skill folder fails the
+  // whole skill under its skill key (specs/provision-item-by-item.md): the scan verdict
+  // covered the full source folder, so a per-file rejection would leave a half-installed
+  // skill. The clean skill beside it installs, and the record-matching copy of the
+  // rejected skill is deleted like any snapshot-dropped path.
+  rmSync(join(backdoorData, 'user/omp/agent/rules/backdoor.mdc'));
+  putRule('omp/agent/skills/hidsnap/SKILL.md', skillText('hidsnap'));
+  putRule('omp/agent/skills/cleanone/SKILL.md', skillText('cleanone'));
+  r = runBackdoor(['--skip-plugins']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(gotRule('.omp/agent/skills/hidsnap/SKILL.md'), skillText('hidsnap'), 'the skill installs while its folder is clean');
+  putRule('omp/agent/skills/hidsnap/notes.md', 'notes\u202Efile\n');
+  r = runBackdoor(['--skip-plugins']);
+  assert.equal(r.status, 1, 'a hidden character in a skill folder fails the whole skill');
+  assert.ok(r.stdout.includes('user/omp/agent/skills/hidsnap — rejected: hidden character U+202E at user/omp/agent/skills/hidsnap/notes.md:1:6'), r.stdout);
+  assert.ok(!/^ {2}user\/omp\/agent\/skills\/hidsnap\//m.test(r.stdout), 'the skill reports once under its skill key, never per file');
+  assert.ok(!existsSync(join(backdoorHome, '.omp/agent/skills/hidsnap')), 'the rejected skill never half-installs: its record-matching copy is deleted');
+  assert.equal(gotRule('.omp/agent/skills/cleanone/SKILL.md'), skillText('cleanone'), 'the clean skill beside the rejected one stays');
+  rmSync(join(backdoorData, 'user/omp/agent/skills/hidsnap/notes.md'));
+  r = runBackdoor(['--skip-plugins']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(gotRule('.omp/agent/skills/hidsnap/SKILL.md'), skillText('hidsnap'), 'the repaired skill installs again');
+
   // The origin gate (upstreams.json) is judged per item: a skill with no recorded origin is
   // left out and reported, the covered items install, an uncovered MCP server is only a
   // report (mcp.json itself still installs), and a broken gate refuses the whole run.
@@ -2404,6 +2427,28 @@ exit 0
       assert.equal(readFileSync(join(shHome3, '.agents/skills', name, 'SKILL.md'), 'utf8'), vendoredBytes(name), `${name} installs beside the rejected one`);
     }
     assert.ok(!existsSync(join(shHome3, '.agents/skills/check-ottr-board')), 'the data-repo shadow keeps the shipped copy out here too');
+
+    // Acceptance 3b: a hidden character in a non-entrypoint Markdown file fails the whole
+    // shipped skill under its skill key, like the snapshot walk. The folder is removed
+    // again so later tree counts keep seeing the vendored set.
+    const hiddenProbe = join(shippedSkillsRoot, 'hidden-probe');
+    try {
+      mkdirSync(hiddenProbe, { recursive: true });
+      writeFileSync(join(hiddenProbe, 'SKILL.md'), skillText('hidden-probe'));
+      writeFileSync(join(hiddenProbe, 'notes.md'), 'notes\u202Efile\n');
+      writeStub(0);
+      const shHome3b = join(tmp, 'home-shipped-hidden');
+      r = run(['--data', shData, '--skip-plugins'], shHome3b);
+      assert.equal(r.status, 1, 'a hidden character in a shipped skill folder fails the whole skill');
+      assert.ok(r.stdout.includes('user/agents/skills/hidden-probe — rejected: hidden character U+202E at user/agents/skills/hidden-probe/notes.md:1:6'), r.stdout);
+      assert.ok(!/^ {2}user\/agents\/skills\/hidden-probe\//m.test(r.stdout), 'the shipped skill reports once under its skill key, never per file');
+      assert.ok(!existsSync(join(shHome3b, '.agents/skills/hidden-probe')), 'the rejected shipped skill never half-installs');
+      for (const name of shippedNames.filter(n => n !== 'check-ottr-board')) {
+        assert.equal(readFileSync(join(shHome3b, '.agents/skills', name, 'SKILL.md'), 'utf8'), vendoredBytes(name), `${name} installs beside the hidden-rejected one`);
+      }
+    } finally {
+      rmSync(hiddenProbe, { recursive: true, force: true });
+    }
 
     // Acceptance 4: machine state follows the snapshot rules. A machine-changed shipped
     // skill refuses the in-place install; --force restores the shipped bytes; layer mode

@@ -12,7 +12,8 @@ server can merge results by key:
 
 - data-root rule: the file name, for example `a.md`.
 - snapshot file: the `user/`-prefixed snapshot path, for example
-  `user/omp/agent/config.yml`.
+  `user/omp/agent/config.yml`. A Markdown file inside a skill folder is never a
+  snapshot-file item: it belongs to that skill's item.
 - skill: the `user/`-prefixed skill dir, for example `user/omp/agent/skills/demo`;
   `user/omp/agent/managed-skills/m1`; `user/agents/skills/locked`.
 - MCP server: `user/omp/agent/mcp.json "<name>"`.
@@ -115,8 +116,11 @@ failure; `provisionedSha` still moves only on `ok`.
    excluded before the walk; uncovered MCP servers are `no origin` reports;
 2. skill structure gate per skill (`skillProblems`): a failing skill is `rejected`,
    excluded, and never scanned;
-3. walk and plan over the surviving files only; a Markdown item whose content gate
-   fails is `rejected` and excluded;
+3. hidden-character gate over each surviving skill folder: a failing `.md`/`.mdc`
+   file (the `SKILL.md` entrypoint belongs to step 2) fails that whole skill
+   under its skill key, before the walk; then walk and plan over the surviving
+   files only; a Markdown item outside a skill folder whose content gate fails
+   is `rejected` and excluded;
 4. worker-list validation (fatal as before), conflicts (fatal as before);
 5. scan gate over the surviving skills: findings (exit 1) make that skill
    `rejected`; a scan error (any other non-zero exit or a killed scan) makes that

@@ -40,7 +40,9 @@ vendored tree; the enumeration in `lib/shipped.mjs` lists its folders. The same 
 in the same order as for snapshot skills; nothing about them is weaker.
 
 1. For each vendored skill folder, the folder must exist and pass the structure gate
-   (`SKILL.md` frontmatter, `skillProblems`) and the SkillSpector scan gate (same pinned
+   (`SKILL.md` frontmatter, `skillProblems`), the hidden-character gate over the whole
+   folder (one bad `.md`/`.mdc` file fails that one skill; the `SKILL.md` entrypoint is
+   judged by the structure gate), and the SkillSpector scan gate (same pinned
    scanner, `--no-llm`, the skill's own shipped `.skillspector-baseline.yaml`, same scan
    cache). A gate rejection fails that one skill per item and never stops the others.
 2. A data repo skill of the same name wins: when the snapshot holds any skill folder named

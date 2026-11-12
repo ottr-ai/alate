@@ -630,6 +630,36 @@ try {
       : e.isDirectory() ? walk(join(dir, e.name), sub ? `${sub}/${e.name}` : e.name)
       : [sub ? `${sub}/${e.name}` : e.name]);
 
+  // Hidden-character gate over each skill folder as a whole: one bad .md/.mdc file (the
+  // SKILL.md entrypoint is judged by the structure gate above) rejects the whole skill
+  // under its skill key, so no half-installed skill ships — the scan verdict covered the
+  // full source folder, not the installed subset a per-file rejection would leave
+  // (specs/provision-item-by-item.md, docs/specs/shipped-skills.md). The walk below skips
+  // every rel of a rejected skill and keeps judging Markdown outside skill folders per
+  // file; skillRelPrefixes names that boundary for both.
+  const skillRelPrefixes = skillDirs.map(dir => relative(userRoot, dir).split(sep).join('/'));
+  for (const dir of skillDirs) {
+    if (rejectedSkills.has(dir)) continue;
+    const key = skillKey(userRoot, dir);
+    const problems = [];
+    for (const file of walk(dir)) {
+      if (!/\.(md|mdc)$/.test(file) || file === 'SKILL.md') continue;
+      const label = `${key}/${file}`;
+      const srcPath = join(dir, file);
+      try {
+        assertSourceInside(userRoot, srcPath);
+      } catch (err) {
+        throw new Error(`${label}: ${err.message}`);
+      }
+      problems.push(...ruleProblems(label, readFileSync(srcPath, 'utf8'), { frontmatter: false }));
+    }
+    if (problems.length) {
+      const first = describeProblem(problems[0]);
+      failItem(key, 'rejected', first.rule, first.at, problems.join('\n'));
+      rejectedSkills.add(dir);
+    }
+  }
+
   // Top-level snapshot dirs are dot-dirs in the home (user/omp -> ~/.omp): the layer's own paths.
   const roots = new Set(readdirSync(userRoot).map(name => '.' + name));
 
@@ -799,7 +829,9 @@ try {
     // instructions too (AGENTS.md, RULES.md, SYSTEM.md, CLAUDE.md), so every .md/.mdc gets the
     // hidden-character scan; only the snapshot's own rules dir is a rule and needs the frontmatter.
     // A file with problems is rejected per item: no plan entry, no manifest record, no conflict.
-    if (/\.(md|mdc)$/.test(rel) && !skillEntrypoints.has(srcPath)) {
+    // Files inside a skill folder are judged by the whole-skill gate above, never per file.
+    if (/\.(md|mdc)$/.test(rel) && !skillEntrypoints.has(srcPath)
+        && !skillRelPrefixes.some(p => rel === p || rel.startsWith(`${p}/`))) {
       const problems = ruleProblems(`user/${rel}`, src.toString('utf8'), { frontmatter: /^omp\/agent\/rules\/[^/]+\.mdc?$/.test(rel) });
       if (problems.length) {
         const first = describeProblem(problems[0]);
@@ -920,6 +952,30 @@ try {
       failItem(`user/agents/skills/${name}`, 'rejected', first.rule, first.at, problems.join('\n'));
       continue;
     }
+    // Hidden-character gate over the whole vendored folder: one bad .md/.mdc file (the
+    // SKILL.md entrypoint is judged by skillProblems above) rejects the whole skill under
+    // its skill key, like the snapshot walk — the scan verdict covered the full source
+    // folder, not the installed subset a per-file rejection would leave. A rejected skill
+    // is never planned here and never joins the scan gate below.
+    const hidden = [];
+    for (const file of walk(vendored)) {
+      if (!/\.(md|mdc)$/.test(file) || file === 'SKILL.md') continue;
+      const label = `user/agents/skills/${name}/${file}`;
+      const srcPath = join(vendored, file);
+      try {
+        assertSourceInside(vendored, srcPath);
+      } catch (err) {
+        throw new Error(`${label}: ${err.message}`);
+      }
+      hidden.push(...ruleProblems(label, readFileSync(srcPath, 'utf8'), { frontmatter: false }));
+    }
+    if (hidden.length) {
+      const first = describeProblem(hidden[0]);
+      failItem(`user/agents/skills/${name}`, 'rejected', first.rule, first.at, hidden.join('\n'));
+      rejectedSkills.add(vendored);
+      shippedDirKey.set(vendored, `user/agents/skills/${name}`);
+      continue;
+    }
     for (const file of walk(vendored)) {
       const rel = `agents/skills/${name}/${file}`;
       const srcPath = join(vendored, file);
@@ -933,17 +989,6 @@ try {
       const readDest = join(readRoot, '.' + rel);
       if (layerMode) checkDestination(readRoot, readDest);
       const want = fingerprint(rel, readFileSync(srcPath));
-      // The shipped SKILL.md is the entrypoint and already passed skillProblems above; every
-      // other .md/.mdc gets the hidden-character scan like the snapshot walk. A file with a
-      // problem is rejected per item: no plan entry, no record, no conflict.
-      if (/\.(md|mdc)$/.test(file) && file !== 'SKILL.md') {
-        const hidden = ruleProblems(`user/${rel}`, readFileSync(srcPath).toString('utf8'), { frontmatter: false });
-        if (hidden.length) {
-          const first = describeProblem(hidden[0]);
-          failItem(`user/${rel}`, 'rejected', first.rule, first.at, hidden.join('\n'));
-          continue;
-        }
-      }
       const have = existsSync(readDest) ? fingerprint(rel, readFileSync(readDest)) : null;
       const record = have !== null && have === last[rel];
       const itemKey = `user/${rel}`;
