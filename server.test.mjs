@@ -882,6 +882,355 @@ try {
     assert.deepEqual(body.provision.failures.map(f => [f.script, f.code]), [['sync.mjs', null]], 'state carries the killed script');
   }
 
+  // ---- ALAT-127 delta-mutation blocks: each block pins one server.ts provision contract ----
+
+  // Exact-length hidden-character fixtures. ruleProblems reports one problem per line as
+  // `${label}:${line}:${col}: hidden character U+200B` (first hit per line, col = hit index + 1),
+  // so the builder searches a line count n and a widened-column count w that reach the target
+  // length exactly, then hands out the problem text and the matching file line for each hit.
+  const UPSTREAMS = JSON.stringify({ items: [{ name: 'cov', kind: 'rule-set', origin: 'https://github.com/o/r', paths: ['cover.md'] }] });
+  const HIDDEN_TEXT = 'hidden character U+200B';
+  const hiddenLayout = (label, firstLine, target) => {
+    for (let n = 1; n <= 200; n++) {
+      for (let w = 0; w <= n; w++) {
+        let len = n - 1;
+        for (let i = 0; i < n; i++) len += label.length + 1 + String(firstLine + i).length + 1 + String(i < w ? 10 : 1).length + 2 + HIDDEN_TEXT.length;
+        if (len === target) {
+          return Array.from({ length: n }, (_, i) => {
+            const col = i < w ? 10 : 1;
+            return { text: `${label}:${firstLine + i}:${col}: ${HIDDEN_TEXT}`, body: 'x'.repeat(col - 1) + '\u200b' };
+          });
+        }
+      }
+    }
+    throw new Error(`no hidden-character layout reaches ${target} for ${label}`);
+  };
+  const hiddenFile = (front, parts) => front + parts.map(p => p.body).join('\n') + '\n';
+
+  // Worse-status merge, downgrade leg: sync.mjs reports bad.md 'rejected' (content gate) and
+  // then 'no-origin' (uncovered root rule under upstreams.json). The merged item keeps the
+  // first entry's status, rule, at and report; a later, better entry never downgrades it.
+  {
+    const rankDir = join(tmp, 'rank');
+    mkdirSync(rankDir, { recursive: true });
+    writeFileSync(join(rankDir, 'upstreams.json'), UPSTREAMS);
+    writeFileSync(join(rankDir, 'bad.md'), 'no frontmatter\n');
+    r = await postJson('/config', { path: rankDir }, true);
+    assert.equal(r.status, 200);
+    r = await postJson('/provision', {}, true);
+    assert.equal(r.status, 200);
+    body = await r.json();
+    assert.deepEqual(body.results.map(x => x.code), [1, 1], 'both scripts ran over the rejected rule');
+    body = await (await get('/api/state')).json();
+    const rankItem = body.provision.items.find(i => i.item === 'bad.md');
+    assert.ok(rankItem, 'bad.md appears as one merged item');
+    assert.equal(rankItem.status, 'rejected', 'a better later entry never downgrades the worse first one');
+    assert.equal(rankItem.rule, 'needs frontmatter with a description', 'the merged item keeps the first entry rule');
+    assert.equal(rankItem.at, 'bad.md', 'the merged item keeps the first entry position');
+    assert.equal(rankItem.report, 'bad.md: needs frontmatter with a description', 'the report-less second entry never rewrites the joined report');
+  }
+
+  // Equal-rank merge with no fields: both scripts report the same uncovered skill dir
+  // 'no-origin' with null rule/at and no report, so the merged item fabricates neither.
+  {
+    const skDir = join(tmp, 'skill-clean');
+    mkdirSync(join(skDir, 'user', 'omp', 'agent', 'skills', 'demo'), { recursive: true });
+    writeFileSync(join(skDir, 'upstreams.json'), UPSTREAMS);
+    writeFileSync(join(skDir, 'user', 'omp', 'agent', 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: demo skill\n---\n');
+    r = await postJson('/config', { path: skDir }, true);
+    assert.equal(r.status, 200);
+    r = await postJson('/provision', {}, true);
+    assert.equal(r.status, 200);
+    body = await r.json();
+    assert.deepEqual(body.results.map(x => x.code), [1, 1], 'the uncovered skill fails per item in both scripts');
+    body = await (await get('/api/state')).json();
+    const skItem = body.provision.items.find(i => i.item === 'user/omp/agent/skills/demo');
+    assert.ok(skItem, 'the uncovered skill dir appears as one merged item');
+    assert.equal(skItem.status, 'no-origin');
+    assert.equal(skItem.rule, null, 'a no-origin item carries no rule');
+    assert.equal(skItem.at, null, 'a no-origin item carries no position');
+    assert.equal('report' in skItem, false, 'two report-less entries never fabricate a report key');
+  }
+
+  // Join boundary at exactly REPORT_CAP: the skill's structure-gate report is exactly 4000
+  // chars, so the join (the no-origin entries carry no report) stores it verbatim with no
+  // ellipsis, and rule/at shape into strings while unchanged plan items stay null/absent.
+  {
+    const skBad = join(tmp, 'skill-bad');
+    mkdirSync(join(skBad, 'user', 'omp', 'agent', 'skills', 'demo'), { recursive: true });
+    writeFileSync(join(skBad, 'upstreams.json'), UPSTREAMS);
+    const skLabel = 'user/omp/agent/skills/demo/SKILL.md';
+    const skParts = hiddenLayout(skLabel, 5, 4000); // lines 1-4 are the frontmatter
+    const expectedReport = skParts.map(p => p.text).join('\n');
+    assert.equal(expectedReport.length, 4000, 'the skill report fixture is exactly REPORT_CAP long');
+    writeFileSync(join(skBad, 'user', 'omp', 'agent', 'skills', 'demo', 'SKILL.md'), hiddenFile('---\nname: demo\ndescription: demo skill\n---\n', skParts));
+    r = await postJson('/config', { path: skBad }, true);
+    assert.equal(r.status, 200);
+    r = await postJson('/provision', {}, true);
+    assert.equal(r.status, 200);
+    body = await r.json();
+    assert.deepEqual(body.results.map(x => x.code), [1, 1]);
+    body = await (await get('/api/state')).json();
+    const bad = body.provision.items.find(i => i.item === 'user/omp/agent/skills/demo');
+    assert.ok(bad, 'the broken skill appears as one merged item');
+    assert.equal(bad.status, 'rejected', 'the structure rejection outranks the no-origin entries');
+    assert.equal(bad.rule, 'hidden character U+200B', 'the rejection rule is the shaped problem rule');
+    assert.match(bad.at, /\d+:\d+$/, 'the rejection position is a line:column pair');
+    assert.equal(bad.report, expectedReport, 'a 4000-char report is stored verbatim, with no ellipsis');
+  }
+
+  // Joined-report cap past REPORT_CAP: both scripts report the same uncovered MCP server
+  // with the same origin hint, so the join doubles it to 4181 chars and the stored report
+  // is exactly the first 4000 chars plus the ellipsis, separator kept. The all-failed run
+  // also stores ok false.
+  {
+    const hintDir = join(tmp, 'hint');
+    mkdirSync(join(hintDir, 'user', 'omp', 'agent'), { recursive: true });
+    writeFileSync(join(hintDir, 'upstreams.json'), UPSTREAMS);
+    const py = 'p'.repeat(645);
+    const hint = `uvx package "${py}" is not pinned to a version — pin it in mcp.json args as "${py}==<version>" and add an upstreams.json item with check {"type":"pypi","package":"${py}"}`;
+    assert.equal(hint.length, 2090, 'the hint fixture matches the originGate template length');
+    writeFileSync(join(hintDir, 'user', 'omp', 'agent', 'mcp.json'), JSON.stringify({ mcpServers: { slow: { command: 'uvx', args: [py] } } }));
+    r = await postJson('/config', { path: hintDir }, true);
+    assert.equal(r.status, 200);
+    r = await postJson('/provision', {}, true);
+    assert.equal(r.status, 200);
+    body = await r.json();
+    assert.deepEqual(body.results.map(x => x.code), [1, 1]);
+    body = await (await get('/api/state')).json();
+    const mcpItem = body.provision.items.find(i => i.item === 'user/omp/agent/mcp.json "slow"');
+    assert.ok(mcpItem, 'the uncovered MCP server appears as one merged item');
+    assert.equal(mcpItem.status, 'no-origin');
+    assert.equal(mcpItem.rule, null, 'a hint-only item carries no rule');
+    assert.equal(mcpItem.at, null, 'a hint-only item carries no position');
+    assert.equal(mcpItem.report, `${hint}\n${hint}`.slice(0, 4000) + '…', 'the doubled hint joins past the cap into 4000 chars plus an ellipsis');
+    assert.equal(persisted().provision.ok, false, 'two failing scripts store ok false');
+  }
+
+  // Single-report cap on the child-capped shape: sync.mjs caps its own 4001-char report to
+  // 4000 chars plus the ellipsis before writing, so the server stores exactly that form.
+  {
+    const capDir = join(tmp, 'cap');
+    mkdirSync(capDir, { recursive: true });
+    const capParts = hiddenLayout('big.md', 4, 4001); // lines 1-3 are the frontmatter
+    const capJoined = capParts.map(p => p.text).join('\n');
+    assert.equal(capJoined.length, 4001, 'the rule report fixture is one char past REPORT_CAP');
+    writeFileSync(join(capDir, 'big.md'), hiddenFile('---\ndescription: big rule\n---\n', capParts));
+    r = await postJson('/config', { path: capDir }, true);
+    assert.equal(r.status, 200);
+    r = await postJson('/provision', {}, true);
+    assert.equal(r.status, 200);
+    body = await r.json();
+    assert.deepEqual(body.results.map(x => x.code), [1, 1]);
+    body = await (await get('/api/state')).json();
+    const capped = body.provision.items.find(i => i.item === 'big.md');
+    assert.ok(capped, 'the oversized rule appears as one merged item');
+    assert.equal(capped.status, 'rejected');
+    assert.equal(capped.report, capJoined.slice(0, 4000) + '…', 'the stored report is the child-capped 4000-plus-ellipsis form');
+  }
+
+  // Provision workspace: while sync.mjs spins at the script gate, the server's per-run
+  // temp dir sits under TMPDIR with the 'alate-provision-' prefix.
+  if (process.platform !== 'win32') {
+    const bare = join(tmp, 'bare');
+    mkdirSync(bare, { recursive: true });
+    writeFileSync(join(bare, 'ok.md'), '---\ndescription: bare rule\n---\n\nBody\n');
+    r = await postJson('/config', { path: bare }, true);
+    assert.equal(r.status, 200);
+    writeFileSync(scriptGate, '');
+    const pending = postJson('/provision', {}, true);
+    let seen = false;
+    try {
+      await waitFor(() => {
+        seen = readdirSync(serverTmp).some(name => name.startsWith('alate-provision-'));
+        return seen;
+      }, 10_000);
+    } finally { rmSync(scriptGate, { force: true }); }
+    assert.ok(seen, 'the provision temp dir carries the alate-provision- prefix');
+    r = await pending;
+    assert.equal(r.status, 200);
+  }
+
+  // No-results gate over a green source: with the gate file in place, both children run
+  // without the results-file env, so the clean run stores ok true with zero items; a child
+  // that still wrote a results file would surface its items here. A code-0 child with no
+  // results file must also never stop the pipeline.
+  {
+    const gateDir = join(tmp, 'gate-clean');
+    mkdirSync(join(gateDir, 'user', 'omp', 'agent'), { recursive: true });
+    mkdirSync(join(gateDir, 'projects'), { recursive: true });
+    writeFileSync(join(gateDir, 'ok.md'), '---\ndescription: gate rule\n---\n\nBody\n');
+    writeFileSync(join(gateDir, 'user', 'omp', 'agent', 'config.yml'), 'model: test\n');
+    writeFileSync(join(gateDir, 'projects', 'projects.json'), JSON.stringify({ contextFiles: [], projects: {} }));
+    r = await postJson('/config', { path: gateDir }, true);
+    assert.equal(r.status, 200);
+    writeFileSync(serverEnv.ALATE_TEST_NO_RESULTS_FILE, '');
+    try {
+      r = await postJson('/provision', {}, true);
+      assert.equal(r.status, 200);
+      body = await r.json();
+      assert.deepEqual(body.results.map(x => x.code), [0, 0], 'a code-0 child without a results file never stops the pipeline');
+      assert.equal(body.ok, true);
+      body = await (await get('/api/state')).json();
+      assert.deepEqual(body.provision.items, [], 'a gated green run merges no per-item results');
+    } finally { rmSync(serverEnv.ALATE_TEST_NO_RESULTS_FILE, { force: true }); }
+  }
+
+  // Empty-body parser: a whitespace-only JSON body parses as {} and provisions.
+  r = await post('/provision', '   ', { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` });
+  assert.equal(r.status, 200, 'a whitespace-only JSON body parses as an empty object');
+  assert.equal((await r.json()).ok, true);
+
+  // Second-server fixtures: a private home, tmp, config and db, so layer writes, git
+  // config and interval ticks never touch the main fixture server's state.
+  {
+    const home2 = join(tmp, 'srv2-home');
+    const tmp2 = join(tmp, 'srv2-tmp');
+    const cfg2 = join(tmp, 'srv2-config.json');
+    const db2 = join(tmp, 'srv2.db');
+    mkdirSync(home2, { recursive: true });
+    mkdirSync(tmp2, { recursive: true });
+    // git URL rewrite: the spec's explicit host resolves to the local fixture repo, so
+    // remoteHead exercises the host argument hermetically.
+    writeFileSync(join(tmp, 'srv2-gitconfig'), `[url "${pathToFileURL(join(tmp, 'gh')).href}/"]\n\tinsteadOf = https://myhost.ghe.com/\n`);
+    const env2 = { ...serverEnv, HOME: home2, USERPROFILE: home2, TMPDIR: tmp2, TEMP: tmp2, TMP: tmp2, ALATE_TEST_PROVISION_GATE: join(tmp2, 'provision-gate'), ALATE_TEST_SCRIPT_GATE: join(tmp2, 'script-gate'), ALATE_TEST_NO_RESULTS_FILE: join(tmp2, 'no-results-gate'), GIT_CONFIG_GLOBAL: join(tmp, 'srv2-gitconfig') };
+    delete env2.ALATE_TEST_GH_BASE;
+    const bootSrv2 = async interval => {
+      // A fresh config every boot: the server then prints a new API key line, and the
+      // source still comes from the persisted state row (offline startup).
+      rmSync(cfg2, { force: true });
+      const p = spawnServer(['--port', '0', '--config', cfg2, '--db', db2, '--interval', String(interval)], env2);
+      let key = '', listen = '';
+      await new Promise((res, rej) => {
+        let buf = '';
+        p.stdout.on('data', chunk => {
+          buf += chunk;
+          const k = /alate API key: (\S+)\n/.exec(buf);
+          const l = /alate server on (http:\/\/127\.0\.0\.1:\d+)\n/.exec(buf);
+          if (k) key = k[1];
+          if (l) listen = l[1];
+          if (k && l) res();
+        });
+        p.once('exit', code => rej(new Error(`fixture server exited early (${code})`)));
+        setTimeout(() => rej(new Error(`fixture server startup timeout: ${buf}`)), 10_000).unref();
+      });
+      const get2 = async path => fetch(new URL(path, listen), { headers: { Authorization: `Bearer ${key}` } });
+      const postJson2 = async (path, payload) => fetch(new URL(path, listen), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, body: JSON.stringify(payload) });
+      return { p, get2, postJson2 };
+    };
+    const readDb2 = () => {
+      const d2 = new DatabaseSync(db2, { readOnly: true });
+      try { return JSON.parse(d2.prepare('SELECT value FROM state WHERE id = 1').get().value); } finally { d2.close(); }
+    };
+    const seedSource = async patch => {
+      const d2 = new DatabaseSync(db2);
+      try {
+        const state = JSON.parse(d2.prepare('SELECT value FROM state WHERE id = 1').get().value);
+        if (!state.source) throw new Error('seedSource: persisted state has no repo source; a green provision must run first');
+        patch(state);
+        d2.prepare('UPDATE state SET value = ? WHERE id = 1').run(JSON.stringify(state));
+      } finally { d2.close(); }
+    };
+
+    // Sort-order fixture: sync's rule key sorts lexically after every install-user key,
+    // so the merged insertion order (sync first) differs from lexical order. The remote
+    // fixture mirrors it for the host check.
+    const orderSrc = join(tmp, 'order-src');
+    const zzData = join(tmp, 'gh', 'own', 'zzfix');
+    for (const [repo, rule] of [[orderSrc, 'order rule'], [zzData, 'zz rule']]) {
+      mkdirSync(join(repo, 'user', 'omp', 'agent'), { recursive: true });
+      mkdirSync(join(repo, 'projects'), { recursive: true });
+      writeFileSync(join(repo, 'zz-order.md'), `---\ndescription: ${rule}\n---\n\nBody\n`);
+      writeFileSync(join(repo, 'AGENTS.md'), `# ${rule}\n`);
+      writeFileSync(join(repo, 'user', 'omp', 'agent', 'config.yml'), 'model: test\n');
+      writeFileSync(join(repo, 'projects', 'projects.json'), JSON.stringify({ contextFiles: [], projects: {} }));
+      assert.equal(git(['init', repo]).status, 0);
+      assert.equal(git(['-C', repo, 'add', '-A']).status, 0);
+      assert.equal(git(['-C', repo, '-c', 'user.email=test@example.com', '-c', 'user.name=test', 'commit', '-m', 'init']).status, 0);
+    }
+    const headSha = repo => git(['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    const orderSha = headSha(orderSrc);
+    const zzSha = headSha(zzData);
+
+    // Stored success: a green repo-source provision persists ok true, pins the imported
+    // sha, and stores items sorted lexically although they merged in a different order;
+    // plan items carry null rule/at and no report key.
+    {
+      const s2 = await bootSrv2(3600);
+      try {
+        r = await s2.postJson2('/config', { repo: orderSrc });
+        assert.equal(r.status, 200);
+        r = await s2.postJson2('/provision', {});
+        assert.equal(r.status, 200);
+        body = await r.json();
+        assert.equal(body.ok, true, 'the order fixture provisions green');
+        assert.deepEqual(body.results.map(x => x.code), [0, 0]);
+        body = await (await s2.get2('/api/state')).json();
+        const names = body.provision.items.map(i => i.item);
+        assert.ok(names.length >= 2, 'the merged item list holds both scripts\' items');
+        assert.deepEqual(names, [...names].sort(), 'stored items are sorted lexically, not in merge order');
+        const plain = body.provision.items.find(i => i.item === 'user/omp/agent/config.yml');
+        assert.ok(plain, 'the user config appears as a plan item');
+        assert.equal(plain.rule, null, 'plan items carry no rule');
+        assert.equal(plain.at, null, 'plan items carry no position');
+        assert.equal('report' in plain, false, 'plan items carry no report key');
+      } finally { await stopServer(s2.p); }
+      const stored = readDb2();
+      assert.ok(stored.provision, 'the green provision persisted a state row');
+      assert.equal(stored.provision.ok, true, 'the stored provision flags success');
+      assert.equal(stored.provision.sha, orderSha, 'the stored provision pins the imported sha');
+      const storedNames = stored.provision.items.map(i => i.item);
+      assert.deepEqual(storedNames, [...storedNames].sort(), 'the persisted items are sorted lexically');
+    }
+
+    // dashCheck host: the tick's remoteHead must receive the spec's explicit host. The
+    // URL rewrite serves the fixture for that host only, so the tick stores the fixture
+    // sha; a replaced host argument resolves github.com instead and stores ''.
+    {
+      const s2 = await bootSrv2(1);
+      try {
+        r = await s2.postJson2('/config', { repo: 'myhost.ghe.com/own/zzfix' });
+        assert.equal(r.status, 200, 'the rewritten spec imports');
+        body = await (await s2.get2('/api/state')).json();
+        const importedAt = body.source.importedAt;
+        await waitFor(async () => {
+          body = await (await s2.get2('/api/state')).json();
+          return body.update.checkedAt !== importedAt;
+        }, 10_000);
+        assert.equal(body.update.remoteSha, zzSha, 'the tick resolves the spec host and stores the fixture sha');
+      } finally { await stopServer(s2.p); }
+    }
+
+    // --commit regex: install-user receives the stored imported sha only when it is 40 or
+    // 64 hex, so every malformed stored sha must keep install-user green (no --commit).
+    for (const [name, badSha] of [['trailing garbage', `${zzSha}g`], ['single char', 'a'], ['non-hex 64', 'z'.repeat(64)], ['leading garbage, hex tail', 'x'.repeat(5) + zzSha]]) {
+      await seedSource(s => { s.source.importedSha = badSha; });
+      const s2 = await bootSrv2(3600);
+      try {
+        r = await s2.postJson2('/provision', {});
+        assert.equal(r.status, 200);
+        body = await r.json();
+        assert.deepEqual(body.results.map(x => x.code), [0, 0], `a malformed stored sha (${name}) reaches no child`);
+        assert.equal(body.ok, true);
+        assert.ok(!body.results[1].output.includes('refusing: --commit'), 'install-user never saw a --commit flag');
+      } finally { await stopServer(s2.p); }
+    }
+
+    // The kind gate: a path source never passes its stored sha on, whatever the row says.
+    await seedSource(s => { s.source.kind = 'path'; s.source.name = orderSrc; s.source.importedSha = 'g'.repeat(64); });
+    {
+      const s2 = await bootSrv2(3600);
+      try {
+        r = await s2.postJson2('/provision', {});
+        assert.equal(r.status, 200);
+        body = await r.json();
+        assert.deepEqual(body.results.map(x => x.code), [0, 0], 'a path source passes no --commit even with a stored sha');
+        assert.equal(body.ok, true);
+        assert.ok(!body.results[1].output.includes('refusing: --commit'), 'the path source never handed the stored sha to install-user');
+      } finally { await stopServer(s2.p); }
+    }
+  }
+
   // restore the repo source for later cases; a provision refreshes the update state
   await postJson('/config', { repo: origin }, true);
   r = await postJson('/provision', {}, true);
@@ -2676,9 +3025,11 @@ try {
   });
   await new Promise(resolve => fakeUp.listen(0, '127.0.0.1', resolve));
   const upBase = `http://127.0.0.1:${fakeUp.address().port}`;
-  const envKeys = ['ALATE_TEST_GITHUB_API_BASE', 'ALATE_TEST_NPM_BASE', 'ALATE_TEST_NODE_DIST_BASE', 'ALATE_TEST_CFT_BASE', 'ALATE_TEST_OSV_BASE', 'ALATE_TEST_CISA_BASE', 'ALATE_TEST_CERTEU_BASE', 'ALATE_TEST_NODE_BLOG_BASE'];
+  const envKeys = ['ALATE_TEST_GITHUB_API_BASE', 'ALATE_TEST_NPM_BASE', 'ALATE_TEST_NODE_DIST_BASE', 'ALATE_TEST_CFT_BASE', 'ALATE_TEST_OSV_BASE', 'ALATE_TEST_CISA_BASE', 'ALATE_TEST_CERTEU_BASE', 'ALATE_TEST_NODE_BLOG_BASE', 'ALATE_TEST_PYPI_BASE'];
   const savedEnv = envKeys.map(k => process.env[k]);
   envKeys.forEach((k, i) => { process.env[k] = `${upBase}/${['gh', 'npm', 'dist', 'cft', 'osv', 'cisa', 'certeu', 'blog'][i]}`; });
+  // The pypi base carries no subpath: the lib appends /pypi/<pkg>/json itself.
+  process.env.ALATE_TEST_PYPI_BASE = upBase;
 
   const mkDb = files => {
     const db = new DatabaseSync(':memory:');
@@ -3511,8 +3862,12 @@ try {
       let drop = ''; // HEAD loses this pin path: the removed-folder case
       let pinDrop = ''; // the pin commit's tree loses this pin path: the broken-pin error case
       let treeOverride = {}; // pin name -> HEAD tree sha: the genuinely-changed-tree case
+      const commitSearches = []; // query strings of the commits requests, one per runPathCheck call
       handler = url => {
-        if (url.pathname === '/gh/repos/ottr-ai/ottr/commits') return [200, [fakeHead(head)]];
+        if (url.pathname === '/gh/repos/ottr-ai/ottr/commits') {
+          commitSearches.push(url.search);
+          return [200, [fakeHead(head)]];
+        }
         const treeTag = /^\/gh\/repos\/ottr-ai\/ottr\/git\/trees\/(.+)$/.exec(url.pathname);
         if (treeTag) {
           const atPin = decodeURIComponent(treeTag[1]) === SHIPPED_PIN.commit;
@@ -3564,6 +3919,10 @@ try {
       await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
       r = rows(db);
       assert.equal(r['ui-ux-check'].target, head, 'a soaked changed tree qualifies');
+      // The path compare rides on the commits query: a shipped row must ask for its own
+      // pin path, never for the repo's last commit regardless of path.
+      const pinPath = shipped.find(s => s.name === 'ui-ux-check').path;
+      assert.ok(commitSearches.some(s => s.includes(`path=${encodeURIComponent(pinPath)}`)), 'the shipped row queries its pin path');
       for (const n of names.filter(n => n !== 'ui-ux-check')) assert.equal(r[n].target, null, 'unchanged paths stay at no target');
       assert.ok(loadUpdates(db).updates.every(isValidUpdateRecord), 'targeted records still pass the board shape');
       treeOverride = {};
@@ -4396,6 +4755,212 @@ try {
       handler = url => url.pathname === '/gh/repos/fake/rl/releases' ? [403, { message: 'plain forbidden' }] : null;
       const bare = rows(await run({ 'upstreams.json': UP([item('rl', { check: { type: 'github-release' } })]) }));
       assert.equal(bare.rl.error, `GET ${upBase}/gh/repos/fake/rl/releases?per_page=100 failed: HTTP 403`, 'a 403 without the exhausted budget stays a bare HTTP error');
+
+      // Only a GitHub URL with the exhausted budget (403/429 + remaining: 0) produces the
+      // rate-limit message: a 500, and a non-GitHub host that fakes the headers, stay bare.
+      {
+        handler = url => url.pathname === '/gh/repos/fake/rl5/releases' ? [500, { message: 'boom' }] : null;
+        const boom = rows(await run({ 'upstreams.json': UP([item('rl5', { check: { type: 'github-release' } })]) }));
+        assert.equal(boom.rl5.error, `GET ${upBase}/gh/repos/fake/rl5/releases?per_page=100 failed: HTTP 500`, 'a 500 from GitHub never becomes the rate-limit message');
+      }
+      {
+        // A 500 carrying exhausted-budget headers is not a rate limit; the status gate must still hold.
+        const reset5xx = Math.floor(Date.now() / 1000) + 1800;
+        handler = url => url.pathname === '/gh/repos/fake/rl6/releases'
+          ? [500, { message: 'boom' }, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset5xx) }]
+          : null;
+        const boomHeaders = rows(await run({ 'upstreams.json': UP([item('rl6', { check: { type: 'github-release' } })]) }));
+        assert.equal(boomHeaders.rl6.error, `GET ${upBase}/gh/repos/fake/rl6/releases?per_page=100 failed: HTTP 500`, 'a 500 with remaining: 0 stays a bare HTTP error, never the rate-limit message');
+      }
+      {
+        handler = url => url.pathname === '/npm/rlx' ? [403, { message: 'forbidden' }, { 'x-ratelimit-remaining': '0' }] : null;
+        const nonGh = rows(await run({ 'upstreams.json': UP([item('rlx', { check: { type: 'npm', package: 'rlx' } })]) }));
+        assert.equal(nonGh.rlx.error, `GET ${upBase}/npm/rlx failed: HTTP 403`, 'faked rate-limit headers on a non-GitHub host stay a bare HTTP error');
+      }
+      {
+        const reset429 = Math.floor(Date.now() / 1000) + 1800;
+        handler = url => url.pathname === '/gh/repos/fake/rl4/releases'
+          ? [429, { message: 'too many requests' }, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset429) }]
+          : null;
+        const tooMany = rows(await run({ 'upstreams.json': UP([item('rl4', { check: { type: 'github-release' } })]) }));
+        assert.equal(tooMany.rl4.error, `GitHub rate limit, resets at ${new Date(reset429 * 1000).toISOString()}; add a github.com token in Settings`, 'a 429 with the exhausted budget names the limit too');
+      }
+      {
+        // A missing, negative, or zero x-ratelimit-reset never resolves to a real instant.
+        const unknown = 'GitHub rate limit, resets at an unknown time; add a github.com token in Settings';
+        handler = url => {
+          if (url.pathname === '/gh/repos/fake/rl1/releases') return [403, { message: 'x' }, { 'x-ratelimit-remaining': '0' }];
+          if (url.pathname === '/gh/repos/fake/rl2/releases') return [403, { message: 'x' }, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '-5' }];
+          if (url.pathname === '/gh/repos/fake/rl3/releases') return [403, { message: 'x' }, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '0' }];
+          return null;
+        };
+        const noReset = rows(await run({ 'upstreams.json': UP([
+          item('rl1', { check: { type: 'github-release' } }),
+          item('rl2', { check: { type: 'github-release' } }),
+          item('rl3', { check: { type: 'github-release' } }),
+        ]) }));
+        assert.equal(noReset.rl1.error, unknown, 'a missing reset header names an unknown time');
+        assert.equal(noReset.rl2.error, unknown, 'a negative reset names an unknown time');
+        assert.equal(noReset.rl3.error, unknown, 'a zero reset names an unknown time');
+      }
+      {
+        // Every one of the four proxy env names alone trips the hint (the property tier only
+        // ever sets the HTTPS pair), and a missing error still renders without throwing.
+        const proxyKeys = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'];
+        const savedProxy = proxyKeys.map(k => process.env[k]);
+        try {
+          proxyKeys.forEach(k => { delete process.env[k]; });
+          const err = new TypeError('fetch failed', { cause: Object.assign(new Error('connect ETIMEDOUT 1.2.3.4:443'), { code: 'ETIMEDOUT' }) });
+          for (const k of proxyKeys) {
+            process.env[k] = '1';
+            assert.equal(rowErrorText(err), 'fetch failed (ETIMEDOUT; proxy?)', `${k} alone trips the proxy hint`);
+            delete process.env[k];
+          }
+          assert.equal(rowErrorText(undefined), 'undefined', 'a missing error renders as text instead of throwing');
+        } finally {
+          proxyKeys.forEach((k, i) => { if (savedProxy[i] == null) delete process.env[k]; else process.env[k] = savedProxy[i]; });
+        }
+      }
+      {
+        // The PYPI_STABLE pick parses the whole version: the leading anchor, multi-digit
+        // epochs, multi-digit release segments, and multi-digit post numbers each move it.
+        const t = old30;
+        handler = url => {
+          const rel = {
+            '/pypi/rg1/json': { 'beta1.0': [{ upload_time_iso_8601: t }], '1.0': [{ upload_time_iso_8601: t }] },
+            '/pypi/rg2/json': { '12!1.0': [{ upload_time_iso_8601: t }] },
+            '/pypi/rg3/json': { '2!1.0': [{ upload_time_iso_8601: t }], '1.0': [{ upload_time_iso_8601: t }] },
+            '/pypi/rg4/json': { '10.2': [{ upload_time_iso_8601: t }], '9.9': [{ upload_time_iso_8601: t }] },
+            '/pypi/rg5/json': { '1.23': [{ upload_time_iso_8601: t }], '1.9': [{ upload_time_iso_8601: t }] },
+            '/pypi/rg6/json': { '1.0.post12': [{ upload_time_iso_8601: t }], '1.0.post9': [{ upload_time_iso_8601: t }] },
+            '/pypi/rg7/json': { '1.0': [{ upload_time_iso_8601: t }], '1.0.post7': [{ upload_time_iso_8601: t }] },
+          }[url.pathname];
+          return rel ? [200, { releases: rel }] : null;
+        };
+        const r = rows(await run({ 'upstreams.json': UP([
+          item('rg1', { version: '0.9', check: { type: 'pypi', package: 'rg1' } }),
+          item('rg2', { version: '0.1', check: { type: 'pypi', package: 'rg2' } }),
+          item('rg3', { version: '0.5', check: { type: 'pypi', package: 'rg3' } }),
+          item('rg4', { version: '0.1', check: { type: 'pypi', package: 'rg4' } }),
+          item('rg5', { version: '0.1', check: { type: 'pypi', package: 'rg5' } }),
+          item('rg6', { version: '1.0', check: { type: 'pypi', package: 'rg6' } }),
+          item('rg7', { version: '0.9', check: { type: 'pypi', package: 'rg7' } }),
+        ]) }));
+        assert.deepEqual([r.rg1.latest, r.rg1.target], ['1.0', '1.0'], `a non-version prefix never leaks a trailing version: ${JSON.stringify(r.rg1)}`);
+        assert.deepEqual([r.rg2.latest, r.rg2.target], ['12!1.0', '12!1.0'], `a multi-digit epoch parses: ${JSON.stringify(r.rg2)}`);
+        assert.deepEqual([r.rg3.latest, r.rg3.target], ['2!1.0', '2!1.0'], `a digit epoch parses where non-digits never do: ${JSON.stringify(r.rg3)}`);
+        assert.deepEqual([r.rg4.latest, r.rg4.target], ['10.2', '10.2'], `multi-digit first release segment: ${JSON.stringify(r.rg4)}`);
+        assert.deepEqual([r.rg5.latest, r.rg5.target], ['1.23', '1.23'], `multi-digit last release segment: ${JSON.stringify(r.rg5)}`);
+        assert.deepEqual([r.rg6.latest, r.rg6.target], ['1.0.post12', '1.0.post12'], `a multi-digit post number parses: ${JSON.stringify(r.rg6)}`);
+        assert.deepEqual([r.rg7.latest, r.rg7.target], ['1.0.post7', '1.0.post7'], `a digit post number parses where non-digits never do: ${JSON.stringify(r.rg7)}`);
+      }
+      {
+        // pypiKey keeps a +local version's identity, defaults the epoch and post numbers,
+        // orders posts strictly, and keeps releases without any upload time out of the pick.
+        const t = old30;
+        handler = url => {
+          const rel = {
+            '/pypi/rk1/json': { 'v1.0+meta': [{ upload_time_iso_8601: t }], '0.9': [{ upload_time_iso_8601: t }] },
+            '/pypi/rk2/json': { '1!1.0': [{ upload_time_iso_8601: t }], '2.0': [{ upload_time_iso_8601: t }] },
+            '/pypi/rk3/json': { '1.0.post7': [{ upload_time_iso_8601: t }], '1.0.post2': [{ upload_time: fresh2 }] },
+            '/pypi/rk4/json': { '1.9': [{}], '1.0': [{ upload_time_iso_8601: t }] },
+          }[url.pathname];
+          return rel ? [200, { releases: rel }] : null;
+        };
+        const r = rows(await run({ 'upstreams.json': UP([
+          item('rk1', { version: '0.5', check: { type: 'pypi', package: 'rk1' } }),
+          item('rk2', { version: '0.5', check: { type: 'pypi', package: 'rk2' } }),
+          item('rk3', { version: '1.0', check: { type: 'pypi', package: 'rk3' } }),
+          item('rk4', { version: '0.5', check: { type: 'pypi', package: 'rk4' } }),
+        ]) }));
+        assert.deepEqual([r.rk1.latest, r.rk1.target], ['v1.0+meta', 'v1.0+meta'], `a +local version keeps its identity and ranks by its core: ${JSON.stringify(r.rk1)}`);
+        assert.deepEqual([r.rk2.latest, r.rk2.target], ['1!1.0', '1!1.0'], `an epoch ranks above every later no-epoch release: ${JSON.stringify(r.rk2)}`);
+        assert.deepEqual([r.rk3.latest, r.rk3.target, r.rk3.publishedAt], ['1.0.post7', '1.0.post7', t], `posts order strictly; the legacy upload_time field feeds the gate: ${JSON.stringify(r.rk3)}`);
+        assert.deepEqual([r.rk4.latest, r.rk4.target, r.rk4.publishedAt], ['1.0', '1.0', t], `a release with no upload time in any file entry stays out of the pick: ${JSON.stringify(r.rk4)}`);
+      }
+      {
+        // The current version anchors the target: an unknown current sits below every
+        // release (even 0.0), an equal current never targets, only a strictly greater
+        // week-old release qualifies, and publishedAt falls back from target to latest.
+        const t = old30;
+        handler = url => {
+          const rel = {
+            '/pypi/rc1/json': { '0.0': [{ upload_time_iso_8601: t }] },
+            '/pypi/rc2/json': { '1.0': [{ upload_time_iso_8601: t }] },
+            '/pypi/rc3/json': { '2.0': [{ upload_time_iso_8601: fresh2 }], '1.0': [{ upload_time_iso_8601: t }] },
+            '/pypi/rc4/json': { '2.0': [{ upload_time_iso_8601: fresh2 }], '1.0': [{ upload_time_iso_8601: t }] },
+          }[url.pathname];
+          return rel ? [200, { releases: rel }] : null;
+        };
+        const r = rows(await run({ 'upstreams.json': UP([
+          item('rc1', { check: { type: 'pypi', package: 'rc1' } }),
+          item('rc2', { version: '1.0', check: { type: 'pypi', package: 'rc2' } }),
+          item('rc3', { version: '2.0', check: { type: 'pypi', package: 'rc3' } }),
+          item('rc4', { version: '1.0', check: { type: 'pypi', package: 'rc4' } }),
+        ]) }));
+        assert.deepEqual([r.rc1.latest, r.rc1.target, r.rc1.publishedAt], ['0.0', '0.0', t], `an unknown current sits below every release: ${JSON.stringify(r.rc1)}`);
+        assert.deepEqual([r.rc2.latest, r.rc2.target, r.rc2.publishedAt], ['1.0', null, t], `an equal current never targets; the pick still names latest: ${JSON.stringify(r.rc2)}`);
+        assert.deepEqual([r.rc3.latest, r.rc3.target, r.rc3.publishedAt], ['2.0', null, fresh2], `a current above every week-old release never targets: ${JSON.stringify(r.rc3)}`);
+        assert.deepEqual([r.rc4.latest, r.rc4.target, r.rc4.publishedAt], ['2.0', null, fresh2], `a too-fresh greater release never targets; publishedAt falls back to latest: ${JSON.stringify(r.rc4)}`);
+      }
+      {
+        // The empty pypi base env falls back to the real https://pypi.org default; the
+        // stub records the URL and fails the fetch, so no real network leaves the process.
+        const realFetch = globalThis.fetch;
+        const seen = [];
+        globalThis.fetch = input => { seen.push(String(input)); return Promise.reject(new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNREFUSED 1.2.3.4:443'), { code: 'ECONNREFUSED' }) })); };
+        const savedPypi = process.env.ALATE_TEST_PYPI_BASE;
+        try {
+          delete process.env.ALATE_TEST_PYPI_BASE;
+          const r = rows(await run({ 'upstreams.json': UP([item('pb', { check: { type: 'pypi', package: 'pb-pkg' } })]) }));
+          assert.ok(seen.includes('https://pypi.org/pypi/pb-pkg/json'), `the deleted env falls back to https://pypi.org: ${JSON.stringify(seen)}`);
+          assert.ok(seen.every(u => /^https?:\/\//.test(u)), `no fetch ever runs against a relative or empty base: ${JSON.stringify(seen)}`);
+          assert.match(r.pb.error ?? '', /fetch failed/, 'the stubbed failure still surfaces as the row error');
+        } finally {
+          globalThis.fetch = realFetch;
+          if (savedPypi == null) delete process.env.ALATE_TEST_PYPI_BASE; else process.env.ALATE_TEST_PYPI_BASE = savedPypi;
+        }
+      }
+      {
+        // A snapshot copy of a shipped pin (user/skills/<name> with a file inside) suppresses
+        // that pin's row; every other pin keeps its row.
+        const pinSha = SHIPPED_PIN.commit;
+        handler = url => {
+          if (url.pathname === '/gh/repos/ottr-ai/ottr/commits')
+            return [200, [{ sha: pinSha, commit: { committer: { date: old30 } }, html_url: `https://github.com/ottr-ai/ottr/commit/${pinSha}` }]];
+          const treeTag = /^\/gh\/repos\/ottr-ai\/ottr\/git\/trees\/(.+)$/.exec(url.pathname);
+          if (treeTag) return [200, { tree: shipped.map(s => ({ path: s.path, type: 'tree', sha: `t-${s.name}` })) }];
+          return null;
+        };
+        const supp = rows(await run({ 'user/skills/retro/SKILL.md': 'x' }));
+        assert.equal(supp.retro, undefined, 'the snapshot copy suppresses the shipped retro row');
+        const names = shipped.map(s => s.name);
+        assert.deepEqual(names.filter(n => supp[n] != null), names.filter(n => n !== 'retro'), 'the other pins keep their rows');
+      }
+      {
+        // A shipped pin whose HEAD tree genuinely differs from the pin tree reports the new
+        // head as latest and target once the first-seen soak passes: the run() result object
+        // (latest, current, target) must flow into the stored row.
+        const pinSha = SHIPPED_PIN.commit;
+        const newHead = 'd'.repeat(40);
+        const treeOverride = { 'ui-ux-check': 't-changed-ui-ux-check' };
+        handler = url => {
+          if (url.pathname === '/gh/repos/ottr-ai/ottr/commits')
+            return [200, [{ sha: newHead, commit: { committer: { date: old30 } }, html_url: `https://github.com/ottr-ai/ottr/commit/${newHead}` }]];
+          const treeTag = /^\/gh\/repos\/ottr-ai\/ottr\/git\/trees\/(.+)$/.exec(url.pathname);
+          if (treeTag) {
+            const atPin = decodeURIComponent(treeTag[1]) === SHIPPED_PIN.commit;
+            return [200, { tree: shipped.map(s => ({ path: s.path, type: 'tree', sha: atPin || treeOverride[s.name] == null ? `t-${s.name}` : treeOverride[s.name] })) }];
+          }
+          return null;
+        };
+        const db = await run({});
+        db.prepare("UPDATE update_seen SET seenAt = ? WHERE key LIKE 'shipped-skill:%'").run(old30);
+        await checkUpdates(db, { dataRepo: 'demo/data', token: 'tok-xyz' });
+        const moved = rows(db)['ui-ux-check'];
+        assert.deepEqual([moved.current, moved.latest, moved.target], [pinSha, newHead, newHead],
+          `the soaked changed shipped pin targets the moved head: ${JSON.stringify(moved)}`);
+      }
     }
 
     // Property: the row error text never leaks the proxy URL or its userinfo, whatever the
@@ -4931,6 +5496,86 @@ try {
       assert.ok(e.message.startsWith('ALATE_GITHUB_HOST:'), e.message);
     } finally {
       if (savedBad === undefined) delete process.env.ALATE_GITHUB_HOST; else process.env.ALATE_GITHUB_HOST = savedBad;
+    }
+
+    // -- remoteUrl/cloneRepo survivors: local-path wins, host lands in the URL, and every
+    // clone-failure literal. A fresh import with no ALATE_TEST_GH_BASE makes the https://
+    // branch live; insteadOf rewrites in a per-call git config keep every URL hermetic: the
+    // expected host maps onto the fixture remote, and a broken spelling fails at once.
+    const savedBase11 = process.env.ALATE_TEST_GH_BASE;
+    const savedHost11 = process.env.ALATE_GITHUB_HOST;
+    const savedCfg11 = process.env.GIT_CONFIG_GLOBAL;
+    try {
+      delete process.env.ALATE_TEST_GH_BASE;
+      delete process.env.ALATE_GITHUB_HOST;
+      const dash11 = await import('./web/dashboard.mjs?alat11');
+      const cfgNone11 = join(tmp, 'alat11-cfg-none');
+      const cfgGhcom11 = join(tmp, 'alat11-cfg-ghcom');
+      const cfgAcme11 = join(tmp, 'alat11-cfg-acme');
+      writeFileSync(cfgNone11, '');
+      writeFileSync(cfgGhcom11, `[url "file://${gh10}/"]\n\tinsteadOf = https://github.com/\n`);
+      writeFileSync(cfgAcme11, `[url "file://${gh10}/"]\n\tinsteadOf = https://acme.ghe.com/\n`);
+      assert.equal(git10(['init', '-q', '--bare', join(gh10, 'own', 'empty-alat11')]).status, 0);
+      const ghHead11 = git10(['--git-dir', ghOwn, 'rev-parse', 'HEAD']).stdout.trim();
+
+      // isWritableDir: the negative answer is exact. A missing dir is never writable, not
+      // even as root, so the catch path must return false and nothing else.
+      assert.equal(dash11.isWritableDir(join(tmp, 'no-such-dir-alat11')), false, 'a missing dir reports not writable');
+      assert.equal(dash11.isWritableDir(tmp), true, 'a writable dir reports writable');
+
+      // remoteHead on an existing local path: the path wins as the URL and a missing ref
+      // argument falls back to HEAD.
+      process.env.GIT_CONFIG_GLOBAL = cfgNone11;
+      assert.equal(dash11.remoteHead(ghOwn, undefined, null), ghHead11);
+
+      // Default host with no GH_BASE: the URL is https://github.com/<name>, so the rewrite
+      // lands on the fixture and the sha comes back. A forced-local URL or a flipped host
+      // never reaches the rewrite and yields ''.
+      process.env.GIT_CONFIG_GLOBAL = cfgGhcom11;
+      assert.equal(dash11.remoteHead('own/data', 'main', null), ghHead11);
+
+      // Explicit host in the spec: the URL must carry it, or the clone misses the rewrite
+      // and the import fails instead of landing the fixture's sha.
+      process.env.GIT_CONFIG_GLOBAL = cfgAcme11;
+      const db11a = mkDb10('alat11-a.db');
+      const c11 = leak10(() => dash11.importSource(dash11.loadState(db11a), 'acme.ghe.com/own/data@main', 'repo', null, db11a));
+      assert.deepEqual([c11.source.name, c11.source.host, c11.source.ref, c11.source.importedSha], ['own/data', 'acme.ghe.com', 'main', ghHead11]);
+      assert.equal(dash11.remoteHead('own/data', 'main', null, 'acme.ghe.com'), ghHead11);
+
+      // An existing local path wins over the URL form even for repo sources.
+      process.env.GIT_CONFIG_GLOBAL = cfgNone11;
+      const ghwtSha11 = git10(['-C', 'ghwt', 'rev-parse', 'HEAD']).stdout.trim();
+      const db11b = mkDb10('alat11-b.db');
+      const p11 = leak10(() => dash11.importSource(dash11.loadState(db11b), join(w10, 'ghwt'), 'repo', null, db11b));
+      assert.deepEqual([p11.source.kind, p11.source.name, p11.source.importedSha], ['repo', join(w10, 'ghwt'), ghwtSha11]);
+
+      // A ref-less clone failure names just the repo, then the colon and git's stderr.
+      process.env.GIT_CONFIG_GLOBAL = cfgAcme11;
+      const db11c = mkDb10('alat11-c.db');
+      e = err10(() => dash11.importSource(dash11.loadState(db11c), 'acme.ghe.com/own/no-such-alat11', 'repo', null, db11c));
+      assert.equal(e.status, 400);
+      assert.match(e.message, /^git clone failed for own\/no-such-alat11: /, 'a ref-less clone failure names just the repo');
+      assert.ok(!e.message.includes('@'), 'a ref-less clone failure names no ref');
+      assert.ok(e.message.includes('does not appear to be a git repository'), 'the clone failure carries git stderr');
+
+      // An empty remote clones fine but has no HEAD to read: the failure names the repo.
+      const db11d = mkDb10('alat11-d.db');
+      e = err10(() => leak10(() => dash11.importSource(dash11.loadState(db11d), 'acme.ghe.com/own/empty-alat11', 'repo', null, db11d)));
+      assert.equal(e.message, 'cannot read cloned HEAD for own/empty-alat11', 'an empty remote reports the HEAD read failure');
+
+      // git missing from PATH: the clone fails with no stderr at all, so the message ends
+      // at the ref and no colon is appended.
+      const db11e = mkDb10('alat11-e.db');
+      const savedPath11 = process.env.PATH;
+      process.env.PATH = '/nonexistent-alat11';
+      try { e = err10(() => leak10(() => dash11.importSource(dash11.loadState(db11e), 'own/data@main', 'repo', null, db11e))); }
+      finally { process.env.PATH = savedPath11; }
+      assert.equal(e.status, 400);
+      assert.equal(e.message, 'git clone failed for own/data@main', 'a spawn failure appends no colon and no stderr');
+    } finally {
+      if (savedBase11 === undefined) delete process.env.ALATE_TEST_GH_BASE; else process.env.ALATE_TEST_GH_BASE = savedBase11;
+      if (savedHost11 === undefined) delete process.env.ALATE_GITHUB_HOST; else process.env.ALATE_GITHUB_HOST = savedHost11;
+      if (savedCfg11 === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = savedCfg11;
     }
 
     // -- snapshotData: exact tree, temp prefix, unsafe stored paths refused.

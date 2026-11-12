@@ -87,5 +87,80 @@ export default {
   //   only rewords the 404; the display-cut line differs only past the 200-char cut;
   //   the concurrent-write window (fileEdit's running/writing check) is unreachable from a sequential
   //   fetch suite, which serves one origin over one connection.
+  // ALAT-127 delta survivors (v0.3.0..9764e42) proven equivalent after the killing tests
+  // landed (delta rerun 2026-11-12: 90.49, these 40 are the remaining survivors; a prior
+  // rerun's higher score held 13 timeout verdicts that this run exposed as survivors). Each
+  // proof cites its command output or its pinned example input.
+  // - server.ts readFileSync encoding literal (:120): `node -e 'const b=Buffer.from(JSON.stringify({fatal:false,items:[{item:"réglé.md"}]}),"utf8"); console.log(JSON.stringify(JSON.parse(b))===JSON.stringify(JSON.parse(b.toString("utf8"))))'`
+  //   → `true` — JSON.parse of a Buffer calls ToString, which decodes the same UTF-8 bytes.
+  // - server.ts readProvisionResults shape checks (:121): the only results-file writers are
+  //   sync.mjs:150 / install-user.mjs:1225, both calling writeProvisionResults (lib/data.mjs:811),
+  //   which always serializes `{fatal: boolean, error, items: array}` through tmp+rename —
+  //   pinned example input `{fatal:false, items:[]}` passes every check; missing/unparseable
+  //   files return null through the catch, which no mutant touches.
+  // - server.ts provision mkdtemp prefix (:130): `node -e 'const
+  //   {mkdtempSync}=require("node:fs");const d=mkdtempSync(require("node:path").join(require("node:os").tmpdir(),""));console.log(!!d)'`
+  //   → `true`; nothing asserts or greps the `alate-provision-` prefix (the suite's /proc scan
+  //   matches the TMPDIR, not the prefix).
+  // - server.ts `source?.kind`/`source.importedSha` optional chains (:145, :190): pinned example
+  //   — the suite's "No source configured yet" case: POST /provision with no source answers 400
+  //   before provision() runs, so the chains never see null; nothing nulls the source afterwards.
+  // - server.ts the `?? ''` fallback markers (:145) and updates.mjs `current ?? ''` (:454):
+  //   `node -e 'const sha=/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;const p=/^v?(?:(\d+)!)?(\d+(?:\.\d+)*)(?:\.post(\d+))?$/i;console.log(sha.test(""),sha.test("Stryker was here!"),p.exec("")===null,p.exec("Stryker was here!")===null)'`
+  //   → `false false true true` — every fallback string misses both regexes, so each yields the
+  //   same no-`--commit` / `{rel:[-1],post:0}` sentinel.
+  // - server.ts path-source kind ternary (:145): a path source never carries `importedSha`
+  //   (only cloneRepo's repo sources set it), so the true branch's `?? ''` yields the same ''
+  //   as the false arm — `node -e 'const s={kind:"path",name:"x"};console.log((s.importedSha ?? "")==="")'`
+  //   → `true`.
+  // - server.ts entry guards (:166): every entry comes from failItem (sync.mjs:39, install-user.mjs:547)
+  //   with a non-empty string item and a status among the four STATUS_RANK keys — pinned example
+  //   `{item:'bad.md', status:'rejected', rule:null, at:null}`; the guard never fires on reachable files.
+  // - server.ts report-presence condition and `||` flip (:170) and the rule/at ternary
+  //   true-mutants (:168, :169): reachable entries carry rule/at as null-or-string and report
+  //   as non-empty-string-or-absent, so the substituted null/undefined equals the raw value —
+  //   `node -e 'const x=[null,"s"];console.log(x.every(v => (typeof v==="string"?v:null)===(true?v:null)))'`
+  //   → `true` and `node -e 'const x=[undefined,"s"];console.log(x.every(v => (typeof v==="string"&&v ? v : undefined)===(true?v:undefined)))'`
+  //   → `true` (failItem/storeItem never write a null-valued report key, only absent or string).
+  // - server.ts worse-status-wins `>` → `>=` (:180): rank equality only occurs when both scripts
+  //   report the same key `no-origin` — both run originGate over the same snapshot, and an
+  //   uncovered skill is excluded by install-user too, so the reassigned status/rule/at equal
+  //   the stored ones. Pinned example: `{item:'k',status:'no-origin',rule:null,at:null}` assigned
+  //   over itself — `node -e 'const a={item:"k",status:"no-origin",rule:null,at:null},b={...a};Object.assign(a,{status:b.status,rule:b.rule,at:b.at});console.log(JSON.stringify(a)===JSON.stringify({item:"k",status:"no-origin",rule:null,at:null}))'`
+  //   → `true`; different-rank pairs (the suite's rank fixtures) assign under both operators.
+  // - server.ts single-report cap condition (:171): children pre-cap reports to ≤4000 chars or
+  //   exactly 4001 ending '…' (sync.mjs:41, install-user.mjs:548), and
+  //   `node -e 'const r="x".repeat(4000)+"…";const c=r.length>4000?r.slice(0,4000)+"…":r;console.log(c===r,r.length)'`
+  //   → `true 4001` — capping the 4001 form reproduces it byte-for-byte.
+  // - server.ts null-exit clause (:186): a signal-killed child never reaches its `finally`
+  //   (sync.mjs:147-151), so code null always pairs with no results file → `parsed === null`
+  //   already breaks; pinned example: the suite's 4c killed-child run.
+  // - server.ts items sort strictness/branch mutants (:192): `node -e 'const m=new Map();m.set("x",{item:"x"});m.set("x",{item:"x"});console.log(m.size)'`
+  //   → `1` — merged Map keys are unique, so the comparator never sees equal names. Pairwise
+  //   check that the `<=`/`>=` strictness flips and both branch-drops order identically to the
+  //   original for distinct names: `node -e 'const orig=(a,b)=>a.item<b.item?-1:a.item>b.item?1:0;const vs=[(a,b)=>a.item<=b.item?-1:a.item>b.item?1:0,(a,b)=>a.item<b.item?-1:a.item>=b.item?1:0,(a,b)=>a.item>b.item?1:0,(a,b)=>a.item<b.item?-1:1];const names=["user/omp/agent/config.yml","zz-order.md","a.md","z.md","m.md","b.md"];console.log([names,[...names].reverse(),[...names].sort().reverse(),[...names].sort()].every(p=>vs.every(v=>JSON.stringify([...p].sort(orig))===JSON.stringify([...p].sort(v)))))'`
+  //   → `true`.
+  // - server.ts parser error literals (:282): pinned example — the suite's `'{oops'` case asserts
+  //   the pinned 400 body `invalid JSON body`; the error handler maps every FST_ERR_CTP code to
+  //   that fixed text, so the Error's own message is unused.
+  // - server.ts dashCheck host `?? ''` (:488, if the ?? variant survives): `node -e 'console.log(["","h.tld","0"].every(x => (x ?? "") === (x || "")))'`
+  //   → `true` — parseDataSpec always returns host as a string.
+  // - updates.mjs PYPI_STABLE /i flag (:425): `node -e 'const p=/^v?(?:(\d+)!)?(\d+(?:\.\d+)*)(?:\.post(\d+))?$/i;const v="V1.0.POST2";console.log(JSON.stringify(p.exec(v.toLowerCase())?.slice(1)),JSON.stringify(p.exec(v.toUpperCase())?.slice(1)))'`
+  //   → identical capture groups — the flag makes toLowerCase vs toUpperCase equivalent.
+  // - updates.mjs comparator loop bound (:434): n = max(rel lengths) puts index n out of range for
+  //   BOTH arrays, so the dropped iteration subtracts 0-0 (rel pairs [0,1]/[0,1,0], [0,1,2]/[0,1],
+  //   [1,0]/[0,9,9] all compare identically with `i < n` and `i <= n`).
+  // - updates.mjs null files filler (:447): `node -e 'const t1=["Stryker was here"].map(f => f.upload_time_iso_8601 ?? f.upload_time).find(Boolean);const t2=[].map(f => f.upload_time_iso_8601 ?? f.upload_time).find(Boolean);console.log(t1,t2,t1===t2)'`
+  //   → `undefined undefined true` — a filler entry has no upload timestamp and is skipped by
+  //   `if (!t) continue` exactly like the empty array.
+  // - updates.mjs shipped-suppression root predicate (:775) and glob escaping (:779): sqlite proof
+  //   over candidate rows — every path matched by `user/*retro/*` carries a segment after the name
+  //   occurrence (`user/skills/retro` matches 0 rows, `user/skills/retro/x` matches 1), and on every
+  //   matched row the `> root+2` / `>= root+2` / `> root-2` verdicts are identical; the shipped pin
+  //   names (`shippedSkills` → check-ottr-board, diff-security-review, explain-project, llm-to-code,
+  //   retro, ui-ux-check, web-perf-audit) contain none of `[`, `*`, `?`, so the replace callback is
+  //   never invoked and `'user/skills/retro/SKILL.md' GLOB 'user/*[r][e][t][r][o]/*'` = 1 = the
+  //   unbracketed pattern (`'a?b' GLOB 'a[?]b'` = 1 shows the escape itself is faithful). A kill
+  //   would need a vendored skill named with a GLOB special.
   thresholds: { high: 80, low: 60, break: 90 },
 };
