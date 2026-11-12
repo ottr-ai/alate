@@ -6644,6 +6644,45 @@ try {
   }
 
   {
+    // An edit queued behind an in-flight import runs against the state that import
+    // stored: the base hash read from the replaced source must be refused, and the
+    // import's source must survive. An edit dispatched outside importChain carried a
+    // stale state snapshot, re-imported the replaced source and silently un-did the import.
+    const raceCfg = join(tmp, 'server-config-edit-race.json');
+    writeFileSync(raceCfg, JSON.stringify({ apiKey: null }));
+    const raceA = join(tmp, 'race-source-a');
+    const raceB = join(tmp, 'race-source-b');
+    for (const [dir, line] of [[raceA, 'from source a\n'], [raceB, 'from source b\n']]) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'notes.md'), line);
+      assert.equal(git(['init', '-q', '-b', 'main', dir]).status, 0);
+      git(['-C', dir, 'config', 'user.name', 't']);
+      git(['-C', dir, 'config', 'user.email', 't@t']);
+    }
+    const raceSrv = spawnServer(['--port', '0', '--config', raceCfg, '--db', join(tmp, 'state-edit-race.db')], { ...testServerEnv, ALATE_TEST_WORKER_DELAY_MS: '1500' });
+    try {
+      const { apiKey: raceKey, base: raceBase } = await awaitStartup(raceSrv);
+      const raceAuth = { 'Content-Type': 'application/json', Authorization: `Bearer ${raceKey}` };
+      const raceGet = async route => fetch(new URL(route, raceBase), { headers: { Authorization: `Bearer ${raceKey}` } });
+      let r = await fetch(new URL(`${raceBase}/api/import`), { method: 'POST', headers: raceAuth, body: JSON.stringify({ source: raceA }) });
+      assert.equal(r.status, 200, JSON.stringify(await r.json()));
+      const aNotes = await (await raceGet('/api/file?path=notes.md')).json();
+      // The worker delay holds the B import while the edit queues behind it.
+      const importB = fetch(new URL(`${raceBase}/api/import`), { method: 'POST', headers: raceAuth, body: JSON.stringify({ source: raceB }) });
+      const editP = fetch(new URL('/api/file', raceBase), { method: 'PUT', headers: raceAuth, body: JSON.stringify({ path: 'notes.md', content: 'stale edit\n', base: aNotes.hash, message: 'test: queued edit' }) });
+      const importBRes = await importB;
+      assert.equal(importBRes.status, 200, 'the B import settled');
+      const editRes = await editP;
+      const editText = await editRes.text();
+      assert.equal(editRes.status, 409, `the stale-base edit must be refused: ${editText}`);
+      const raceState = await (await raceGet('/api/state')).json();
+      assert.equal(raceState.source.spec, raceB, 'the import survived the queued edit');
+      const stored = await (await raceGet('/api/file?path=notes.md')).json();
+      assert.equal(stored.content, 'from source b\n', 'the stored snapshot holds B, not the replaced source or the stale edit');
+    } finally { await stopServer(raceSrv); }
+  }
+
+  {
     // Route contract across the worker hop: a path-source edit whose push fails answers
     // 502 with the client-safe text while the snapshot was still re-imported and the check
     // re-ran, and a vanished source dir answers 400, as the in-loop editor always did.

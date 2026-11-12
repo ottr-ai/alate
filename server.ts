@@ -494,8 +494,8 @@ function noteTokenHost(spec: string, kind?: string): void {
   }
 }
 
-// One import at a time: the worker thread runs one op at a time, and a caller that
-// queues during an import must run against the state that import stored.
+// One snapshot write at a time: imports and file edits share this chain, and a caller
+// that queues during one of them must run against the state that op stored.
 let importChain: Promise<unknown> = Promise.resolve()
 // True from before an import dispatch until it settles. Update checks read this flag:
 // a check started during an import writes SQLite rows and would block the event loop
@@ -682,39 +682,49 @@ async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) 
   if (running || writing) return reply.code(409).send({ error: running ? 'provision already running' : 'another file write is running' })
   const body = (req.body ?? {}) as FileEditBody
   writing = true
-  editing = true
-  try {
-    const res = await runEdit({ dbFile, state: dashState, edit: { ...body, delete: del }, token: dashToken() })
-    dashState = res.state
-    // Same refresh selectSource does after an import: the repo source now sits on the new commit.
-    dashState.update = dashState.source.kind === 'repo'
-      ? { checkedAt: new Date().toISOString(), remoteSha: dashState.source.importedSha, available: false }
-      : null
-    persistDash()
-    // Every committed edit changed the stored snapshot, path edits included; the
-    // stored update rows follow at once, never at the next timer tick.
-    void updateCheckAfterChange()
-    return {
-      ok: true,
-      commit: res.commit,
-      pushed: res.pushed,
-      ...(res.warning ? { warning: res.warning } : {}),
-      state: { ...dashState, updates: loadUpdates(db) },
-    }
-  } catch (err) {
-    // editPathSource re-imports the user's tree before it throws, so a failed
-    // commit or push still changed the stored snapshot.
-    if (err && typeof err === 'object' && 'snapshotChanged' in err && err.snapshotChanged === true) void updateCheckAfterChange()
-    return clientError(reply, err)
-  } finally {
-    writing = false
-    editing = false
-    // A check that arrived during the edit was deferred: run exactly one now.
-    if (checkDeferred) {
-      checkDeferred = false
+  // Queue on importChain like the worker does: an edit that waits for an in-flight
+  // import must run against the state that import stored, never the one it replaced.
+  // Reading dashState at dispatch time would commit the edit to the replaced source.
+  const run = importChain.then(async () => {
+    editing = true
+    try {
+      const res = await runEdit({ dbFile, state: dashState, edit: { ...body, delete: del }, token: dashToken() })
+      dashState = res.state
+      // Same refresh selectSource does after an import: the repo source now sits on the new commit.
+      dashState.update = dashState.source.kind === 'repo'
+        ? { checkedAt: new Date().toISOString(), remoteSha: dashState.source.importedSha, available: false }
+        : null
+      persistDash()
+      // Every committed edit changed the stored snapshot, path edits included; the
+      // stored update rows follow at once, never at the next timer tick.
       void updateCheckAfterChange()
+      return {
+        ok: true,
+        commit: res.commit,
+        pushed: res.pushed,
+        ...(res.warning ? { warning: res.warning } : {}),
+        state: { ...dashState, updates: loadUpdates(db) },
+      }
+    } catch (err) {
+      // editPathSource re-imports the user's tree before it throws, so a failed
+      // commit or push still changed the stored snapshot.
+      if (err && typeof err === 'object' && 'snapshotChanged' in err && err.snapshotChanged === true) void updateCheckAfterChange()
+      throw err
+    } finally {
+      editing = false
+      // A check that arrived during the edit was deferred: run exactly one now.
+      if (checkDeferred) {
+        checkDeferred = false
+        void updateCheckAfterChange()
+      }
     }
-  }
+  })
+  importChain = run.then(() => undefined, () => undefined)
+  try {
+    return await run
+  } catch (err) {
+    return clientError(reply, err)
+  } finally { writing = false }
 }
 
 app.put('/api/file', { bodyLimit: 2 * 1024 * 1024, preHandler: dashGuard }, async (req, reply) => fileEdit(req, reply, false))
