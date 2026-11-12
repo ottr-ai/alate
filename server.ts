@@ -10,8 +10,9 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { AddressInfo } from 'node:net'
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
-import { cleanupData, DEFAULT_GITHUB_HOST, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
-import { applyFileEdit, importSource, isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead, snapshotData } from './web/dashboard.mjs'
+import { DEFAULT_GITHUB_HOST, keepTemp, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
+import { runCleanup, runImport, runSnapshot } from './lib/server-worker.mjs'
+import { applyFileEdit, isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead } from './web/dashboard.mjs'
 import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
 import { ensureEnvProxy } from './lib/env-proxy.mjs'
 
@@ -109,6 +110,9 @@ if (!config.apiKey) {
 const dbFile = flagValue('--db') ?? join(dirname(CONFIG_FILE), 'alate.db')
 mkdirSync(dirname(dbFile), { recursive: true })
 const db = new DatabaseSync(dbFile)
+// The worker thread writes the same file during imports: a main-thread write that lands
+// inside the worker's transaction waits instead of throwing or blocking on a bare lock.
+db.exec('PRAGMA busy_timeout = 5000')
 if (process.platform !== 'win32') chmodSync(dbFile, 0o600)
 db.exec(`
   CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL);
@@ -139,7 +143,9 @@ function readProvisionResults(file: string): { fatal: boolean; items: { item: st
 }
 
 async function provision(): Promise<ProvisionResult[]> {
-  const data = snapshotData(db)
+  // The snapshot copy writes every stored byte: it runs in the worker thread, so the
+  // event loop stays free while it runs.
+  const dir = await runSnapshot({ dbFile })
   const tmp = mkdtempSync(join(tmpdir(), 'alate-provision-'))
   try {
     const results: ProvisionResult[] = []
@@ -157,7 +163,7 @@ async function provision(): Promise<ProvisionResult[]> {
       // so the git probe in install-user.mjs keeps its nogit fallback.
       const importedSha = dashState.source?.kind === 'repo' ? dashState.source.importedSha ?? '' : ''
       const commitArg = script === 'install-user.mjs' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(importedSha) ? ['--commit', importedSha] : []
-      const child = spawn(process.execPath, [join(repoRoot, script), '--data', data.dir, ...commitArg], {
+      const child = spawn(process.execPath, [join(repoRoot, script), '--data', dir, ...commitArg], {
         cwd: repoRoot,
         env,
       })
@@ -209,7 +215,9 @@ async function provision(): Promise<ProvisionResult[]> {
     return results
   } finally {
     rmSync(tmp, { recursive: true, force: true })
-    cleanupData(data)
+    // Same guard cleanupData applied: ALATE_KEEP_TEMP keeps every temp dir for
+    // strict no-delete runs. The rm itself runs in the worker thread.
+    if (!keepTemp()) await runCleanup(dir)
   }
 }
 
@@ -367,7 +375,7 @@ app.post<{ Body: ConfigBody | undefined }>('/config', {
   config.token = nextToken
   let queuedCheck = false
   try {
-    queuedCheck = selectSource((repo ?? path) as string, repo != null ? 'repo' : 'path', nextToken ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN)
+    queuedCheck = await selectSource((repo ?? path) as string, repo != null ? 'repo' : 'path', nextToken ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN)
   } catch (err) {
     config.token = prevToken
     saveConfig(config)
@@ -485,36 +493,56 @@ function noteTokenHost(spec: string, kind?: string): void {
   }
 }
 
-function selectSource(spec: string, kind?: string, token = dashToken()): boolean {
+// One import at a time: the worker thread runs one op at a time, and a caller that
+// queues during an import must run against the state that import stored.
+let importChain: Promise<unknown> = Promise.resolve()
+// True from before an import dispatch until it settles. Update checks read this flag:
+// a check started during an import writes SQLite rows and would block the event loop
+// on the worker's write transaction (OTTR-807).
+let importing = false
+let checkDeferred = false
+
+async function selectSource(spec: string, kind?: string, token = dashToken()): Promise<boolean> {
   noteTokenHost(spec, kind)
-  const next = importSource(dashState, spec, kind, token, db)
-  const changed = dashState.source?.spec !== next.source.spec || dashState.source?.kind !== next.source.kind
-  const newCommit = next.source.kind === 'repo' && !!next.source.importedSha && next.source.importedSha !== dashState.source?.importedSha
-  dashState = next
-  const isRepo = next.source.kind === 'repo'
-  config.repo = isRepo ? next.source.spec : null
-  config.path = isRepo ? null : next.source.name
-  config.update = {
-    lastChecked: isRepo ? next.source.importedAt : null,
-    remoteSha: next.source.importedSha ?? '',
-    provisionedSha: changed ? '' : config.update.provisionedSha,
-  }
-  dashState.update = isRepo ? { checkedAt: next.source.importedAt, remoteSha: next.source.importedSha, available: false } : null
-  persistDash()
-  saveConfig(config)
-  // A fresh snapshot invalidates the stored update rows at once, not at the next timer tick.
-  // The return value tells route callers whether the check is already queued, so one
-  // snapshot change queues exactly one trigger.
-  if (newCommit) {
-    void updateCheckAfterChange()
-    return true
-  }
-  return false
+  const run = importChain.then(async () => {
+    importing = true
+    try {
+      const next = await runImport({ dbFile, state: dashState, spec, kind, token })
+      const changed = dashState.source?.spec !== next.source.spec || dashState.source?.kind !== next.source.kind
+      const newCommit = next.source.kind === 'repo' && !!next.source.importedSha && next.source.importedSha !== dashState.source?.importedSha
+      dashState = next
+      const isRepo = next.source.kind === 'repo'
+      config.repo = isRepo ? next.source.spec : null
+      config.path = isRepo ? null : next.source.name
+      config.update = {
+        lastChecked: isRepo ? next.source.importedAt : null,
+        remoteSha: next.source.importedSha ?? '',
+        provisionedSha: changed ? '' : config.update.provisionedSha,
+      }
+      dashState.update = isRepo ? { checkedAt: next.source.importedAt, remoteSha: next.source.importedSha, available: false } : null
+      persistDash()
+      saveConfig(config)
+      // A fresh snapshot invalidates the stored update rows at once, not at the next timer tick.
+      // The return value tells route callers whether the check is already queued, so one
+      // snapshot change queues exactly one trigger.
+      if (newCommit) void updateCheckAfterChange()
+      return newCommit
+    } finally {
+      importing = false
+      // A check that arrived during the import was deferred: run exactly one now.
+      if (checkDeferred) {
+        checkDeferred = false
+        void updateCheckAfterChange()
+      }
+    }
+  })
+  importChain = run.then(() => undefined, () => undefined)
+  return run
 }
 
 // Periodic remote check for a repo source: refresh update state, optionally auto re-import.
-function dashCheck(): void {
-  if (running || dashState.source?.kind !== 'repo') return
+async function dashCheck(): Promise<void> {
+  if (running || importing || dashState.source?.kind !== 'repo') return
   const sha = remoteHead(dashState.source.name, dashState.source.ref, dashToken(), dashState.source.host ?? '')
   dashState.update = { checkedAt: new Date().toISOString(), remoteSha: sha, available: sha !== '' && sha !== dashState.source.importedSha }
   if (sha) config.update.remoteSha = sha
@@ -523,7 +551,7 @@ function dashCheck(): void {
   persistDash()
   if (config.autoUpdate && dashState.update.available) {
     try {
-      selectSource(dashState.source.spec, 'repo')
+      await selectSource(dashState.source.spec, 'repo')
     } catch (err) {
       console.error(`snapshot refresh failed: ${redactSecrets((err as Error).message, dashToken())}`)
     }
@@ -540,6 +568,12 @@ let rerunNeeded = false
 // never waits for the next timer tick. The promise never rejects, so the
 // fire-and-forget callers stay safe.
 function updateCheck(): Promise<void> {
+  // An import holds the SQLite write lock in the worker: defer exactly one check to
+  // the end of the import instead of blocking the event loop on the busy timeout.
+  if (importing) {
+    checkDeferred = true
+    return updatePromise
+  }
   if (updateRunning) return updatePromise
   updateRunning = true
   updatePromise = (async () => {
@@ -614,7 +648,7 @@ app.post<{ Body: ImportBody | undefined }>('/api/import', { bodyLimit: 64 * 1024
   if (body.kind !== undefined && body.kind !== 'path' && body.kind !== 'repo') return reply.code(400).send({ error: 'kind must be "path" or "repo"' })
   let queuedCheck = false
   try {
-    queuedCheck = selectSource(body.source, body.kind as string | undefined)
+    queuedCheck = await selectSource(body.source, body.kind as string | undefined)
   } catch (err) {
     return clientError(reply, err)
   }
@@ -722,11 +756,7 @@ const intervalSec = +(flagValue('--interval') ?? 900)
 // A locked database (an import's write transaction) must not kill the timer: skip the
 // tick and let the next one rewrite the state row, like updateCheck skips failed ticks.
 const timer = setInterval(() => {
-  try {
-    dashCheck()
-  } catch (err) {
-    console.error(`dashboard check failed: ${redactSecrets((err as Error).message, dashToken())}`)
-  }
+  dashCheck().catch(err => console.error(`dashboard check failed: ${redactSecrets((err as Error).message, dashToken())}`))
 }, intervalSec * 1000)
 timer.unref()
 
@@ -741,9 +771,9 @@ if (dashState.source) {
   saveConfig(config)
 } else {
   const source = flagValue('--repo') ?? config.repo ?? flagValue('--data') ?? config.path
-  if (source) selectSource(source, flagValue('--repo') || config.repo ? 'repo' : undefined)
+  if (source) await selectSource(source, flagValue('--repo') || config.repo ? 'repo' : undefined)
 }
-dashCheck()
+dashCheck().catch(err => console.error(`dashboard check failed: ${redactSecrets((err as Error).message, dashToken())}`))
 void updateCheck()
 
 await app.listen({ port, host })

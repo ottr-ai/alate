@@ -6411,6 +6411,173 @@ try {
     }
   }
 
+  // ---- Worker-thread isolation (OTTR-807): imports, provision snapshots and their
+  // cleanup run in lib/server-worker.mjs, so GET /health keeps answering while they run. ----
+  // Endpoint stubs that refuse fast, so the boot-time update check never leaves loopback
+  // and every row degrades deterministically to an error row with a checkedAt.
+  const noNet = {
+    ALATE_TEST_GITHUB_API_BASE: 'http://127.0.0.1:9', ALATE_TEST_NPM_BASE: 'http://127.0.0.1:9',
+    ALATE_TEST_PYPI_BASE: 'http://127.0.0.1:9', ALATE_TEST_NODE_DIST_BASE: 'http://127.0.0.1:9',
+    ALATE_TEST_NODE_BLOG_BASE: 'http://127.0.0.1:9', ALATE_TEST_OSV_BASE: 'http://127.0.0.1:9',
+    ALATE_TEST_CFT_BASE: 'http://127.0.0.1:9', ALATE_TEST_CISA_BASE: 'http://127.0.0.1:9',
+    ALATE_TEST_CERTEU_BASE: 'http://127.0.0.1:9', ALATE_TEST_FETCH_TIMEOUT_MS: '2000',
+  };
+  const testServerEnv = { ...serverEnv, ...noNet };
+  const awaitStartup = child => new Promise((resolve, reject) => {
+    let buf = '';
+    const onData = chunk => {
+      buf += chunk;
+      const k = /alate API key: (\S+)\n/.exec(buf);
+      const l = /alate server on (http:\/\/127\.0\.0\.1:\d+)\n/.exec(buf);
+      if (k && l) {
+        child.stdout.off('data', onData);
+        child.off('exit', onExit);
+        resolve({ apiKey: k[1], base: l[1] });
+      }
+    };
+    const onExit = code => reject(new Error(`test server exited early (${code}): ${buf.slice(-300)}`));
+    child.stdout.on('data', onData);
+    child.once('exit', onExit);
+    setTimeout(() => reject(new Error(`test server did not start: ${buf.slice(-300)}`)), 30_000).unref();
+  });
+  // Probes /health every 10 ms while `run` is in flight; every probe must answer 200 fast.
+  const probeHealthWhile = async (base, run) => {
+    const times = [];
+    let done = false;
+    let failure = null;
+    const loop = (async () => {
+      while (!done) {
+        const t0 = Date.now();
+        try {
+          const r = await fetch(new URL('/health', base));
+          if (r.status !== 200) failure ??= `health probe answered ${r.status}`;
+        } catch (err) { failure ??= `health probe failed: ${err.message}`; }
+        times.push(Date.now() - t0);
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    })();
+    const t0 = Date.now();
+    const result = await run();
+    const elapsed = Date.now() - t0;
+    done = true;
+    await loop;
+    assert.equal(failure, null, failure ?? 'probes ok');
+    return { result, times, elapsed };
+  };
+  const assertFastProbes = (times, label) => {
+    assert.ok(times.length >= 10, `at least 10 probes ran while ${label} held the worker (${times.length})`);
+    const worst = Math.max(...times);
+    assert.ok(worst < 300, `every health probe stayed under 300 ms during ${label} (worst: ${Math.round(worst)} ms)`);
+  };
+
+  {
+    // Import isolation: a ~21k-file source. The pre-worker import read every file and
+    // rewrote the files table synchronously on the event loop and stalled /health for
+    // the whole run; now it runs in the worker thread.
+    const bulkSource = join(tmp, 'bulk-source');
+    mkdirSync(join(bulkSource, 'user', 'bulk'), { recursive: true });
+    const bulkRule = '---\ndescription: bulk rule\n---\n\n' + 'Body line for the fixture. '.repeat(20);
+    for (let i = 0; i < 7000; i++) writeFileSync(join(bulkSource, `rule-${String(i).padStart(5, '0')}.md`), bulkRule);
+    for (let i = 0; i < 14000; i++) writeFileSync(join(bulkSource, 'user', 'bulk', `f-${String(i).padStart(5, '0')}.txt`), 'x'.repeat(1024));
+    const bulkCfg = join(tmp, 'server-config-bulk.json');
+    writeFileSync(bulkCfg, JSON.stringify({ apiKey: null }));
+    const bulkSrv = spawnServer(['--port', '0', '--config', bulkCfg, '--db', join(tmp, 'state-bulk.db')], testServerEnv);
+    try {
+      const { apiKey: bulkKey, base: bulkBase } = await awaitStartup(bulkSrv);
+      const { result: importRes, times, elapsed } = await probeHealthWhile(bulkBase, () =>
+        fetch(new URL('/api/import', bulkBase), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bulkKey}` }, body: JSON.stringify({ source: bulkSource }) }));
+      assert.ok(elapsed >= 500, `the bulk import is heavy enough to have stalled the old loop (${elapsed} ms)`);
+      const importText = await importRes.text();
+      assert.equal(importRes.status, 200, `bulk import failed: ${importText}`);
+      const importBody = JSON.parse(importText);
+      assert.equal(importBody.ok, true);
+      assert.equal(importBody.state.inventory.rules.length, 7000);
+      assertFastProbes(times, 'the bulk import');
+      const stored = await (await fetch(new URL('/api/files', bulkBase))).json();
+      assert.equal(stored.files.length, 21000, 'the import stored every fixture file');
+    } finally { await stopServer(bulkSrv); }
+  }
+
+  {
+    // Snapshot isolation: provision copies every stored byte (384 MB here) into a temp
+    // snapshot dir before the child scripts start. That copy used to run synchronously
+    // on the event loop; now it runs in the worker, and the dir is gone afterwards.
+    const snapDb = join(tmp, 'state-snap.db');
+    const tinySource = join(tmp, 'tiny-source');
+    mkdirSync(tinySource, { recursive: true });
+    writeFileSync(join(tinySource, 'rule.md'), '---\ndescription: tiny\n---\n\nBody\n');
+    const seeded = new DatabaseSync(snapDb);
+    try {
+      seeded.exec('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL);\nCREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, content BLOB NOT NULL);');
+      const blob = Buffer.alloc(96 * 1024, 0xa5);
+      const ins = seeded.prepare('INSERT INTO files (path, content) VALUES (?, ?)');
+      seeded.exec('BEGIN');
+      for (let i = 0; i < 4000; i++) ins.run(`bulk/blob-${String(i).padStart(4, '0')}.bin`, blob);
+      seeded.exec('COMMIT');
+      // Minimal state row for a path source, so loadState boots cleanly.
+      seeded.prepare('INSERT OR REPLACE INTO state (id, value) VALUES (1, ?)').run(JSON.stringify({
+        source: { kind: 'path', spec: tinySource, name: tinySource, ref: '', importedSha: '', importedAt: '2026-01-01T00:00:00Z' },
+        inventory: null, previous: null, changes: null,
+      }));
+    } finally { seeded.close(); }
+    const snapCfg = join(tmp, 'server-config-snap.json');
+    writeFileSync(snapCfg, JSON.stringify({ apiKey: null }));
+    const snapSrv = spawnServer(['--port', '0', '--config', snapCfg, '--db', snapDb], testServerEnv);
+    try {
+      const { apiKey: snapKey, base: snapBase } = await awaitStartup(snapSrv);
+      const started = Date.now();
+      const freshSnapshots = () => readdirSync(serverTmp)
+        .filter(n => n.startsWith('alate-snapshot-') && statSync(join(serverTmp, n)).mtimeMs >= started);
+      const { result: provRes, times } = await probeHealthWhile(snapBase, () =>
+        fetch(new URL('/provision', snapBase), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${snapKey}` }, body: '{}' }));
+      assert.equal(provRes.status, 200);
+      const provBody = await provRes.json();
+      assert.equal(typeof provBody.ok, 'boolean', 'provision responded with its result shape');
+      assertFastProbes(times, 'the 384 MB snapshot copy');
+      assert.deepEqual(freshSnapshots(), [], 'the temp snapshot dir is gone after provision responds');
+    } finally { await stopServer(snapSrv); }
+  }
+
+  {
+    // Busy timeout plus deferred check: while the worker delay holds an import, the
+    // server keeps answering, a concurrent update check is deferred instead of blocking
+    // or 500-ing, and exactly one check runs once the import settles.
+    const delayCfg = join(tmp, 'server-config-delay.json');
+    writeFileSync(delayCfg, JSON.stringify({ apiKey: null }));
+    // Own tiny fixture: the shared `data` fixture is renamed away by an earlier test.
+    const delaySource = join(tmp, 'delay-source');
+    mkdirSync(delaySource, { recursive: true });
+    writeFileSync(join(delaySource, 'rule.md'), '---\ndescription: delay rule\n---\n\nBody\n');
+    const delaySrv = spawnServer(['--port', '0', '--config', delayCfg, '--db', join(tmp, 'state-delay.db')], { ...testServerEnv, ALATE_TEST_WORKER_DELAY_MS: '1500' });
+    try {
+      const { apiKey: delayKey, base: delayBase } = await awaitStartup(delaySrv);
+      const started = Date.now();
+      const importP = fetch(new URL('/api/import', delayBase), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${delayKey}` }, body: JSON.stringify({ source: delaySource }) });
+      const [stateR, healthR, checkR] = await Promise.all([
+        fetch(new URL('/api/state', delayBase)),
+        fetch(new URL('/health', delayBase)),
+        fetch(new URL('/api/updates/check', delayBase), { method: 'POST', headers: { Authorization: `Bearer ${delayKey}` } }),
+      ]);
+      assert.equal(stateR.status, 200);
+      assert.equal(healthR.status, 200);
+      const checkText = await checkR.text();
+      assert.equal(checkR.status, 200, `the deferred update check must not 500: ${checkText}`);
+      const deferredAt = JSON.parse(checkText).checkedAt;
+      const importRes = await importP;
+      const importElapsed = Date.now() - started;
+      assert.ok(importElapsed >= 1000, 'the worker delay held the import open while the probes ran');
+      const importText = await importRes.text();
+      assert.equal(importRes.status, 200, `delayed import failed: ${importText}`);
+      assert.equal(JSON.parse(importText).ok, true);
+      // The check that arrived during the import ran after it settled: a fresh checkedAt.
+      const check2 = await fetch(new URL('/api/updates/check', delayBase), { method: 'POST', headers: { Authorization: `Bearer ${delayKey}` } });
+      assert.equal(check2.status, 200);
+      const check2Body = await check2.json();
+      assert.ok(check2Body.checkedAt, 'the post-import check reports a checkedAt');
+      assert.ok(String(check2Body.checkedAt) > String(deferredAt ?? ''), 'the deferred check ran after the import settled, not before');
+    } finally { await stopServer(delaySrv); }
+  }
+
   // Teardown escalation: a server that ignores SIGTERM (what a mutant can become) must still
   // die, and no process may be left behind. Windows cannot ignore SIGTERM, so the check is
   // POSIX-only.
