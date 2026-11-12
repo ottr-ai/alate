@@ -7,29 +7,37 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { dirname, join, relative, resolve } from 'node:path';
 import { parseArgs, resolveDataDir, checkDestination, assertSourceInside, safeRel, normText } from './lib/data.mjs';
 
-const args = parseArgs(process.argv.slice(2), ['--root', '--data', '--repo']);
+/** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
+/** @typedef {{ contextFiles: string[], projects: Record<string, string[]> }} ProjectsManifest */
+/** @typedef {{ from: string, to: string, bytes: Buffer, old: Buffer | null }} CopyPlan */
+
+const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--root', '--data', '--repo']));
 const data = resolveDataDir(args, { allowClone: false });
 // Projects live beside the data repo in the workspace, so its parent is the natural default root.
 const root = resolve(args.values['--root'] ?? dirname(data.dir));
 
+/** @param {string} message @returns {never} */
 const bad = message => { throw new Error(`projects.json: ${message}`); };
-const manifest = JSON.parse(readFileSync(join(data.dir, 'projects', 'projects.json'), 'utf8'));
+const manifest = /** @type {ProjectsManifest} */ (JSON.parse(readFileSync(join(data.dir, 'projects', 'projects.json'), 'utf8')));
 if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) bad('manifest must be an object');
 if (!Array.isArray(manifest.contextFiles) || manifest.contextFiles.some(f => typeof f !== 'string')) bad('contextFiles must be an array of strings');
 const projects = manifest.projects;
 if (typeof projects !== 'object' || projects === null || Array.isArray(projects)) bad('projects must be an object');
 
 const contextFiles = [...new Set(manifest.contextFiles.map(f => safeRel(f, 'projects.json: contextFiles')))];
-const validated = Object.entries(projects).map(([name, extras]) => {
+const validated = /** @type {[string, string[]][]} */ (Object.entries(projects).map(([name, extras]) => {
   const safe = safeRel(name, 'projects.json: project name');
   if (safe.includes('/')) bad(`project name ${name} must be one directory segment`);
   if (!Array.isArray(extras) || extras.some(f => typeof f !== 'string')) bad(`${safe}: extras must be an array of strings`);
   return [safe, [...new Set(extras.map(f => safeRel(f, `projects.json: project ${safe}`)))]];
-});
+}));
 
 // Snapshot walk: symlinks are never followed (cycles, escapes); relative result keeps '/'.
+/** @param {string} dir @returns {string[]} */
 const snapFiles = dir => {
+  /** @type {string[]} */
   const out = [];
+  /** @param {string} d */
   const walk = d => readdirSync(d, { withFileTypes: true }).forEach(e => {
     const p = join(d, e.name);
     if (e.isSymbolicLink()) throw new Error(`snapshot dir ${dir} contains a symlink ${relative(dir, p)}; remove it by hand`);
@@ -40,8 +48,11 @@ const snapFiles = dir => {
   if (existsSync(dir)) walk(dir);
   return out;
 };
+/** @type {string[]} */
 const problems = [];
+/** @type {CopyPlan[]} */
 const plan = [];
+/** @type {string[]} */
 const notes = [];
 for (const [name, extras] of validated) {
   const src = join(root, name);

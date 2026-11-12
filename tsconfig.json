@@ -4,14 +4,14 @@
     "lib": ["es2024"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
-    "allowJs": true,
-    "checkJs": false,
-    "strict": true,
-    "noEmit": true,
-    "verbatimModuleSyntax": true,
-    "erasableSyntaxOnly": true,
-    "skipLibCheck": true,
-    "types": ["node"]
+  "allowJs": true,
+  "checkJs": true,
+  "strict": true,
+  "noEmit": true,
+  "verbatimModuleSyntax": true,
+  "erasableSyntaxOnly": true,
+  "skipLibCheck": true,
+  "types": ["node"]
   },
-  "include": ["server.ts", "lib/**/*.mjs", "web/dashboard.mjs"]
+  "include": ["server.ts", "lib/**/*.mjs", "web/dashboard.mjs", "sync.mjs", "install-user.mjs", "sync-user.mjs", "sync-projects.mjs"]
 }

@@ -44,7 +44,13 @@ import { createHash } from 'node:crypto';
 import { assertSourceInside, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend, writeProvisionResults } from './lib/data.mjs';
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
-const args = parseArgs(process.argv.slice(2), ['--data', '--repo', '--home', '--commit'], ['--force', '--skip-plugins', '--layer']);
+/** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
+/** @typedef {{ item: string, status: 'installed' | 'unchanged' | 'rejected' | 'no-origin', rule: string | null, at: string | null, report?: string }} ProvisionItem */
+/** @typedef {{ rule?: string, report: string }} ScanRejection */
+/** @typedef {{ name: string, url: string, sha256: string, unpack: string, bin?: string }} WorkerTool */
+/** @typedef {['unchanged', string, null, string] | ['installed', string, Buffer, string]} PlanEntry */
+
+const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--data', '--repo', '--home', '--commit'], ['--force', '--skip-plugins', '--layer']));
 // The imported commit names the layer id in layer mode: the server passes it for a repo
 // source (specs/agent-layer-switch.md). Exactly 40 hex is a git SHA-1, exactly 64 a
 // SHA-256 repository; anything between is malformed and refuses the run.
@@ -61,6 +67,7 @@ const layerMode = args.flags.has('--layer') || process.env.ALATE_LAYER === '1';
 // home broke all three: clean-up deleted the layer current pointed at, machine state was
 // read from the fresh layer, and a relative home left current dangling. Non-layer mode
 // keeps the home exactly as given.
+/** @param {string} given @returns {string} */
 const resolveHome = given => {
   let prefix = resolve(given);
   const tail = [];
@@ -68,7 +75,7 @@ const resolveHome = given => {
     try {
       return join(realpathSync(prefix), ...tail);
     } catch (err) {
-      if ((err.code !== 'ENOENT' && err.code !== 'ENOTDIR') || dirname(prefix) === prefix) throw err;
+      if ((/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT' && /** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOTDIR') || dirname(prefix) === prefix) throw err;
       tail.unshift(basename(prefix));
       prefix = dirname(prefix);
     }
@@ -93,6 +100,7 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
 // plugins manifest drives the install, bun.lock pins it, patches/ hold applied patches.
 // A turn-edited copy in the live layer is untrusted content, so layer mode never keeps
 // its bytes: the snapshot always wins, --force or not.
+/** @param {string} rel @returns {boolean} */
 const pluginInstallFile = rel =>
   rel === 'omp/plugins/package.json' || rel === 'omp/plugins/bun.lock' || rel.startsWith('omp/plugins/patches/');
 // A skill snapshot is executable agent content, so install-user scans each one statically before
@@ -122,7 +130,9 @@ const SKILL_ROOT_NAMES = new Set(['skills', 'managed-skills']);
 // Scanner children additionally force PYTHONNOUSERSITE=1 (scannerEnv); it is never passed
 // through from the parent, so it is not in this allowlist.
 const CHILD_ENV_KEYS = ['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'SystemDrive', 'ComSpec', 'PATHEXT'];
+/** @param {string[]} [extra] @returns {Record<string, string>} */
 const childEnv = extra => {
+  /** @type {Record<string, string>} */
   const env = {};
   for (const key of [...CHILD_ENV_KEYS, ...(extra ?? [])]) {
     const value = process.env[key];
@@ -141,6 +151,7 @@ const scannerEnv = () => ({ ...childEnv(), PYTHONNOUSERSITE: '1' });
 // True when the path (realpath when it exists, else itself, resolved) lies inside the
 // canonical target home install-user writes into. A scanner inside that home is
 // agent-turn-writable, so it is never executed — not even for a --version probe.
+/** @param {string} path @returns {boolean} */
 const insideHome = path => {
   const real = (() => {
     try {
@@ -170,8 +181,11 @@ const BIN_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
 // Every directory named skills/ or managed-skills/ anywhere under a root holds executable
 // agent content; each skill inside it goes to the scanner.
+/** @param {string} dir @returns {string[]} */
 const collectSkillDirs = dir => {
+  /** @type {string[]} */
   const found = [];
+  /** @param {string} path */
   const visit = path => {
     for (const entry of readdirSync(path, { withFileTypes: true })) {
       if (!entry.isDirectory() || SKIP_DIRS.has(entry.name)) continue;
@@ -216,8 +230,10 @@ const scanCachePath = join(home, '.alate', 'skillspector-pass.json');
 // copies — never the link text. The format token prefixed to every key makes entries an
 // older alate wrote miss once and rescan instead of surviving a framing change.
 const SCAN_CACHE_FORMAT = 'skill-pass-fmt-2';
+/** @param {string} dir @returns {string} */
 const hashSkillDir = dir => {
   const hash = createHash('sha256');
+  /** @param {string} path */
   const visit = path => {
     for (const entry of readdirSync(path, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
       const child = join(path, entry.name);
@@ -240,12 +256,13 @@ const hashSkillDir = dir => {
 
 // A missing file is just the first run; unreadable or malformed means prove nothing: scan
 // everything and rewrite the file fresh.
+/** @returns {Record<string, boolean>} */
 const readPasses = () => {
   let raw = null;
   try {
     raw = readFileSync(scanCachePath, 'utf8');
   } catch (err) {
-    if (err.code !== 'ENOENT') console.log(`${scanCachePath} is unreadable (${err.code ?? err.message}); scanning every skill snapshot.`);
+    if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') console.log(`${scanCachePath} is unreadable (${/** @type {NodeJS.ErrnoException} */ (err).code ?? /** @type {NodeJS.ErrnoException} */ (err).message}); scanning every skill snapshot.`);
     return {};
   }
   try {
@@ -256,6 +273,7 @@ const readPasses = () => {
   return {};
 };
 
+/** @param {Record<string, boolean>} passes @returns {void} */
 const recordPass = passes => {
   mkdirSync(dirname(scanCachePath), { recursive: true });
   const tmp = `${scanCachePath}.${process.pid}.tmp`;
@@ -281,6 +299,7 @@ const recordPass = passes => {
 // snapshot's bytes, so the verdict cache keys (bytes only) hold and a warm cache never
 // stages at all.
 const SHIPPED_BASELINE = '.skillspector-baseline.yaml';
+/** @param {string} dir @returns {boolean} */
 const scanNeedsStaging = dir => {
   try {
     return (statSync(join(dir, SHIPPED_BASELINE)).mode & 0o111) !== 0;
@@ -290,8 +309,10 @@ const scanNeedsStaging = dir => {
     return false;
   }
 };
+/** @param {string} dir @param {string} root @param {number} index @returns {string} */
 const stageScanCopy = (dir, root, index) => {
   const dest = join(root, `${String(index).padStart(3, '0')}-${basename(dir)}`);
+  /** @param {string} from @param {string} to */
   const copy = (from, to) => {
     mkdirSync(to, { recursive: true });
     for (const entry of readdirSync(from, { withFileTypes: true })) {
@@ -313,12 +334,16 @@ const stageScanCopy = (dir, root, index) => {
 // error rejects: the scanner cannot run at all, which the caller turns into a whole-run refusal.
 // `display` names the folder in every message: a staged scan copy reports under the snapshot
 // folder's name, so a deploy log's tail still names the skill.
+/** @param {string} scanner @param {string} dir @param {number} total @param {string} [display] @returns {Promise<{ report: string | null, scanError?: string }>} */
 const scanOne = (scanner, dir, total, display = dir) => new Promise((resolve, reject) => {
   const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: scannerEnv() });
-  const out = [], errOut = [];
+  /** @type {Buffer[]} */
+  const out = [];
+  /** @type {Buffer[]} */
+  const errOut = [];
   child.stdout.on('data', chunk => out.push(chunk));
   child.stderr.on('data', chunk => errOut.push(chunk));
-  child.on('error', err => reject(new Error(`skillspector could not run (${err.code ?? err.message}); refusing to install ${total} skill snapshot(s).`)));
+  child.on('error', /** @param {NodeJS.ErrnoException} err */ err => reject(new Error(`skillspector could not run (${err.code ?? err.message}); refusing to install ${total} skill snapshot(s).`)));
   child.on('close', (code, signal) => {
     const report = `${Buffer.concat(out).toString('utf8')}${Buffer.concat(errOut).toString('utf8')}`.trimEnd();
     console.log(`--- SkillSpector report: ${display}${report ? `\n${report}` : ''}`);
@@ -328,6 +353,7 @@ const scanOne = (scanner, dir, total, display = dir) => new Promise((resolve, re
   });
 });
 
+/** @param {string[]} skillDirs @returns {Promise<{ rejected: Map<string, ScanRejection> }>} */
 const runScan = async skillDirs => {
   // Trust first, probe second (specs/skillspector-scanner-trust.md): no candidate runs
   // before its trust check. SKILLSPECTOR_BIN wins when set and is hard-validated — absolute
@@ -375,9 +401,9 @@ const runScan = async skillDirs => {
   let reported = null;
   for (const candidate of candidates) {
     const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', env: scannerEnv() });
-    if (probe.error?.code === 'ENOENT') continue;
+    if (/** @type {NodeJS.ErrnoException | undefined} */ (probe.error)?.code === 'ENOENT') continue;
     if (probe.error) {
-      throw new Error(`skillspector could not run (${probe.error.code ?? probe.error.message}); refusing to install ${skillDirs.length} skill snapshot(s).`);
+      throw new Error(`skillspector could not run (${/** @type {NodeJS.ErrnoException} */ (probe.error).code ?? /** @type {NodeJS.ErrnoException} */ (probe.error).message}); refusing to install ${skillDirs.length} skill snapshot(s).`);
     }
     reported = String(probe.stdout ?? '').trim();
     // A candidate that cannot answer the probe is broken, not wrong: a Python upgrade leaves
@@ -401,36 +427,41 @@ const runScan = async skillDirs => {
   // An unreadable skill dir cannot be hashed, so it cannot be keyed or cached: reject it
   // without scanning (rule `unreadable skill files`) instead of letting one bad dir stop
   // every other skill.
+  /** @type {Map<string, ScanRejection>} */
   const rejected = new Map();
+  /** @type {Map<string, string>} */
   const keys = new Map();
   for (const dir of skillDirs) {
     try {
       keys.set(dir, `${SCAN_CACHE_FORMAT} ${hashSkillDir(dir)} ${SKILLSPECTOR_REF} ${reported} scan ${SCAN_ARGS.join(' ')}`);
     } catch (err) {
-      rejected.set(dir, { rule: 'unreadable skill files', report: `${dir}: ${err.message}` });
+      rejected.set(dir, { rule: 'unreadable skill files', report: `${dir}: ${/** @type {Error} */ (err).message}` });
     }
   }
   const scanList = skillDirs.filter(dir => keys.has(dir));
-  const pending = scanList.filter(dir => passes[keys.get(dir)] !== true);
+  const pending = scanList.filter(dir => passes[/** @type {string} */ (keys.get(dir))] !== true);
   console.log(`Scanning ${pending.length} of ${scanList.length} skill snapshot(s) (${scanList.length - pending.length} cached) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied)...`);
   if (!pending.length) return { rejected };
   // Findings (exit 1) reject their own skill only; so does any other scan failure (another
   // non-zero exit, a signal kill): the skill is left out with rule `scan error` and the scan
   // continues. Only a spawn error — the scanner cannot run at all, so no verdict is possible —
   // stops scheduling, lets the in-flight scans finish, and refuses the whole run.
-  let fatal = null;
+  let fatal = /** @type {Error | null} */ (null);
   let next = 0;
   // Staged scan copies for folders whose shipped baseline carries exec bits (the Windows
   // bind-mount shape); created lazily, so a clean mount never pays for one, and removed
   // before this function returns, whatever the scans decided.
+  /** @type {string | null} */
   let stageRoot = null;
   let staged = 0;
+  /** @param {string} dir @returns {string} */
   const scanTargetFor = dir => {
     if (!scanNeedsStaging(dir)) return dir;
     if (stageRoot === null) stageRoot = mkdtempSync(join(tmpdir(), 'alate-scan-'));
     return stageScanCopy(dir, stageRoot, staged++);
   };
   try {
+    /** @returns {Promise<void>} */
     const worker = async () => {
       while (fatal === null && next < pending.length) {
         const dir = pending[next++];
@@ -440,13 +471,13 @@ const runScan = async skillDirs => {
         } catch (err) {
           // Staging reads the same bytes the hash gate just read, so this is a mid-run race,
           // not a broken snapshot: reject the one skill, scan the rest.
-          rejected.set(dir, { rule: 'unreadable skill files', report: `${dir}: ${err.message}` });
+          rejected.set(dir, { rule: 'unreadable skill files', report: `${dir}: ${/** @type {Error} */ (err).message}` });
           continue;
         }
         try {
-          const res = await scanOne(scanner, scanTarget, skillDirs.length, dir);
+          const res = await scanOne(/** @type {string} */ (scanner), scanTarget, skillDirs.length, dir);
           if (res.report === null) {
-            passes[keys.get(dir)] = true;
+            passes[/** @type {string} */ (keys.get(dir))] = true;
             recordPass(passes);
           } else if (res.scanError !== undefined) {
             rejected.set(dir, { rule: 'scan error', report: `${res.scanError}${res.report ? `\n${res.report}` : ''}` });
@@ -458,7 +489,7 @@ const runScan = async skillDirs => {
             console.log(`SkillSpector rejected ${dir} (exit 1); the skill is left out of this install.`);
           }
         } catch (err) {
-          fatal = err;
+          fatal = /** @type {Error} */ (err);
         }
       }
     };
@@ -474,12 +505,14 @@ const runScan = async skillDirs => {
   return { rejected };
 };
 
+/** @param {Buffer} bytes @param {string} path @returns {void} */
 const validateTools = (bytes, path) => {
+  /** @type {WorkerTool[]} */
   let list;
   try {
     list = JSON.parse(bytes.toString('utf8'));
   } catch (err) {
-    throw new Error(`${path}: tools.json is not valid JSON (${err.message})`);
+    throw new Error(`${path}: tools.json is not valid JSON (${/** @type {Error} */ (err).message})`);
   }
   if (!Array.isArray(list)) throw new Error(`${path}: tools.json must be a JSON array of downloads`);
   const seen = new Set();
@@ -509,6 +542,7 @@ const validateTools = (bytes, path) => {
   });
 };
 
+/** @param {Buffer} bytes @param {string} path @returns {void} */
 const validateEnv = (bytes, path) => {
   // Names only, never values: a broken line is reported by number, its content is never printed.
   bytes.toString('utf8').split(/\r?\n/).forEach((raw, i) => {
@@ -519,6 +553,7 @@ const validateEnv = (bytes, path) => {
 };
 
 const REQ_LINE = /^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)==([A-Za-z0-9][A-Za-z0-9.+_!-]*)((?: --hash=sha256:[0-9a-f]{64})+)$/;
+/** @param {Buffer} bytes @param {string} path @returns {void} */
 const validateRequirements = (bytes, path) => {
   // Reference grammar is ottr's parseRequirements (src/python.ts); the two must stay in sync.
   // A broken line is reported by number, its content is never printed.
@@ -538,17 +573,21 @@ const validateRequirements = (bytes, path) => {
 // judge them, the plan's surviving items aggregate at the end of the try, and the finally
 // below writes the results file when the server asked for one. fatal/error describe a
 // whole-run refusal; every pre-existing throw class stays fatal.
+/** @type {ProvisionItem[]} */
 const items = [];
 let fatal = false;
 let error = null;
 let nestedFailed = false;
 // A failed item's report is diagnostics with a bound, like every stored report.
+/** @param {string} report @returns {string} */
 const capReport = report => report.length > 4000 ? `${report.slice(0, 4000)}…` : report;
+/** @param {string} item @param {ProvisionItem['status']} status @param {string | null} [rule] @param {string | null} [at] @param {string | null} [report] */
 const failItem = (item, status, rule, at, report) =>
   items.push({ item, status, rule: rule ?? null, at: at ?? null, ...(report == null ? {} : { report: capReport(report) }) });
 // A scan rejection carries the first SkillSpector finding as rule and position; a scan-error
 // rejection carries rule `scan error`; the hash-error rejection carries its own rule. `key` is
 // the item key of the skill dir.
+/** @param {string} key @param {ScanRejection} info @returns {void} */
 const addScanRejection = (key, info) => {
   if (info.rule !== undefined) failItem(key, 'rejected', info.rule, null, info.report);
   else {
@@ -558,6 +597,7 @@ const addScanRejection = (key, info) => {
 };
 // The item key of a skill dir: snapshot-relative under userRoot; in a fresh layer the top-level
 // dir is a dot-dir (.omp), so the leading dot drops out for the snapshot spelling.
+/** @param {string} root @param {string} dir @returns {string} */
 const skillKey = (root, dir) => `user/${relative(root, dir).split(sep).join('/')}`.replace(/^user\/\./, 'user/');
 
 try {
@@ -579,9 +619,10 @@ try {
   // `no origin`) before the walk; an uncovered MCP server is only reported — one uncovered
   // server never disconnects the other servers on the machine. Bare keys are data-root rules,
   // which sync.mjs installs, so they are not this script's business.
-  const gate = originGate(data.dir);
+  const gate = /** @type {{ fatal: string[], uncovered: string[], hints: Record<string, string> }} */ (originGate(data.dir));
   if (gate.fatal.length) throw new Error(`Nothing installed. Fix:\n  ${gate.fatal.join('\n  ')}`);
   const dirByKey = new Map(skillDirs.map(dir => [`user/${relative(userRoot, dir).split(sep).join('/')}`, dir]));
+  /** @type {Set<string>} */
   const rejectedSkills = new Set();
   for (const key of gate.uncovered) {
     const dir = dirByKey.get(key);
@@ -599,6 +640,7 @@ try {
     const entrypoint = join(dir, 'SKILL.md');
     const label = `user/${relative(userRoot, entrypoint).split(sep).join('/')}`;
     skillEntrypoints.add(entrypoint);
+    /** @type {string[]} */
     const problems = [];
     let text;
     try {
@@ -606,7 +648,7 @@ try {
       if (!statSync(entrypoint).isFile()) throw new Error('SKILL.md must be a regular file');
       text = readFileSync(entrypoint, 'utf8');
     } catch (err) {
-      problems.push(`${label}: cannot read SKILL.md (${err.message})`);
+      problems.push(`${label}: cannot read SKILL.md (/** @type {Error} */ (err).message)`);
     }
     if (text !== undefined) problems.push(...skillProblems(label, text));
     if (problems.length) {
@@ -618,6 +660,7 @@ try {
   // Skills left out by the origin or structure gate: their snapshot rels never enter the plan,
   // the manifest, or the conflicts below, so the existing deletion path removes a previously
   // installed, record-matching copy and keeps a copy that changed on the machine.
+  /** @param {string} rel @param {Iterable<string>} dirs @returns {boolean} */
   const inRejected = (rel, dirs) => {
     for (const dir of dirs) {
       const p = relative(userRoot, dir).split(sep).join('/');
@@ -625,6 +668,7 @@ try {
     }
     return false;
   };
+  /** @param {string} dir @param {string} [sub] @returns {string[]} */
   const walk = (dir, sub = '') => readdirSync(dir, { withFileTypes: true }).flatMap(e =>
     SKIP_DIRS.has(e.name) ? []
       : e.isDirectory() ? walk(join(dir, e.name), sub ? `${sub}/${e.name}` : e.name)
@@ -641,6 +685,7 @@ try {
   for (const dir of skillDirs) {
     if (rejectedSkills.has(dir)) continue;
     const key = skillKey(userRoot, dir);
+    /** @type {string[]} */
     const problems = [];
     for (const file of walk(dir)) {
       if (!/\.(md|mdc)$/.test(file) || file === 'SKILL.md') continue;
@@ -649,7 +694,7 @@ try {
       try {
         assertSourceInside(userRoot, srcPath);
       } catch (err) {
-        throw new Error(`${label}: ${err.message}`);
+        throw new Error(`${label}: ${/** @type {Error} */ (err).message}`);
       }
       problems.push(...ruleProblems(label, readFileSync(srcPath, 'utf8'), { frontmatter: false }));
     }
@@ -700,8 +745,11 @@ try {
     migratingHome = machineRoot === layerHome;
   }
 
+  /** @type {PlanEntry[]} */
   const plan = [];
+  /** @type {string[]} */
   let conflicts = [];
+  /** @type {string[]} */
   const notes = [];
   // Content-gate problems for the snapshot's rules are now judged per file during the walk:
   // a failing Markdown item is rejected (failed item) and skipped, never a whole-run refusal.
@@ -723,12 +771,13 @@ try {
   // In-place mode reads only paths it already guards as dest (or writes itself), so this
   // is layer-only.
   if (layerMode) checkDestination(migratingHome ? layerHome : readRoot, lastManifest);
+  /** @type {Record<string, string>} */
   let last = {};
   if (existsSync(lastManifest)) {
     try {
       last = JSON.parse(readFileSync(lastManifest, 'utf8'));
     } catch (err) {
-      console.error(`Ignoring unreadable ${lastManifest} (${err.message}): every file that differs from the snapshot counts as changed here.`);
+      console.error(`Ignoring unreadable ${lastManifest} (/** @type {Error} */ (err).message): every file that differs from the snapshot counts as changed here.`);
     }
   }
   // The machine file's fingerprint, the same comparison the install plan uses: config.yml's
@@ -737,6 +786,7 @@ try {
   // config.yml that differs from the snapshot or its record only by the entry is not a
   // machine change. In-place mode keeps the entry in the comparison, so a file that differs
   // by the entry still refuses and --force still rewrites the entry away.
+  /** @param {string} rel @param {string} dest @returns {string | null} */
   const machineFingerprint = (rel, dest) => {
     if (!existsSync(dest)) return null;
     const machineYaml = rel === 'omp/agent/config.yml' ? readFileSync(dest).toString('utf8') : null;
@@ -752,6 +802,7 @@ try {
   // legacy form equals the plain one, so later layers (whose records strip-era alate wrote)
   // compare identically. Only config.yml can carry the entry; other files and in-place mode
   // never use the legacy form.
+  /** @param {string} rel @param {string} dest @returns {string | null} */
   const legacyFingerprint = (rel, dest) =>
     rel === 'omp/agent/config.yml' && layerMode && existsSync(dest)
       ? fingerprint(rel, Buffer.from(withoutDeploymentBlocks(readFileSync(dest).toString('utf8')), 'utf8'))
@@ -759,6 +810,7 @@ try {
 
   // Deletes the directories a deletion left empty, up to the mapped root (the top-level
   // dot-dir of the snapshot path, or ~/.ottr for worker lists); never the root itself.
+  /** @param {string} dest @param {string} root @returns {void} */
   const pruneEmptyDirs = (dest, root) => {
     for (let dir = dirname(dest); dir.startsWith(root + sep); dir = dirname(dir)) {
       if (readdirSync(dir).length) break;
@@ -766,10 +818,12 @@ try {
     }
   };
 
+  /** @type {Record<string, string>} */
   const current = {};
   // Which walk contributed each planned rel: 'snapshot' or the vendored shipped dir. The
   // rel namespace is shared — agents/skills/<name> can hold either source's entries — so
   // the rejection cleanup below strips only what the rejected dir itself contributed.
+  /** @type {Map<string, string>} */
   const relSource = new Map();
   for (const rel of walk(userRoot)) {
     // A skill left out by a gate contributes nothing: no plan entry, no manifest record, no
@@ -782,7 +836,7 @@ try {
     try {
       assertSourceInside(userRoot, srcPath);
     } catch (err) {
-      throw new Error(`user/${rel}: ${err.message}`);
+      throw new Error(`user/${rel}: ${/** @type {Error} */ (err).message}`);
     }
     const dest = join(writeRoot, '.' + rel);
     // Every destination is preflighted before any content is read or written, so a
@@ -808,7 +862,7 @@ try {
     if (rel === 'omp/agent/config.yml') snapshot = Buffer.from(withoutMemoryBackend(snapshot.toString('utf8')), 'utf8');
     // The remap prefix must spell the home exactly as forTarget rooted it above, so a
     // non-canonical --home still re-roots once; the layer side is canonical.
-    if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) snapshot = Buffer.from(remapHomePaths(snapshot.toString('utf8'), home, newLayerDir), 'utf8');
+    if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) snapshot = Buffer.from(remapHomePaths(snapshot.toString('utf8'), home, /** @type {string} */ (newLayerDir)), 'utf8');
     // config.yml's top-level hindsight:/alate: blocks are deployment settings that stay on the
     // target: the snapshot never carries them (capture strips them), and the machine's own ride
     // along on every install. In layer mode they come from the live layer's config, the fresh
@@ -877,7 +931,7 @@ try {
         // The entry is a deployment choice: a kept config.yml loses it here, the same way the
         // snapshot does above, so the choice never rides along with the machine part.
         if (rel === 'omp/agent/config.yml') keptBytes = Buffer.from(withoutMemoryBackend(keptBytes.toString('utf8')), 'utf8');
-        if (/\.(?:json|ya?ml)$/.test(rel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, newLayerDir), 'utf8');
+        if (/\.(?:json|ya?ml)$/.test(rel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, /** @type {string} */ (newLayerDir)), 'utf8');
         plan.push(['installed', dest, keptBytes, itemKey]);
         notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
       }
@@ -887,6 +941,7 @@ try {
     current[rel] = want;
   }
   const workersRoot = join(data.dir, 'workers');
+  /** @type {Set<string>} */
   const shipped = new Set();
   if (existsSync(workersRoot)) {
     assertSourceInside(data.dir, workersRoot);
@@ -924,7 +979,9 @@ try {
   // shipped skill (ALAT-124). sync-user leaves a name out of the capture only when its
   // bytes equal the vendored copy, so the normal round trip never creates such a copy.
   const snapshotSkillNames = new Set(skillDirs.filter(dir => !rejectedSkills.has(dir)).map(dir => basename(dir)));
+  /** @type {string[]} */
   const shippedScanDirs = [];
+  /** @type {Map<string, string>} */
   const shippedDirKey = new Map();
   // Fail closed: shippedSkills throws when the vendored tree is absent or unreadable, and
   // an empty enumeration would delete the shipped skills already in the home as obsolete.
@@ -932,11 +989,12 @@ try {
   // flows through the main try: fatal results file, exit 1, nothing written or deleted,
   // and in layer mode no layer is created or switched. A tree that exists but holds zero
   // folders stays the note below, not an error.
+  /** @type {{ name: string, dir: string }[]} */
   let shippedList;
   try {
     shippedList = shippedSkills(toolRoot);
   } catch (err) {
-    throw new Error(`refusing to install: the vendored shipped skills tree ${SHIPPED_TREE}/${SHIPPED_SKILLS_DIR} is missing or unreadable (${err.message}); a run without it would delete the shipped skills already in the home`);
+    throw new Error(`refusing to install: the vendored shipped skills tree ${SHIPPED_TREE}/${SHIPPED_SKILLS_DIR} is missing or unreadable (/** @type {Error} */ (err).message); a run without it would delete the shipped skills already in the home`);
   }
   if (!shippedList.length) {
     notes.push(`shipped skills: the vendored tree ${SHIPPED_TREE}/${SHIPPED_SKILLS_DIR} holds no skill folders; nothing shipped installs`);
@@ -955,7 +1013,7 @@ try {
       if (!statSync(entrypoint).isFile()) throw new Error('SKILL.md must be a regular file');
       text = readFileSync(entrypoint, 'utf8');
     } catch (err) {
-      problems.push(`${label}: cannot read SKILL.md (${err.message})`);
+      problems.push(`${label}: cannot read SKILL.md (/** @type {Error} */ (err).message)`);
     }
     if (text !== undefined) problems.push(...skillProblems(label, text));
     if (problems.length) {
@@ -968,6 +1026,7 @@ try {
     // its skill key, like the snapshot walk — the scan verdict covered the full source
     // folder, not the installed subset a per-file rejection would leave. A rejected skill
     // is never planned here and never joins the scan gate below.
+    /** @type {string[]} */
     const hidden = [];
     for (const file of walk(vendored)) {
       if (!/\.(md|mdc)$/.test(file) || file === 'SKILL.md') continue;
@@ -976,7 +1035,7 @@ try {
       try {
         assertSourceInside(vendored, srcPath);
       } catch (err) {
-        throw new Error(`${label}: ${err.message}`);
+        throw new Error(`${label}: ${/** @type {Error} */ (err).message}`);
       }
       hidden.push(...ruleProblems(label, readFileSync(srcPath, 'utf8'), { frontmatter: false }));
     }
@@ -994,7 +1053,7 @@ try {
       try {
         assertSourceInside(vendored, srcPath);
       } catch (err) {
-        throw new Error(`user/${rel}: ${err.message}`);
+        throw new Error(`user/${rel}: ${/** @type {Error} */ (err).message}`);
       }
       const dest = join(writeRoot, '.' + rel);
       checkDestination(writeRoot, dest);
@@ -1048,6 +1107,7 @@ try {
     // copy's rels of the same name.
     const snapshotPrefixes = [...rejectedSkills].filter(dir => !shippedDirKey.has(dir))
       .map(dir => relative(userRoot, dir).split(sep).join('/'));
+    /** @param {string} rel @returns {boolean} */
     const relRejected = rel => {
       const source = relSource.get(rel);
       if (source === 'snapshot')
@@ -1066,6 +1126,7 @@ try {
   // the record either way — alate no longer vouches for a path the snapshot lacks. --force
   // never deletes: a file that does not match its record is never deleted. A fresh layer
   // never carries dropped paths, so layer mode collects nothing here.
+  /** @type {[string, string][]} */
   const deletions = [];
   if (!layerMode) for (const [rel, fp] of Object.entries(last)) {
     if (Object.hasOwn(current, rel) || typeof fp !== 'string') continue;
@@ -1101,7 +1162,7 @@ try {
   try {
     if (layerMode) {
       // The layer dir exists only after every content gate passed (rule gate, worker validation).
-      mkdirSync(newLayerDir, { recursive: true });
+      mkdirSync(/** @type {string} */ (newLayerDir), { recursive: true });
       // The data-root rules install straight into the layer, through the same sync.mjs and its
       // per-item gates the server-side provision uses. When the server asked for per-item
       // results, sync.mjs writes its own file beside ours: its fatal refusal aborts the layer,
@@ -1112,7 +1173,7 @@ try {
       const resultsPath = process.env[PROVISION_ENV] ? `${process.env[PROVISION_ENV]}.rules.json` : null;
       const rulesEnv = childEnv(['ALATE_TEST_SCRIPT_GATE']);
       if (resultsPath) rulesEnv[PROVISION_ENV] = resultsPath;
-      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), join(newLayerDir, '.omp', 'agent', 'rules'), '--data', data.dir], { encoding: 'utf8', env: rulesEnv });
+      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), join(/** @type {string} */ (newLayerDir), '.omp', 'agent', 'rules'), '--data', data.dir], { encoding: 'utf8', env: rulesEnv });
       let nested = null;
       if (resultsPath) {
         try { nested = JSON.parse(readFileSync(resultsPath, 'utf8')); } catch { nested = null; }
@@ -1131,7 +1192,7 @@ try {
     for (const [kind, dest, bytes] of plan) {
       if (kind === 'unchanged') { unchanged++; continue; }
       mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, bytes);
+      writeFileSync(dest, /** @type {Buffer} */ (bytes));
       installed++;
     }
     let deleted = 0;
@@ -1145,17 +1206,17 @@ try {
     for (const note of notes) console.log(note);
 
     if (layerMode) {
-      const layerSkillDirs = collectSkillDirs(newLayerDir);
+      const layerSkillDirs = collectSkillDirs(/** @type {string} */ (newLayerDir));
       if (layerSkillDirs.length) {
         const scan = await runScan(layerSkillDirs);
         for (const [dir, info] of scan.rejected) {
           // The manifest must never name a file the layer lacks: the rejected skill dir is
           // removed from the fresh layer, and its rels from the record, before the switch.
           rmSync(dir, { recursive: true, force: true });
-          addScanRejection(skillKey(newLayerDir, dir), info);
+          addScanRejection(skillKey(/** @type {string} */ (newLayerDir), dir), info);
           // The layer mirrors the home in dot-dirs (.omp); the record keys use the snapshot
           // spelling (omp), so the leading dot drops out of the top-level segment.
-          const layerRel = relative(newLayerDir, dir).split(sep).join('/');
+          const layerRel = relative(/** @type {string} */ (newLayerDir), dir).split(sep).join('/');
           const prefix = layerRel.startsWith('.') ? layerRel.slice(1) : layerRel;
           for (const rel of Object.keys(current)) {
             if (rel === prefix || rel.startsWith(`${prefix}/`)) delete current[rel];
@@ -1169,7 +1230,7 @@ try {
     mkdirSync(dirname(manifest), { recursive: true });
     writeFileSync(manifest, `${JSON.stringify(current, null, 2)}\n`);
 
-    let pluginsStatus = null;
+    let pluginsStatus = /** @type {'installed' | 'unchanged' | null} */ (null);
     const pluginsInSnapshot = existsSync(join(userRoot, 'omp', 'plugins', 'package.json'));
     if (!skipPlugins && pluginsInSnapshot) {
       const pluginsDir = join(writeRoot, '.omp', 'plugins');
@@ -1185,7 +1246,7 @@ try {
         env: Object.fromEntries(BUN_ENV_KEYS.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]])),
       });
       if (bun.error || bun.status !== 0) {
-        throw new Error(bun.error?.code === 'ENOENT' ? 'bun not found; cannot install plugins.' : `bun install failed in ${pluginsDir}`);
+        throw new Error(/** @type {NodeJS.ErrnoException} */ (bun.error)?.code === 'ENOENT' ? 'bun not found; cannot install plugins.' : `bun install failed in ${pluginsDir}`);
       }
       pluginsStatus = 'installed';
     } else if (skipPlugins && pluginsInSnapshot) {
@@ -1201,22 +1262,22 @@ try {
       const fileLinks = ['.omp/agent/agent.db', '.gitconfig', '.pi/agent/optimizer.json'];
       const dirLinks = ['.omp/oauth', '.omp/sessions', '.omp/agent/sessions', '.omp/agent/memories', '.omp/memories', '.config', '.cache', '.bun'];
       for (const rel of [...fileLinks, ...dirLinks]) {
-        if (lstatSync(join(newLayerDir, rel), { throwIfNoEntry: false })) {
+        if (lstatSync(join(/** @type {string} */ (newLayerDir), rel), { throwIfNoEntry: false })) {
           console.log('layer keeps snapshot content: ' + rel);
           continue;
         }
         const target = join(layerHome, rel);
         mkdirSync(dirname(target), { recursive: true });
         if (dirLinks.includes(rel)) mkdirSync(target, { recursive: true });
-        mkdirSync(dirname(join(newLayerDir, rel)), { recursive: true });
-        symlinkSync(target, join(newLayerDir, rel));
+        mkdirSync(dirname(join(/** @type {string} */ (newLayerDir), rel)), { recursive: true });
+        symlinkSync(target, join(/** @type {string} */ (newLayerDir), rel));
       }
       // A reader of current sees the old or the new target, never a gap: rename() over the
       // symlink is atomic.
       let previousTarget = null;
       try { previousTarget = realpathSync(currentLink); } catch { /* first layer: nothing before it */ }
       tmpLink = join(base, `.current-${process.pid}-${Date.now()}.tmp`);
-      symlinkSync(newLayerDir, tmpLink);
+      symlinkSync(/** @type {string} */ (newLayerDir), tmpLink);
       renameSync(tmpLink, currentLink);
       switched = true;
       console.log(`switched ${currentLink} -> ${newLayerDir}`);
@@ -1225,7 +1286,7 @@ try {
       // record stops deletion: safety over disk space. Keep entries are layer ids, never full
       // paths: realpath values and join-built paths must never disagree about the spelling of
       // the same layer, or clean-up deletes the layer current points at.
-      const keep = new Set([basename(newLayerDir)]);
+      const keep = new Set([basename(/** @type {string} */ (newLayerDir))]);
       try { keep.add(basename(realpathSync(currentLink))); } catch { /* dangling: kept via newLayerDir */ }
       if (previousTarget) keep.add(basename(previousTarget));
       const inUsePath = join(base, 'in-use.json');
@@ -1248,12 +1309,14 @@ try {
     // files aggregate to their skill-dir key and the plugin files to the one plugins key,
     // matching the shared item-key table. The block prints at the end, so a deploy log's
     // tail names every failure.
+    /** @param {string} key @returns {string} */
     const itemKeyOf = key => {
       const m = /^user\/((?:omp\/agent\/(?:skills|managed-skills)|agents\/skills)\/[^/]+)\//.exec(key);
       if (m) return `user/${m[1]}`;
       if (key.startsWith('user/omp/plugins')) return 'user/omp/plugins';
       return key;
     };
+    /** @type {Map<string, ProvisionItem['status']>} */
     const statuses = new Map();
     for (const [kind, , , key] of plan) {
       const item = itemKeyOf(key);
@@ -1276,18 +1339,18 @@ try {
     if (failed.length || nestedFailed) process.exitCode = 1;
   } catch (err) {
     // A layer that never went live must not survive its own failed install.
-    if (layerMode && !switched) rmSync(newLayerDir, { recursive: true, force: true });
+    if (layerMode && !switched) rmSync(/** @type {string} */ (newLayerDir), { recursive: true, force: true });
     if (tmpLink) rmSync(tmpLink, { force: true });
     throw err;
   }
 } catch (err) {
-  console.error(err.message);
+  console.error(/** @type {Error} */ (err).message);
   fatal = true;
-  error = err.message;
+  error = /** @type {Error} */ (err).message;
   process.exitCode = 1; // not process.exit: finally below must still remove a cloned temp dir
 } finally {
   // The server's per-item results, whatever the run's outcome; a refusal carries
   // fatal: true and the items the gates judged before it.
-  if (process.env[PROVISION_ENV]) writeProvisionResults(process.env[PROVISION_ENV], { fatal, error, items });
+  if (process.env[PROVISION_ENV]) writeProvisionResults(/** @type {string} */ (process.env[PROVISION_ENV]), { fatal, error, items });
   cleanupData(data);
 }

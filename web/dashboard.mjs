@@ -8,6 +8,29 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { assertSourceInside, checkDestination, cloneCommand, dataHost, descriptionText, gitAuthEnv, githubHost, parseDataSpec, redactSecrets, SNAP_AGENTS_DIR } from '../lib/data.mjs';
 
+/** @typedef {import('node:sqlite').DatabaseSync} DashDb */
+/** @typedef {import('../lib/data.mjs').DataSpec} DataSpec */
+/** @typedef {{ name: string, description: string }} RuleInfo */
+/** @typedef {{ path: string, bytes: number }} FileInfo */
+/** @typedef {{ name: string, origin: string, path: string, description: string }} SkillInfo */
+/** @typedef {{ name: string, version?: string, origin?: string }} PluginInfo */
+/** @typedef {{ path: string, bytes: number, status: string }} InventoryEntry */
+/** @typedef {{ name: string, extras: number, files: number, live: string, entries: InventoryEntry[] }} NamedProject */
+/** @typedef {{ contextFiles: string[], named: NamedProject[] }} ProjectsInventory */
+/** @typedef {{ rules: RuleInfo[], user: { configFiles: FileInfo[], others: FileInfo[], skills: SkillInfo[], extensions: string[], plugins: PluginInfo[] }, projects: ProjectsInventory, counts: { rules: number, skills: number, plugins: number, extensions: number, projects: number, userFiles: number }, warnings: string[] }} Inventory */
+/** @typedef {{ added: string[], removed: string[], updated: string[] }} SectionChanges */
+/** @typedef {Record<string, SectionChanges>} Changes */
+/** @typedef {{ kind: string, spec: string, name: string, host: string, ref: string, importedSha: string }} SourceMeta */
+/** @typedef {SourceMeta & { importedAt: string }} SourceInfo */
+/** @typedef {{ dir: string, temp: boolean, source: SourceMeta }} ResolvedSource */
+/** @typedef {{ checkedAt: string, remoteSha: string, available: boolean }} UpdateInfo */
+/** @typedef {{ source: SourceInfo, inventory: Inventory | null, previous: Inventory | null, changes: Changes | null, update?: UpdateInfo | null, provision?: unknown }} StateDef */
+/** @typedef {{ name: string, extras?: number, files?: number, live?: string, entries?: InventoryEntry[] }} ProjectListItem */
+/** @typedef {{ rel: string, base: string | null, bytes: Buffer | null, message: string }} EditOp */
+/** @typedef {{ commit: string, pushed: boolean, warning?: string, state: StateDef }} EditResult */
+/** @typedef {Error & { status?: number, snapshotChanged?: boolean }} StatusedError */
+/** @typedef {{ path: string, bytes: number, binary: boolean, content: string | null, hash: string }} StoredFile */
+
 // Test hook: point the dashboard's GitHub traffic at a local fixture remote (override only).
 const GH_BASE = process.env.ALATE_TEST_GH_BASE ?? null;
 
@@ -15,6 +38,7 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const NOT_RULES = new Set(['AGENTS.md', 'README.md']);
 
 // Frontmatter description of a markdown file: '' when absent. Metadata only — the body is never rendered.
+/** @param {string} file @returns {string} */
 function mdDescription(file) {
   const text = readFileSync(file, 'utf8');
   const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
@@ -22,12 +46,19 @@ function mdDescription(file) {
 }
 
 // CRLF-normalized comparison basis (same as sync-projects.mjs)
+/** @param {Buffer} b */
 const norm = b => b.toString('latin1').replaceAll('\r\n', '\n');
 
 // Relative '/'-separated paths of regular files under dir; symlinks are never followed; [] when missing.
+/**
+ * @param {string} dir
+ * @returns {string[]}
+ */
 function listFiles(dir) {
   if (!existsSync(dir)) return [];
+  /** @type {string[]} */
   const out = [];
+  /** @param {string} base */
   const walk = base => {
     for (const entry of readdirSync(base, { withFileTypes: true })) {
       if (entry.isSymbolicLink()) continue;
@@ -40,6 +71,7 @@ function listFiles(dir) {
   return out;
 }
 
+/** @param {string} dir @returns {number} */
 function countFiles(dir) {
   if (!existsSync(dir)) return 0;
   let n = 0;
@@ -66,6 +98,11 @@ const SKILL_DIRS = [
 ];
 
 // Read-only inventory of a data repo. Missing pieces are empty, never fatal; findings land in warnings.
+/**
+ * @param {string} dir
+ * @param {string | null} [liveRoot=null]
+ * @returns {Inventory}
+ */
 function scanInventory(dir, liveRoot = null) {
   const warnings = [];
   const rules = [];
@@ -106,6 +143,7 @@ function scanInventory(dir, liveRoot = null) {
   others.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
   const extBase = join(dir, 'user', 'omp', 'agent', 'extensions');
+  /** @type {string[]} */
   let extensions = [];
   if (existsSync(extBase)) {
     try {
@@ -118,6 +156,7 @@ function scanInventory(dir, liveRoot = null) {
 
   const plugins = [];
   const seen = new Set();
+  /** @param {string[]} names */
   const addPlugins = names => {
     for (const name of names) {
       if (seen.has(name)) continue;
@@ -125,6 +164,7 @@ function scanInventory(dir, liveRoot = null) {
       plugins.push({ name });
     }
   };
+  /** @param {string} rel */
   const readJson = rel => {
     const file = join(dir, ...rel.split('/'));
     if (!existsSync(file)) return null;
@@ -153,10 +193,11 @@ function scanInventory(dir, liveRoot = null) {
   addPlugins(instNames);
   for (let i = instStart; i < plugins.length; i++) plugins[i].origin = 'installed_plugins.json';
 
+  /** @type {ProjectsInventory} */
   const projects = { contextFiles: [], named: [] };
   const manifest = readJson('projects/projects.json');
   if (manifest) {
-    projects.contextFiles = Array.isArray(manifest.contextFiles) && manifest.contextFiles.every(f => typeof f === 'string')
+    projects.contextFiles = Array.isArray(manifest.contextFiles) && manifest.contextFiles.every(/** @param {unknown} f */ f => typeof f === 'string')
       ? manifest.contextFiles
       : (warnings.push('projects/projects.json: contextFiles must be an array of strings; ignored'), []);
     // W3: the contract requires a non-null object — absent/null/shape-wrong all warn and skip
@@ -176,10 +217,10 @@ function scanInventory(dir, liveRoot = null) {
       const projectDir = join(dir, 'projects', name);
       // a missing snapshot dir is tolerated like every other missing piece
       const snapRels = existsSync(projectDir) ? (assertSourceInside(dir, projectDir), listFiles(projectDir)) : [];
-      const liveDir = liveRoot ? join(liveRoot, name) : null;
+      const liveDir = /** @type {string} */ (liveRoot ? join(liveRoot, name) : null);
       let live = liveRoot ? (existsSync(liveDir) ? 'checked' : 'gone') : 'off';
       if (live === 'checked') {
-        try { assertSourceInside(liveRoot, liveDir); } catch {
+        try { assertSourceInside(/** @type {string} */ (liveRoot), liveDir); } catch {
           live = 'off';
           warnings.push(`${name}: live project dir escapes the workspace; drift not checked`);
         }
@@ -248,6 +289,11 @@ function scanInventory(dir, liveRoot = null) {
 }
 
 // Added/removed by name between two inventories; sections absent from previous are all added.
+/**
+ * @param {string[]} prevNames
+ * @param {string[]} nextNames
+ * @returns {SectionChanges}
+ */
 function sectionChanges(prevNames, nextNames) {
   const prev = new Set(prevNames);
   return {
@@ -256,8 +302,20 @@ function sectionChanges(prevNames, nextNames) {
     updated: [], // S7: filled when both sides have the name and the metadata differs
   };
 }
+/**
+ * @param {Inventory | null} prev
+ * @param {Inventory} next
+ * @returns {Changes}
+ */
 function computeChanges(prev, next) {
   // names in both inventories whose scanned metadata changed
+  /**
+   * @template {{ name: string }} T
+   * @param {T[]} prevList
+   * @param {T[]} nextList
+   * @param {(item: T) => string} sig
+   * @returns {SectionChanges}
+   */
   const withUpdates = (prevList, nextList, sig) => {
     const ch = sectionChanges(prevList.map(x => x.name), nextList.map(x => x.name));
     const prevSig = new Map(prevList.map(x => [x.name, sig(x)]));
@@ -268,12 +326,14 @@ function computeChanges(prev, next) {
   };
   // W1: User layer changes track the displayed records, not every file under user/.
   // ponytail: content edits to a same-path config file stay invisible — we never read file bodies, only names/sizes.
+  /** @param {Inventory | null} inv */
   const userIds = inv => [...new Set([
     ...(inv?.user?.configFiles ?? []).map(f => f.path),
     ...(inv?.user?.others ?? []).map(f => f.path),
     ...(inv?.user?.extensions ?? []),
   ])];
   // W2: Projects changes cover named projects plus context files, prefixed to stay distinct
+  /** @param {Inventory | null} inv @returns {ProjectListItem[]} */
   const projList = inv => [
     ...(inv?.projects?.contextFiles ?? []).map(f => ({ name: '@context/' + f })),
     ...(inv?.projects?.named ?? []),
@@ -289,18 +349,29 @@ function computeChanges(prev, next) {
   return changes;
 }
 
+/**
+ * @param {DashDb} db
+ * @returns {StateDef}
+ */
 function loadState(db) {
-  const row = db.prepare('SELECT value FROM state WHERE id = 1').get();
-  return row ? JSON.parse(row.value) : { source: null, inventory: null, previous: null, changes: null };
+  const row = /** @type {{ value: string } | undefined} */ (db.prepare('SELECT value FROM state WHERE id = 1').get());
+  return row ? /** @type {StateDef} */ (JSON.parse(row.value)) : /** @type {StateDef} */ (/** @type {unknown} */ ({ source: null, inventory: null, previous: null, changes: null }));
 }
 
 // Resolve a source string to { dir, temp, source }. Throws Error with a client-safe message on failure.
 // kind: 'repo' clones, 'path' reads a local directory, absent prefers a local directory.
+/**
+ * @param {string} spec
+ * @param {string | undefined} kind
+ * @param {string | undefined} token
+ * @returns {ResolvedSource}
+ */
 function resolveSource(spec, kind, token) {
   const asGiven = existsSync(spec);
   if (kind !== 'repo' && (asGiven || existsSync(resolve(repoRoot, spec)))) {
     const dir = resolve(asGiven ? spec : resolve(repoRoot, spec));
-    return { dir, temp: false, source: { kind: 'path', spec, name: dir, ref: '', importedSha: '' } };
+    // a path-kind source stores no host; the cast documents the repo-source shape
+    return { dir, temp: false, source: /** @type {SourceMeta} */ ({ kind: 'path', spec, name: dir, ref: '', importedSha: '' }) };
   }
   if (kind === 'path') {
     throw Object.assign(new Error(`no local data repo at ${spec}`), { status: 400 });
@@ -313,15 +384,22 @@ function resolveSource(spec, kind, token) {
 }
 
 // A local dir of that name wins over the GitHub URL (cloneRepo, remoteHead and pushes agree).
+/** @param {string} name @param {string} [host] @returns {string} */
 const remoteUrl = (name, host = '') => (existsSync(name) ? name : `${GH_BASE ?? `https://${host || githubHost().host}`}/${name}`);
 
 // Clone a GitHub repo into a fresh temp dir; temp: true so importSource cleans it up.
+/**
+ * @param {string} spec
+ * @param {DataSpec} parsed
+ * @param {string | undefined} token
+ * @returns {ResolvedSource}
+ */
 function cloneRepo(spec, parsed, token) {
   let host;
   try {
     host = dataHost(parsed, process.env);
   } catch (err) {
-    throw Object.assign(new Error(err.message), { status: 400 });
+    throw Object.assign(new Error(/** @type {Error} */ (err).message), { status: 400 });
   }
   const url = remoteUrl(parsed.name, host);
   const active = token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
@@ -345,6 +423,15 @@ function cloneRepo(spec, parsed, token) {
 
 // resolvedIn: an already-resolved { dir, temp, source } to import directly (the editor's
 // clone), so a write never clones twice. Absent: resolveSource resolves spec as usual.
+/**
+ * @param {StateDef} state
+ * @param {string} spec
+ * @param {string | undefined} kind
+ * @param {string | undefined} token
+ * @param {DashDb} db
+ * @param {ResolvedSource | null} [resolvedIn=null]
+ * @returns {StateDef}
+ */
 function importSource(state, spec, kind, token, db, resolvedIn = null) {
   const resolved = resolvedIn ?? resolveSource(spec, kind, token);
   try {
@@ -357,6 +444,7 @@ function importSource(state, spec, kind, token, db, resolvedIn = null) {
     try {
       db.exec('DELETE FROM files');
       const insert = db.prepare('INSERT INTO files (path, content) VALUES (?, ?)');
+      /** @param {string} dir @param {string} [sub] */
       const walk = (dir, sub = '') => {
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
           if (['.git', 'node_modules', '__pycache__'].includes(entry.name)) continue;
@@ -383,10 +471,14 @@ function importSource(state, spec, kind, token, db, resolvedIn = null) {
 }
 
 // Existing installers read a directory. It contains only the stored database bytes.
+/**
+ * @param {DashDb} db
+ * @returns {{ dir: string, temp: boolean }}
+ */
 function snapshotData(db) {
   const dir = mkdtempSync(join(tmpdir(), 'alate-snapshot-'));
   try {
-    for (const { path, content } of db.prepare('SELECT path, content FROM files').iterate()) {
+    for (const { path, content } of /** @type {Iterable<{ path: string, content: Buffer }>} */ (db.prepare('SELECT path, content FROM files').iterate())) {
       if (/[\\:\0]/.test(path) || path.split('/').some(p => !p || p === '.' || p === '..')) throw new Error(`unsafe snapshot path: ${path}`);
       const dest = join(dir, path);
       checkDestination(dir, dest);
@@ -402,11 +494,14 @@ function snapshotData(db) {
 
 // ---- File editor: verify a base hash, write or delete in a source tree, commit and push. ----
 
+/** @param {Buffer} b @returns {string} */
 const sha256 = b => createHash('sha256').update(b).digest('hex');
+/** @param {number} status @param {string} message @returns {never} */
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 
 // Editor paths are relative '/'-separated snapshot paths. Reject everything the snapshot
 // itself rejects (backslash, colon, NUL) plus traversal and any .git segment.
+/** @param {unknown} path @returns {string} */
 function safeRelPath(path) {
   const shown = typeof path === 'string' ? path.slice(0, 100) : '';
   if (typeof path !== 'string' || path === '' || /[\\:\0]/.test(path) || path.startsWith('/')) fail(400, `unsafe file path: ${shown}`);
@@ -416,9 +511,14 @@ function safeRelPath(path) {
 
 // One stored snapshot file for the editor: null when absent. binary when the bytes are not
 // valid UTF-8 or hold NUL, so content is then null; hash covers the stored bytes.
+/**
+ * @param {DashDb} db
+ * @param {string} rel
+ * @returns {StoredFile | null}
+ */
 function readStoredFile(db, rel) {
   safeRelPath(rel);
-  const row = db.prepare('SELECT content FROM files WHERE path = ?').get(rel);
+  const row = /** @type {{ content: Buffer } | undefined} */ (db.prepare('SELECT content FROM files WHERE path = ?').get(rel));
   if (!row) return null;
   const bytes = Buffer.from(row.content);
   let text = null;
@@ -426,11 +526,13 @@ function readStoredFile(db, rel) {
   return { path: rel, bytes: bytes.length, binary: text === null, content: text, hash: sha256(bytes) };
 }
 
+/** @param {DashDb} db @returns {Array<{ path: string, bytes: number }>} */
 function listStoredFiles(db) {
-  return db.prepare('SELECT path, LENGTH(content) AS bytes FROM files ORDER BY path').all();
+  return /** @type {Array<{ path: string, bytes: number }>} */ (db.prepare('SELECT path, LENGTH(content) AS bytes FROM files ORDER BY path').all());
 }
 
 // Commit message: default per action; a caller message is one line of at most 500 characters.
+/** @param {unknown} raw @param {string} rel @param {boolean} adding @param {boolean} del */
 function editMessage(raw, rel, adding, del) {
   const fallback = `alate: ${del ? 'delete' : adding ? 'add' : 'edit'} ${rel}`;
   if (raw === undefined || raw === null || raw === '') return fallback;
@@ -442,26 +544,33 @@ function editMessage(raw, rel, adding, del) {
 
 // Verify base against the tree's file bytes, then write or delete there. bytes null = delete.
 // base null = create, the file must not exist; otherwise the sha256 hex the editor loaded.
+/**
+ * @param {string} dir
+ * @param {string} rel
+ * @param {string | null} base
+ * @param {Buffer | null} bytes
+ */
 function applyToTree(dir, rel, base, bytes) {
   const file = join(dir, ...rel.split('/'));
   const current = existsSync(file) && statSync(file).isFile() ? readFileSync(file) : null;
   if (bytes === null) {
     if (current === null) fail(404, `${rel} not found`);
     if (sha256(current) !== base) fail(409, `${rel} changed since it was loaded; reload it and retry`);
-    try { assertSourceInside(dir, file); checkDestination(dir, file); } catch (err) { fail(400, err.message); }
+    try { assertSourceInside(dir, file); checkDestination(dir, file); } catch (err) { fail(400, /** @type {Error} */ (err).message); }
     rmSync(file, { force: true });
     // git tracks no folders: drop the ones the delete emptied, so the inventory loses the skill dir too.
     for (let d = dirname(file); d !== dir && d.startsWith(dir) && readdirSync(d).length === 0; d = dirname(d)) rmSync(d, { recursive: true });
   } else {
     if (base === null) { if (current !== null) fail(409, `${rel} changed since it was loaded; reload it and retry`); }
     else if (current === null || sha256(current) !== base) fail(409, `${rel} changed since it was loaded; reload it and retry`);
-    try { checkDestination(dir, file); } catch (err) { fail(400, err.message); }
+    try { checkDestination(dir, file); } catch (err) { fail(400, /** @type {Error} */ (err).message); }
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, bytes);
   }
 }
 
 // git in dir; env carries auth through per-process config, never argv or URL.
+/** @param {string} dir @param {string[]} args @param {NodeJS.ProcessEnv} [env=process.env] */
 function runGit(dir, args, env = process.env) {
   return spawnSync('git', ['-C', dir, ...args], { env, encoding: 'utf8' });
 }
@@ -469,6 +578,7 @@ function runGit(dir, args, env = process.env) {
 // True when dir sits inside a git work tree — the gate editPathSource uses before it
 // commits, and the `git` flag GET /health reports for a path source (specs/source-write-flags.md).
 // rev-parse never writes to the folder.
+/** @param {string} dir @returns {boolean} */
 function isGitWorkTree(dir) {
   return runGit(dir, ['rev-parse', '--is-inside-work-tree']).status === 0;
 }
@@ -477,11 +587,13 @@ function isGitWorkTree(dir) {
 // accessSync(W_OK) never writes, but it can over-report: some kernels pass W_OK on a
 // read-only bind mount, and a root process passes W_OK on any existing folder. So
 // `false` is reliable; `true` means the PUT can still fail with a raw fs error.
+/** @param {string} dir @returns {boolean} */
 function isWritableDir(dir) {
   try { accessSync(dir, constants.W_OK); return true; } catch { return false; }
 }
 
 // -c identity only when the tree has none: a commit must always be possible.
+/** @param {string} dir @param {NodeJS.ProcessEnv} env @returns {string[]} */
 function identArgs(dir, env) {
   const id = runGit(dir, ['config', 'user.email'], env);
   return id.status !== 0 || !id.stdout.trim() ? ['-c', 'user.name=alate', '-c', 'user.email=alate@localhost'] : [];
@@ -489,6 +601,14 @@ function identArgs(dir, env) {
 
 // Stage the one path, commit only that path (never other staged work), return the new sha.
 // A failure is a client-safe 400.
+/**
+ * @param {string} dir
+ * @param {string} rel
+ * @param {string} message
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string | undefined} token
+ * @returns {string}
+ */
 function commitEdit(dir, rel, message, env, token) {
   const add = runGit(dir, ['add', '-A', '--', rel], env);
   if (add.status !== 0) fail(400, `git add failed: ${redactSecrets(add.stderr.trim(), token)}`);
@@ -503,6 +623,14 @@ function commitEdit(dir, rel, message, env, token) {
 
 // Repo source: fresh clone, verify against the clone, commit, push HEAD:<branch>, then import
 // the snapshot from that same clone so importedSha is the new commit. Temp dir always cleaned.
+/**
+ * @param {StateDef} state
+ * @param {DashDb} db
+ * @param {SourceInfo} src
+ * @param {EditOp} op
+ * @param {string | undefined} token
+ * @returns {EditResult}
+ */
 function editRepoSource(state, db, src, op, token) {
   const resolved = cloneRepo(src.spec, { name: src.name, ref: src.ref, host: src.host }, token);
   try {
@@ -523,11 +651,21 @@ function editRepoSource(state, db, src, op, token) {
 // Path source: verify against disk, write, then commit and push in the user's own work tree
 // (its hooks and credential helpers run untouched, never --no-verify). The disk stays the
 // truth: a failed commit or push still re-imports the snapshot before the error is rethrown.
+/**
+ * @param {StateDef} state
+ * @param {DashDb} db
+ * @param {SourceInfo} src
+ * @param {EditOp} op
+ * @param {string | undefined} token
+ * @returns {EditResult}
+ */
 function editPathSource(state, db, src, op, token) {
   const dir = src.name;
   if (!existsSync(dir)) fail(400, `no local data repo at ${src.spec}`);
   applyToTree(dir, op.rel, op.base, op.bytes);
-  let commit = '', pushed = false, warning, failure = null;
+  let commit = '', pushed = false, warning;
+  /** @type {StatusedError | null} */
+  let failure = null;
   if (isGitWorkTree(dir)) {
     try {
       commit = commitEdit(dir, op.rel, op.message, process.env, token);
@@ -538,7 +676,7 @@ function editPathSource(state, db, src, op, token) {
         if (push.status !== 0) failure = Object.assign(new Error(`git push failed: ${redactSecrets(push.stderr.trim(), token)}`), { status: 502 });
         else pushed = true;
       }
-    } catch (err) { failure = err; }
+    } catch (err) { failure = /** @type {StatusedError} */ (err); }
   }
   const next = importSource(state, src.spec, src.kind, token, db);
   if (failure) {
@@ -554,6 +692,13 @@ function editPathSource(state, db, src, op, token) {
 
 // One editor operation end to end. edit: { path, base, content?, message?, delete }.
 // Throws Error with a client-safe .status and a token-free message.
+/**
+ * @param {StateDef} state
+ * @param {DashDb} db
+ * @param {{ path?: unknown, base?: unknown, content?: unknown, message?: unknown, delete: boolean }} edit
+ * @param {string | undefined} token
+ * @returns {EditResult}
+ */
 function applyFileEdit(state, db, edit, token) {
   const rel = safeRelPath(edit.path);
   if (!state.source) fail(400, 'no data source configured');
@@ -563,7 +708,7 @@ function applyFileEdit(state, db, edit, token) {
   const op = {
     rel,
     base: edit.base,
-    bytes: edit.delete ? null : Buffer.from(edit.content, 'utf8'),
+    bytes: edit.delete ? null : Buffer.from(/** @type {string} */ (edit.content), 'utf8'),
     message: editMessage(edit.message, rel, !edit.delete && edit.base === null, edit.delete),
   };
   return state.source.kind === 'repo'
@@ -572,6 +717,13 @@ function applyFileEdit(state, db, edit, token) {
 }
 
 // First sha of `git ls-remote` for a dashboard repo source; '' when the check fails (client-safe).
+/**
+ * @param {string} name
+ * @param {string} ref
+ * @param {string | undefined} token
+ * @param {string} [host='']
+ * @returns {string}
+ */
 function remoteHead(name, ref, token, host = '') {
   const url = remoteUrl(name, host);
   const git = spawnSync('git', ['ls-remote', url, ref || 'HEAD'], {

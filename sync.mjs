@@ -13,12 +13,16 @@ import { isAbsolute, join, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertSourceInside, checkDestination, cleanupData, describeProblem, die, fingerprint, NOT_RULES, originGate, parseArgs, PROVISION_ENV, resolveDataDir, ruleProblems, writeProvisionResults } from './lib/data.mjs';
 
-const args = parseArgs(process.argv.slice(2), ['--data', '--repo'], [], true);
+/** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
+/** @typedef {{ item: string, status: 'installed' | 'unchanged' | 'rejected' | 'no-origin', rule: string | null, at: string | null, report?: string }} ProvisionItem */
+
+const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--data', '--repo'], [], true));
 if (args.positional.length > 1) die('Usage: node sync.mjs [targetDir] [--data <dir>|--repo <owner/name[@ref]>]');
 const data = resolveDataDir(args, { allowClone: true });
 const target = args.positional[0] ?? join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.omp', 'agent'), 'rules');
 let fatal = false;
 let error = null;
+/** @type {ProvisionItem[]} */
 let items = [];
 try {
   // Test-only file gate (the server-side twin is ALATE_TEST_PROVISION_GATE in server.ts):
@@ -32,10 +36,14 @@ try {
   if (existsSync(target) && realpathSync.native(target) === realpathSync.native(data.dir)) {
     throw new Error(`Target resolves to the data dir (${target}); refusing to install into itself.`);
   }
+  /** @param {string} name @returns {boolean} */
   const isMd = name => /\.mdc?$/.test(name); // omp loads <agentDir>/rules/*.{md,mdc}, top level only
 
+  /** @type {Map<string, Buffer>} */
   const rules = new Map();
+  /** @param {string} item @param {ProvisionItem['status']} status @param {string | null} [rule] @param {string | null} [at] @param {string | null} [report] */
   const failItem = (item, status, rule = null, at = null, report = null) => {
+    /** @type {ProvisionItem} */
     const entry = { item, status, rule, at };
     if (report !== null) entry.report = report.length > 4000 ? `${report.slice(0, 4000)}…` : report;
     items.push(entry);
@@ -63,7 +71,7 @@ try {
   // is then deleted below); keys without '/' are always rules, keys with '/' belong to other scripts
   // and are reported only. A hint carries the gate's per-item remediation text (for example the
   // pinned-Python message for an unpinned uvx/pipx server) and travels with the item's report.
-  const gate = originGate(data.dir);
+  const gate = /** @type {{ fatal: string[], uncovered: string[], hints: Record<string, string> }} */ (originGate(data.dir));
   if (gate.fatal.length) throw new Error(`Nothing installed. Fix:\n  ${gate.fatal.join('\n  ')}`);
   for (const p of gate.uncovered) {
     failItem(p, 'no-origin', null, null, gate.hints?.[p] ?? null);
@@ -75,13 +83,14 @@ try {
   // record — hand-made, or installed by an older alate — is only reported, never deleted.
   const manifestFile = join(target, '.alate-installed.json');
   checkDestination(target, manifestFile);
+  /** @type {Record<string, string>} */
   let recorded = {};
   if (existsSync(manifestFile)) {
     try {
       const parsed = JSON.parse(readFileSync(manifestFile, 'utf8'));
       recorded = Object.fromEntries(Object.entries(parsed).filter(([, v]) => typeof v === 'string'));
     } catch (err) {
-      console.error(`Ignoring unreadable ${manifestFile} (${err.message}): dropped rules are only reported.`);
+      console.error(`Ignoring unreadable ${manifestFile} (/** @type {Error} */ (err).message): dropped rules are only reported.`);
     }
   }
 
@@ -92,6 +101,7 @@ try {
   for (const name of Object.keys(recorded)) if (!rules.has(name)) checkDestination(target, join(target, name));
 
   mkdirSync(target, { recursive: true });
+  /** @type {Map<string, Buffer | null>} */
   const old = new Map();
   for (const [name] of rules) {
     const dest = join(target, name);
@@ -109,6 +119,7 @@ try {
     failItem(name, 'installed');
   }
   let deleted = 0;
+  /** @type {Set<string>} */
   const gone = new Set();
   for (const name of Object.keys(recorded)) {
     if (rules.has(name) || !existsSync(join(target, name))) continue;
@@ -126,7 +137,7 @@ try {
   // a kept-but-changed copy loses its record when the manifest is rewritten below.
   const stale = readdirSync(target).filter(name => isMd(name) && !rules.has(name) && !gone.has(name));
   if (stale.length) console.log(`Not from the data repo, left in place: ${stale.join(', ')}`);
-  writeFileSync(manifestFile, `${JSON.stringify(Object.fromEntries([...rules.keys()].map(name => [name, fingerprint(name, rules.get(name))])), null, 2)}\n`);
+  writeFileSync(manifestFile, `${JSON.stringify(Object.fromEntries([...rules.keys()].map(name => [name, fingerprint(name, /** @type {Buffer} */ (rules.get(name)))])), null, 2)}\n`);
   items.sort((a, b) => (a.item < b.item ? -1 : a.item > b.item ? 1 : 0));
   const failed = items.filter(it => it.status === 'rejected' || it.status === 'no-origin');
   if (failed.length) {
@@ -143,10 +154,10 @@ try {
   error = null;
 } catch (err) {
   fatal = true;
-  error = err.message;
-  console.error(err.message);
+  error = /** @type {Error} */ (err).message;
+  console.error(/** @type {Error} */ (err).message);
   process.exitCode = 1; // not process.exit: finally below must still remove a cloned temp dir
 } finally {
-  if (process.env[PROVISION_ENV]) writeProvisionResults(process.env[PROVISION_ENV], { fatal, error, items });
+  if (process.env[PROVISION_ENV]) writeProvisionResults(/** @type {string} */ (process.env[PROVISION_ENV]), { fatal, error, items });
   cleanupData(data);
 }

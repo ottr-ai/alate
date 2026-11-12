@@ -11,9 +11,12 @@ import { fileURLToPath } from 'node:url';
 import { assertSourceInside, checkDestination, normText, parseArgs, resolveDataDir, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
 import { SHIPPED_SKILLS_DIR, shippedSkills } from './lib/shipped.mjs';
 
+/** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
+/** @typedef {[string, Buffer, string]} CapturedFile */
+
 // --repo is a valued option so resolveDataDir can refuse cloning with the capture-specific
 // message; capture takes no flags and no positional arguments.
-const args = parseArgs(process.argv.slice(2), ['--home', '--data', '--repo']);
+const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--home', '--data', '--repo']));
 const data = resolveDataDir(args, { allowClone: false });
 const home = args.values['--home'] ?? homedir();
 // Hand-edited config: a secret-named key here must reference an env var, never hold the value, because an MCP
@@ -44,6 +47,7 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
 // omp home differs and a fresh one misses most entries. Refusal stays for secrets and
 // unreadable files only; ITEMS remains the allowlist of what may be captured.
 // Shapes of real credentials (codeguard-1-hardcoded-credentials), not words: docs that only mention keys still sync.
+/** @type {[string, RegExp][]} */
 const SHAPES = [
   ['AWS access key', /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b/],
   ['GitHub token', /\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_\w{22,})/],
@@ -72,6 +76,7 @@ const MAX_TOKEN_KEY = /^max[_-]?tokens?$/i;
 // without a reference: 'true'/'null' and "Bearer null" are strings, and strings refuse.
 // Actual booleans/null are handled per syntax by the callers (typed in JSON, unquoted
 // in YAML); they never reach here as inert spellings.
+/** @param {string} value @param {string} [fix] @returns {string | null} */
 const scalarProblem = (value, fix = 'reference an env var instead') => {
   let v = value.trim();
   const q = v.length > 1 && (v[0] === '"' || v[0] === "'") && v.endsWith(v[0]) ? v[0] : '';
@@ -82,11 +87,13 @@ const scalarProblem = (value, fix = 'reference an env var instead') => {
 };
 // The YAML scalar of a raw value: a " # comment" tail (or a bare "#..." comment) is
 // commentary, not value, so `key: $VAR # note` and `key: # note` stay valid.
+/** @param {string} value @returns {string} */
 const yamlScalar = value => value.trim().replace(/\s+#.*$/, '').replace(/^#.*$/, '').trim();
 // Judges a comment-stripped scalar (yamlScalar). A block indicator (|, >, with
 // chomping/indent digits) hides the value and refuses. An unquoted true/false/null/~ is
 // a real boolean/null scalar and stays inert; the same spelling quoted is a string and
 // refuses. Anything else must be an empty or complete env reference.
+/** @param {string} v @returns {string | null} */
 const yamlValueProblem = v => {
   if (/^[|>][0-9+-]*$/.test(v)) return 'holds a YAML block; reference an env var instead';
   if (/^(?:true|false|null|~)$/i.test(v)) return null;
@@ -94,6 +101,7 @@ const yamlValueProblem = v => {
 };
 // `key:` with no value can still receive a plain multiline literal from a deeper line
 // below it; the first meaningful line decides, and deeper means the secret holds one.
+/** @param {string[]} lines @param {number} i @param {number} keyIndex @returns {string | null} */
 const continuationProblem = (lines, i, keyIndex) => {
   for (let j = i + 1; j < lines.length; j++) {
     const l = lines[j].trim();
@@ -105,9 +113,11 @@ const continuationProblem = (lines, i, keyIndex) => {
 };
 // mcp.json: parse-based scan so escaped keys resolve before matching; invalid JSON
 // refuses. Problems name the field only, never the value.
+/** @param {string} text @param {(message: string) => void} say @returns {void} */
 const jsonProblems = (text, say) => {
   let doc;
   try { doc = JSON.parse(text); } catch { say('is not valid JSON'); return; }
+  /** @param {any} node */
   const visit = node => {
     if (Array.isArray(node)) return node.forEach(visit);
     if (!node || typeof node !== 'object') return;
@@ -132,6 +142,7 @@ const jsonProblems = (text, say) => {
 // Stale-output listing: never reuses the source walker. The output tree is data-repo
 // state, so an unexpected link or special file there refuses the capture; lstat never
 // follows, which also makes junction cycles impossible to enter.
+/** @param {string} dir @param {string} [sub] @returns {string[]} */
 const listOutput = (dir, sub = '') => {
   const out = [];
   for (const name of readdirSync(dir)) {
@@ -146,6 +157,7 @@ const listOutput = (dir, sub = '') => {
   }
   return out;
 };
+/** @param {string} text @param {number} index @returns {number} */
 const lineOf = (text, index) => text.slice(0, index).split('\n').length;
 
 // Membership anchors: the allowlisted item paths joined to the CANONICAL home. A link
@@ -156,6 +168,7 @@ const lineOf = (text, index) => text.slice(0, index).split('\n').length;
 // .omp/agent/skills -> .agents/skills bridge stays allowed: its target IS an item path.
 const realHome = realpathSync.native(home);
 const itemRoots = ITEMS.map(item => join(realHome, item));
+/** @param {string} p @returns {boolean} */
 const anchored = p => itemRoots.some(root => {
   const rel = relative(root, p);
   return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
@@ -165,8 +178,11 @@ const anchored = p => itemRoots.some(root => {
 // links, special files and recursion cycles refuse the whole capture. Recursion
 // ancestors are the canonical directories on the current descent path only - no global
 // dedup, so ordinary aliases across independent items never mask a real cycle.
+/** @param {string} abs @param {string} rel @param {string} root @returns {CapturedFile[]} */
 const captureDir = (abs, rel, root) => {
+  /** @type {CapturedFile[]} */
   const out = [];
+  /** @param {string} abs @param {string} rel @param {Set<string>} ancestors */
   const visit = (abs, rel, ancestors) => {
     for (const name of readdirSync(abs)) {
       const child = join(abs, name);
@@ -200,6 +216,7 @@ const captureDir = (abs, rel, root) => {
 // target's identity and a hard link shares it, so both alias kinds match the canonical
 // capture where a realpath key would miss a hard link. A missing CONFIG item resolves
 // nowhere and is reported by the ITEMS loop below.
+/** @type {Map<string, string>} */
 const configOrigins = new Map();
 for (const item of CONFIG) {
   try {
@@ -219,22 +236,26 @@ for (const item of CONFIG) {
 // install-user: with the tree unreadable the shipped set is unknown, and copying every
 // child back is exactly the bug this gate exists to stop, so the capture refuses.
 const toolRoot = dirname(fileURLToPath(import.meta.url));
-let shippedDirs = null;
-let shippedProblem = null;
+let shippedDirs = /** @type {Map<string, string> | null} */ (null);
+let shippedProblem = /** @type {string | null} */ (null);
+/** @returns {Map<string, string> | null} */
 const vendoredShipped = () => {
   if (shippedDirs !== null || shippedProblem !== null) return shippedDirs;
   try {
     shippedDirs = new Map(shippedSkills(toolRoot).map(s => [s.name, s.dir]));
   } catch (err) {
-    shippedProblem = `~/.${SHIPPED_SKILLS_DIR}: the vendored shipped skills tree is missing or unreadable (${err.message}); copying .agents/skills back would capture the shipped skills into the data repo, and a provision with upstreams.json would then delete them from the home`;
+    shippedProblem = `~/.${SHIPPED_SKILLS_DIR}: the vendored shipped skills tree is missing or unreadable (/** @type {Error} */ (err).message); copying .agents/skills back would capture the shipped skills into the data repo, and a provision with upstreams.json would then delete them from the home`;
   }
   return shippedDirs;
 };
 // The vendored skill's files as [rel, bytes], with the same SKIP_DIRS rule as captureDir,
 // so the comparison sees the same file set. A special file (null bytes) or an unreadable
 // tree never compares equal, so the skill captures.
+/** @param {string} dir @returns {[string, Buffer | null][]} */
 const vendoredFiles = dir => {
+  /** @type {[string, Buffer | null][]} */
   const out = [];
+  /** @param {string} d @param {string} sub */
   const visit = (d, sub) => {
     for (const entry of readdirSync(d, { withFileTypes: true })) {
       if (SKIP_DIRS.has(entry.name)) continue;
@@ -257,8 +278,11 @@ const vendoredFiles = dir => {
 // so the next provision rejects it and can delete it from the home.
 const SKILL_ITEMS = new Set([SHIPPED_SKILLS_DIR, '.omp/agent/skills', '.omp/agent/managed-skills']);
 
+/** @type {string[]} */
 const problems = [];
+/** @type {[string, Buffer][]} */
 const plan = [];
+/** @type {string[]} */
 const summary = [];
 let present = 0;
 for (const item of ITEMS) {
@@ -277,6 +301,7 @@ for (const item of ITEMS) {
     }
     const st = statSync(src);
     if (!st.isDirectory() && !st.isFile()) throw new Error(`~/${item}: is not a regular file`);
+    /** @type {CapturedFile[]} */
     let found = st.isDirectory() ? captureDir(src, item, root) : [[item, readFileSync(src), `${st.dev}:${st.ino}`]];
     if (SKILL_ITEMS.has(item) && st.isDirectory()) {
       const shipped = vendoredShipped();
@@ -284,20 +309,22 @@ for (const item of ITEMS) {
       if (shipped) {
         // Group the capture entries under each shipped name; children outside the vendored
         // set and top-level files keep their entries untouched.
+        /** @type {Map<string, [string, Buffer, CapturedFile][]>} */
         const groups = new Map();
+        /** @type {CapturedFile[]} */
         const kept = [];
         const prefix = `${item}/`;
         for (const entry of found) {
           const rest = entry[0].startsWith(prefix) ? entry[0].slice(prefix.length) : null;
           const slash = rest === null ? -1 : rest.indexOf('/');
-          const name = slash > 0 ? rest.slice(0, slash) : null;
+          const name = slash > 0 ? /** @type {string} */ (rest).slice(0, slash) : null;
           if (name === null || !shipped.has(name)) { kept.push(entry); continue; }
           if (!groups.has(name)) groups.set(name, []);
-          groups.get(name).push([rest.slice(slash + 1), entry[1], entry]);
+          /** @type {[string, Buffer, CapturedFile][]} */ (groups.get(name)).push([/** @type {string} */ (rest).slice(slash + 1), entry[1], entry]);
         }
         const skipped = [];
         for (const [name, files] of groups) {
-          const byRel = new Map(vendoredFiles(shipped.get(name)));
+          const byRel = new Map(vendoredFiles(/** @type {string} */ (shipped.get(name))));
           const equal = files.length === byRel.size && files.every(([rel, bytes]) => {
             const v = byRel.get(rel);
             return v !== undefined && v !== null && bytes.equals(v);
@@ -358,7 +385,7 @@ for (const item of ITEMS) {
     present++;
     summary.push(`~/${item}: captured`);
   } catch (err) {
-    problems.push(err.message.startsWith('~/') ? err.message : `~/${item}: ${err.message}`);
+    problems.push(/** @type {Error} */ (err).message.startsWith('~/') ? /** @type {Error} */ (err).message : `~/${item}: ${/** @type {Error} */ (err).message}`);
   }
 }
 if (problems.length) {
@@ -381,6 +408,7 @@ try {
     ? listOutput(join(data.dir, 'user')).filter(rel => !wanted.has(rel)) : [];
   // Two passes: every planned destination is preflighted (and its old bytes staged)
   // before the first write, so a bad destination refuses the whole capture untouched.
+  /** @type {[string, string, Buffer, Buffer | null][]} */
   const staged = [];
   let added = 0, updated = 0, unchanged = 0;
   for (const [rel, bytes] of plan) {
@@ -399,7 +427,7 @@ try {
   for (const rel of stale) console.log(`note: user/${rel} is gone from this machine; delete it by hand if stale`);
   console.log(`${added} added, ${updated} updated, ${unchanged} unchanged from ${home}`);
 } catch (err) {
-  console.error(err.message);
+  console.error(/** @type {Error} */ (err).message);
   process.exit(1);
 }
 // ponytail: stale copies are reported, never deleted (like sync-projects.mjs); add --prune if removals get common.
