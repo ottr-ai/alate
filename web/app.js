@@ -275,6 +275,9 @@ function overviewView() {
   // path source has no sha, so its latest results always show (specs/provision-item-by-item.md).
   const prov = state.provision && !(state.provision.sha && state.provision.sha !== (src ? src.importedSha : undefined)) ? state.provision : null;
   const provItems = prov ? new Map(prov.items.map((i) => [i.item, i])) : null;
+  // Every key a row shows is claimed, so the fallback list at the end holds only the
+  // failures with no row: no failed item may be invisible (ui-ux-check rule 34).
+  const claimed = new Set();
   const provAside = (key, fallback) => {
     const it = provItems ? provItems.get(key) : null;
     if (!it) return { aside: fallback, alert: false, report: null };
@@ -285,10 +288,29 @@ function overviewView() {
   // Same shape as entry(), with the provision status in the aside and the report in a
   // details block for a failed item.
   const provEntry = (key, href, name, desc, fallback) => {
+    claimed.add(key);
     const p = provAside(key, fallback);
     const li = entry(href, name, desc, p.aside, p.alert);
     if (p.report) li.append(h('details', { class: 'report' }, h('summary', { text: 'report' }), h('pre', { text: p.report })));
     return li;
+  };
+  // A per-server MCP item key names its server: user/omp/agent/mcp.json "<name>" (the key
+  // format lives in lib/data.mjs originGate). The mcp.json row lists every server's
+  // status and report, so one failed server is visible next to its file
+  // (specs/provision-item-by-item.md).
+  const mcpServerName = (key) => { const m = /^user\/omp\/agent\/mcp\.json "(.*)"$/u.exec(key); return m ? m[1] : null; };
+  const provServerRows = (path) => {
+    if (!provItems || path !== 'omp/agent/mcp.json') return null;
+    const servers = [...provItems.values()].filter((i) => mcpServerName(i.item) !== null)
+      .sort((a, b) => mcpServerName(a.item).localeCompare(mcpServerName(b.item)));
+    if (!servers.length) return null;
+    return h('ul', { class: 'entries sub' }, servers.map((it) => {
+      const p = provAside(it.item, '');
+      claimed.add(it.item);
+      const li = entry(null, '"' + mcpServerName(it.item) + '"', 'MCP server', p.aside, p.alert);
+      if (p.report) li.append(h('details', { class: 'report' }, h('summary', { text: 'report' }), h('pre', { text: p.report })));
+      return li;
+    }));
   };
   const has = new Set(files.map((f) => f.path));
   const link = (p) => (has.has(p) ? fileHref(p) : null);
@@ -328,7 +350,12 @@ function overviewView() {
       : h('p', { class: 'note', text: 'No rules in this data repo. A rule is a root *.md or *.mdc file with a description in its frontmatter.' })));
 
   const userRows = [
-    ...user.configFiles.map((f) => provEntry('user/' + f.path, link('user/' + f.path), f.path, 'Config file', bytes(f.bytes))),
+    ...user.configFiles.map((f) => {
+      const li = provEntry('user/' + f.path, link('user/' + f.path), f.path, 'Config file', bytes(f.bytes));
+      const servers = provServerRows(f.path);
+      if (servers) li.append(servers);
+      return li;
+    }),
     ...(user.others || []).map((f) => provEntry('user/' + f.path, link('user/' + f.path), f.path, 'Lock and manifest file', bytes(f.bytes))),
     ...user.extensions.map((x) => entry(null, x, 'Extension', '')),
   ];
@@ -355,6 +382,18 @@ function overviewView() {
   sheet.append(part('Projects', String(projects.named.length),
     projects.contextFiles.length ? h('p', { class: 'note', text: 'Context files captured per project: ' + projects.contextFiles.join(', ') + '.' }) : null,
     ...(projectBlocks.length ? projectBlocks : [h('p', { class: 'note', text: 'No projects in projects/projects.json.' })])));
+
+  // No failure may be invisible: a failed item whose key matched no row above (a worker
+  // list, or a per-server key with no mcp.json row) is listed here with its status and
+  // report (specs/provision-item-by-item.md).
+  const unshown = prov ? prov.items.filter((i) => (i.status === 'rejected' || i.status === 'no-origin') && !claimed.has(i.item)) : [];
+  if (unshown.length) sheet.append(part('Failed items not shown above', String(unshown.length),
+    h('ul', { class: 'entries' }, unshown.map((i) => {
+      const p = provAside(i.item, '');
+      const li = entry(null, i.item, 'No row above', p.aside, p.alert);
+      if (p.report) li.append(h('details', { class: 'report' }, h('summary', { text: 'report' }), h('pre', { text: p.report })));
+      return li;
+    }))));
 
   const ups = updateRows();
   const ready = ups.filter((u) => updateStatus(u).ready).length;

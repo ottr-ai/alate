@@ -294,6 +294,8 @@ body.no-source .desk { grid-template-columns: minmax(0, 1fr); }
 .entries .aside { font: 400 0.75rem var(--mono); color: var(--ink-2); text-align: right; white-space: nowrap; }
 .entries .aside.alert, .alert { color: var(--red); }
 .entries > li details.report { grid-column: 1 / -1; }
+/* Per-server MCP rows nested under their mcp.json row. */
+.entries > li > ul.entries.sub { grid-column: 1 / -1; margin: 0.3rem 0 0.1rem 0.9rem; }
 .entries > li details.report summary, .sheet-head details.report summary { font: 400 0.75rem var(--mono); color: var(--ink-2); cursor: pointer; }
 .entries > li details.report pre, .sheet-head details.report pre {
   font: 400 0.75rem/1.5 var(--mono);

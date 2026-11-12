@@ -5476,6 +5476,156 @@ try {
     }
   }
 
+  // 80. Failed per-server MCP keys show on the mcp.json row, and every failed key that
+  // matches no row lands in a fallback list (specs/provision-item-by-item.md "Server and
+  // UI", ui-ux-check rule 34: a failed item must never be invisible). app.js is browser
+  // code, so the test boots it headlessly over a tiny DOM stub and a stubbed fetch, then
+  // reads the rendered overview sheet.
+  {
+    const ids80 = new Map();
+    const globals80 = ['document', 'window', 'Node', 'matchMedia', 'location', 'setInterval', 'fetch'];
+    const saved80 = Object.fromEntries(globals80.map((g) => [g, Object.getOwnPropertyDescriptor(globalThis, g)]));
+    class StubNode80 {}
+    class StubText80 extends StubNode80 {
+      constructor(text) { super(); this.text = text; }
+      get textContent() { return this.text; }
+    }
+    class StubEl80 extends StubNode80 {
+      constructor(tag) {
+        super();
+        this.tag = tag;
+        this.children = [];
+        this.attrs = {};
+        this.dataset = {};
+        this.style = { setProperty() {} };
+        this.hidden = false;
+        this.scrollTop = 0;
+        this._text = null;
+      }
+      get textContent() { return this._text != null ? this._text : this.children.map((c) => c.textContent).join(''); }
+      set textContent(v) { this._text = String(v); this.children.length = 0; }
+      get className() { return this.attrs.class || ''; }
+      set className(v) { this.attrs.class = v; }
+      get classList() { return { toggle() {}, remove() {}, add() {} }; }
+      get firstChild() { return this.children[0]; }
+      get open() { return this.attrs.open !== undefined; }
+      set open(v) { if (v) this.attrs.open = ''; else delete this.attrs.open; }
+      get title() { return this.attrs.title || ''; }
+      set title(v) { this.attrs.title = v; }
+      setAttribute(k, v) { this.attrs[k] = v; }
+      removeAttribute(k) { delete this.attrs[k]; }
+      append(...kids) { for (const k of kids) if (k != null && k !== false) this.children.push(k); }
+      addEventListener() {}
+      querySelector() { return new StubEl80('a'); }
+      querySelectorAll() { return []; }
+      focus() {}
+    }
+    const document80 = {
+      documentElement: new StubEl80('html'),
+      body: new StubEl80('body'),
+      createElement: (tag) => new StubEl80(tag),
+      createTextNode: (t) => new StubText80(String(t)),
+      getElementById: (id) => {
+        if (!ids80.has(id)) ids80.set(id, new StubEl80('div'));
+        return ids80.get(id);
+      },
+    };
+    const sha80 = 'c'.repeat(64);
+    const state80 = {
+      source: { kind: 'repo', name: 'demo/data', ref: 'main', importedSha: sha80, importedAt: new Date().toISOString() },
+      inventory: {
+        rules: [{ name: 'a.md', description: 'A test rule.' }],
+        user: {
+          configFiles: [{ path: 'omp/agent/mcp.json', bytes: 421 }, { path: 'omp/agent/config.yml', bytes: 88 }],
+          others: [],
+          skills: [{ path: 'user/omp/agent/skills/demo/SKILL.md', name: 'demo', description: 'A test skill.', origin: 'https://github.com/example/demo' }],
+          extensions: [],
+          plugins: [],
+        },
+        projects: { contextFiles: [], named: [] },
+        warnings: [],
+      },
+      provision: {
+        at: new Date().toISOString(),
+        sha: sha80,
+        ok: false,
+        items: [
+          { item: 'a.md', status: 'installed', rule: null, at: null },
+          { item: 'user/omp/agent/config.yml', status: 'unchanged', rule: null, at: null },
+          { item: 'user/omp/agent/mcp.json', status: 'unchanged', rule: null, at: null },
+          { item: 'user/omp/agent/mcp.json "mcp-server"', status: 'rejected', rule: 'MCP-SECRET', at: 'mcp.json:7', report: 'env block carries GITHUB_TOKEN' },
+          { item: 'user/omp/agent/mcp.json "safe-server"', status: 'installed', rule: null, at: null },
+          { item: 'user/omp/agent/skills/demo', status: 'installed', rule: null, at: null },
+          { item: 'workers/ottr/apt.txt', status: 'no-origin', rule: null, at: null },
+        ],
+      },
+      updates: { updates: [], checkedAt: new Date().toISOString() },
+      changes: null,
+    };
+    const files80 = [
+      { path: 'a.md', bytes: 120 },
+      { path: 'user/omp/agent/mcp.json', bytes: 421 },
+      { path: 'user/omp/agent/config.yml', bytes: 88 },
+      { path: 'user/omp/agent/skills/demo/SKILL.md', bytes: 300 },
+    ];
+    try {
+      Object.assign(globalThis, {
+        document: document80,
+        window: { addEventListener() {} },
+        Node: StubNode80,
+        matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+        location: { hash: '#/' },
+        setInterval: () => 0,
+      });
+      globalThis.fetch = async (url) => {
+        const u = String(url);
+        const body = u.includes('/api/state') ? state80 : u.includes('/api/files') ? { files: files80 } : null;
+        return { ok: true, status: 200, json: async () => body };
+      };
+      await import('./web/app.js?alat130');
+      const galley80 = document80.getElementById('galley');
+      let ready80 = false;
+      for (let i = 0; i < 200 && !ready80; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        ready80 = galley80.children.length > 0;
+      }
+      assert.ok(ready80, 'the stubbed dashboard rendered the overview');
+
+      const flat80 = (el, out = []) => { out.push(el); for (const c of el.children || []) flat80(c, out); return out; };
+      const nodes80 = flat80(galley80.children[0]);
+      const part80 = (label) => nodes80.find((e) => e.attrs && e.attrs['aria-label'] === label);
+      // The meta line still counts both failures.
+      const meta80 = nodes80.find((e) => e.attrs && e.attrs.class === 'meta');
+      assert.ok(meta80 && meta80.textContent.includes(', 2 failed'), 'the meta line counts the two failed items');
+      // Exact-key rows keep working: the rule row shows its own item status.
+      assert.ok(flat80(part80('Rules')).some((e) => e.attrs && e.attrs.class === 'aside' && e.textContent === '120 B · installed'), 'the rule row still shows its exact-key status');
+      // The mcp.json row owns the per-server items: name, status, and report per server.
+      const user80 = part80('User layer');
+      assert.ok(user80, 'the User layer part rendered');
+      const mcpRow80 = flat80(user80).find((e) => e.tag === 'li' && e.children.length && e.children[0].textContent === 'omp/agent/mcp.json');
+      assert.ok(mcpRow80, 'the mcp.json config row rendered');
+      const inRow80 = flat80(mcpRow80);
+      assert.ok(inRow80.some((e) => e.textContent === '"mcp-server"'), 'the failed MCP server is named on the mcp.json row');
+      assert.ok(inRow80.some((e) => e.attrs && e.attrs.class === 'aside alert' && e.textContent === 'rejected: MCP-SECRET at mcp.json:7'), 'the failed server carries an alert aside with rule and position');
+      const report80 = inRow80.find((e) => e.tag === 'details' && e.attrs.class === 'report');
+      assert.ok(report80 && flat80(report80).some((e) => e.tag === 'pre' && e.textContent === 'env block carries GITHUB_TOKEN'), 'the failed server report shows in the row details block');
+      assert.ok(inRow80.some((e) => e.textContent === '"safe-server"') && inRow80.some((e) => e.attrs && e.attrs.class === 'aside' && e.textContent === 'installed'), 'the passing server shows its installed status without alert styling');
+      // Failed keys that match no row are listed with their status, and only those.
+      const rest80 = part80('Failed items not shown above');
+      assert.ok(rest80, 'the fallback part lists failed keys with no row');
+      const restText80 = rest80.textContent;
+      assert.ok(restText80.includes('workers/ottr/apt.txt') && restText80.includes('no origin'), 'the unmatched worker-list item shows with its status');
+      for (const claimed of ['a.md', 'user/omp/agent/skills/demo', 'user/omp/agent/mcp.json "mcp-server"', '"safe-server"']) {
+        assert.ok(!restText80.includes(claimed), `claimed key not repeated in the fallback list: ${claimed}`);
+      }
+    } finally {
+      for (const [g, d] of Object.entries(saved80)) {
+        if (d) Object.defineProperty(globalThis, g, d);
+        else delete globalThis[g];
+      }
+    }
+  }
+
   // Teardown escalation: a server that ignores SIGTERM (what a mutant can become) must still
   // die, and no process may be left behind. Windows cannot ignore SIGTERM, so the check is
   // POSIX-only.
