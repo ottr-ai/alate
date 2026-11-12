@@ -79,13 +79,17 @@ a captured copy sits at `user/agents/skills/<name>` with no recorded origin, so 
 provision rejects it — and a rejected copy also suppressed the shipped install, so the
 round trip deleted the shipped files from the home (ALAT-124).
 
-- For each `.agents/skills` child named like a vendored skill, the capture leaves the name
+- For each child of a skill root item (`.agents/skills`, `.omp/agent/skills`,
+  `.omp/agent/managed-skills`) named like a vendored skill, the capture leaves the name
   out only when its file list and bytes equal the vendored copy, judged with the same
   SKIP_DIRS rule as the capture walk. A byte change, an extra file, or a missing file
   counts as an edit, and the edited skill captures: a machine edit is state the data repo
   must hold.
+- The bridge shape `.omp/agent/skills -> .agents/skills` (a link between two allowlisted
+  roots) reaches the shipped bytes through the link, so the filter runs for that item too:
+  no shipped skill lands as `user/omp/agent/skills/<name>`.
 - Each left-out name logs
-  `note: user/agents/skills/<name>: the bytes equal the vendored shipped copy; left out of the capture`.
+  `note: user/<root>/<name>: the bytes equal the vendored shipped copy; left out of the capture`.
 - The vendored set is computed lazily: a home without `.agents/skills` never reads the
   vendored tree. A tree that cannot be read refuses the capture (fail closed, like
   install step 5), because without the shipped set the capture would copy every child
@@ -147,12 +151,14 @@ Each vendored skill folder gets a row beside the lock-driven skill rows, built a
    switches nothing — `.alate/current` stays on the previous layer and no new layer folder
    appears.
 9. The capture round trip: install-user into a fresh home, sync-user capture, install-user
-   again — the capture adds no `user/agents/skills/<name>` for any vendored name and logs
-   the note per left-out name; the second install reports 0 deleted and no skip lines, and
-   every shipped `SKILL.md` keeps the vendored bytes. An edited shipped skill (a byte
-   change, an extra file, or a missing file) captures, and a rejected stale copy in the
-   data repo (no origin) fails only its own item without deleting or skipping the shipped
-   copy.
+   again from the captured data repo, with and without an `upstreams.json` — the capture
+   adds no `user/agents/skills/<name>` for any vendored name and logs the note per
+   left-out name; both installs report 0 deleted and no skip lines, and every shipped
+   `SKILL.md` keeps the vendored bytes. The bridge shape
+   `.omp/agent/skills -> .agents/skills` captures no `user/omp/agent/skills/<name>` for a
+   vendored name either. An edited shipped skill (a byte change, an extra file, or a
+   missing file) captures, and a rejected stale copy in the data repo (no origin) fails
+   only its own item without deleting or skipping the shipped copy.
 
 ## Non-goals
 

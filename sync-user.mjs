@@ -249,6 +249,14 @@ const vendoredFiles = dir => {
   return out;
 };
 
+// Skill roots among the capture items: install-user writes the shipped skills to
+// .agents/skills, and a home may bridge .omp/agent/skills -> .agents/skills (a supported
+// shape), so the vendored bytes can sit under either root; managed-skills is the same
+// class of home content. Every skill root gets the shipped-equality filter, or the bridge
+// would capture each shipped skill as user/omp/agent/skills/<name> — no recorded origin,
+// so the next provision rejects it and can delete it from the home.
+const SKILL_ITEMS = new Set([SHIPPED_SKILLS_DIR, '.omp/agent/skills', '.omp/agent/managed-skills']);
+
 const problems = [];
 const plan = [];
 const summary = [];
@@ -270,7 +278,7 @@ for (const item of ITEMS) {
     const st = statSync(src);
     if (!st.isDirectory() && !st.isFile()) throw new Error(`~/${item}: is not a regular file`);
     let found = st.isDirectory() ? captureDir(src, item, root) : [[item, readFileSync(src), `${st.dev}:${st.ino}`]];
-    if (item === SHIPPED_SKILLS_DIR && st.isDirectory()) {
+    if (SKILL_ITEMS.has(item) && st.isDirectory()) {
       const shipped = vendoredShipped();
       if (shippedProblem) problems.push(shippedProblem);
       if (shipped) {
@@ -278,7 +286,7 @@ for (const item of ITEMS) {
         // set and top-level files keep their entries untouched.
         const groups = new Map();
         const kept = [];
-        const prefix = `${SHIPPED_SKILLS_DIR}/`;
+        const prefix = `${item}/`;
         for (const entry of found) {
           const rest = entry[0].startsWith(prefix) ? entry[0].slice(prefix.length) : null;
           const slash = rest === null ? -1 : rest.indexOf('/');
@@ -299,7 +307,7 @@ for (const item of ITEMS) {
         }
         skipped.sort();
         for (const name of skipped)
-          console.log(`note: user/agents/skills/${name}: the bytes equal the vendored shipped copy; left out of the capture`);
+          console.log(`note: user/${item.replace(/^\./, '')}/${name}: the bytes equal the vendored shipped copy; left out of the capture`);
         found = kept;
       }
     }

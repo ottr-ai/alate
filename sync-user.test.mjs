@@ -764,6 +764,9 @@ try {
   writeFileSync(join(rtHome, '.omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
   mkdirSync(join(rtHome, '.agents/skills/custom'), { recursive: true });
   writeFileSync(join(rtHome, '.agents/skills/custom/SKILL.md'), skillText('custom'));
+  // The lock entry gives the captured custom skill an origin of its own, so the install
+  // from the captured repo accepts it (a captured skill without one fails as no origin).
+  writeFileSync(join(rtHome, '.agents/.skill-lock.json'), JSON.stringify({ skills: { custom: { source: 'https://example.com/custom' } } }));
   mkdirSync(join(rtData0, 'user/omp/agent'), { recursive: true });
   writeFileSync(join(rtData0, 'user/omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
 
@@ -782,17 +785,36 @@ try {
   }
   assert.ok(existsSync(join(rtData1, 'user/agents/skills/custom/SKILL.md')), 'a non-shipped skill still captures');
 
-  // Step 3: install again. Nothing deleted, nothing skipped: the shipped skills survive
-  // the round trip byte for byte.
-  rt = rtInstall(rtHome, rtData0);
-  assert.equal(rt.status, 0, `second install must succeed: ${rt.stderr}`);
+  // Step 3: install again FROM THE CAPTURED DATA REPO (the reviewer's round trip). The
+  // capture left the shipped names out, so the snapshot holds only config.yml, the skill
+  // lock, and custom: nothing skips or deletes a shipped skill, and the vendored bytes
+  // survive. Fails while capture copies the shipped skills back: the snapshot then holds
+  // each name, the install skips the shipped copy and serves the captured bytes instead.
+  rt = rtInstall(rtHome, rtData1);
+  assert.equal(rt.status, 0, `second install from the captured repo must succeed: ${rt.stderr}`);
   assert.ok(!rt.stdout.includes('the data repo has its own copy'), `a shipped copy must not be skipped: ${rt.stdout}`);
-  const rtSecond = rtCounts(rt.stdout);
-  assert.equal(rtSecond.deleted, 0, `the round trip must not delete shipped skills: ${rt.stdout}`);
-  assert.equal(rtSecond.installed, 0, `the round trip must not reinstall anything: ${rt.stdout}`);
+  assert.ok(!rt.stdout.includes('no origin'), `the captured repo must fail no item: ${rt.stdout}`);
+  assert.equal(rtCounts(rt.stdout).deleted, 0, `the round trip must not delete shipped skills: ${rt.stdout}`);
   for (const name of shippedNames)
     assert.ok(readFileSync(join(rtHome, '.agents/skills', name, 'SKILL.md')).equals(readFileSync(join(rtShippedRoot, name, 'SKILL.md'))),
       `second install must keep the vendored bytes of ${name}`);
+  assert.ok(existsSync(join(rtHome, '.agents/skills/custom/SKILL.md')), 'the covered custom skill installs');
+
+  // Step 3b: the captured repo with upstreams.json present — the reviewer's destructive
+  // variant. The capture fix means the repo holds no shipped copies, so the gate rejects
+  // nothing: no deletion, no skip. Fails while capture copies the shipped skills back:
+  // each copied skill then fails as no origin, its home files are deleted, and the skip
+  // lines suppress the shipped install.
+  const rtData1b = join(tmp, 'data-shipped-rt-cap-up');
+  cpSync(rtData1, rtData1b, { recursive: true });
+  writeFileSync(join(rtData1b, 'upstreams.json'), '{"items":[]}\n');
+  rt = rtInstall(rtHome, rtData1b);
+  assert.equal(rt.status, 0, `the captured repo holds no shipped copies, so upstreams must reject nothing: ${rt.stdout}`);
+  assert.ok(!rt.stdout.includes('the data repo has its own copy'), `a shipped copy must not be skipped: ${rt.stdout}`);
+  assert.equal(rtCounts(rt.stdout).deleted, 0, `the round trip with upstreams must not delete shipped skills: ${rt.stdout}`);
+  for (const name of shippedNames)
+    assert.ok(readFileSync(join(rtHome, '.agents/skills', name, 'SKILL.md')).equals(readFileSync(join(rtShippedRoot, name, 'SKILL.md'))),
+      `the upstreams round trip must keep the vendored bytes of ${name}`);
 
   // Step 4: a data repo that already holds a captured shipped copy (a capture from before
   // the fix, or an edited capture) with upstreams.json present: the copy has no origin, so
@@ -808,7 +830,11 @@ try {
   assert.equal(rt.status, 1, `the stale copy must fail its origin gate: ${rt.stdout}`);
   assert.ok(rt.stdout.includes(`user/agents/skills/${shippedNames[0]} — no origin`), rt.stdout);
   assert.ok(!rt.stdout.includes('the data repo has its own copy'), `a rejected copy must not suppress the shipped skill: ${rt.stdout}`);
-  assert.equal(rtCounts(rt.stdout).deleted, 0, `a rejected stale copy must not delete the shipped files: ${rt.stdout}`);
+  // The snapshot rtData2 holds (deliberately) neither the lock nor custom, so those drop
+  // from the record and their files may delete; a shipped file must never appear among
+  // the deletions — the rejected stale copy must not strip the shipped walk's entries.
+  for (const name of shippedNames)
+    assert.ok(!rt.stdout.includes(`deleted  .agents/skills/${name}/`), `a rejected stale copy must not delete the shipped files of ${name}: ${rt.stdout}`);
   assert.ok(readFileSync(join(rtHome, '.agents/skills', shippedNames[0], 'SKILL.md')).equals(readFileSync(join(rtShippedRoot, shippedNames[0], 'SKILL.md'))),
     'the shipped bytes stay installed');
 
@@ -836,6 +862,29 @@ try {
   }
   for (const name of [rtA, rtB, rtC])
     assert.ok(!rt.stdout.includes(`note: user/agents/skills/${name}:`), `the edited skill ${name} gets no skip note: ${rt.stdout}`);
+
+  // Step 6: the bridge shape .omp/agent/skills -> .agents/skills (architecture.test
+  // allows exactly this link between two allowlisted roots). The capture walk reaches the
+  // shipped bytes through the link, so the shipped-equality filter must run for the
+  // .omp/agent/skills item too, or the capture writes each shipped skill as
+  // user/omp/agent/skills/<name> — no recorded origin, so the next provision rejects it
+  // (and can delete it) while suppressing the shipped install.
+  const rtHome3 = join(tmp, 'home-shipped-rt-bridge');
+  rt = rtInstall(rtHome3, rtData0);
+  assert.equal(rt.status, 0, `bridge-variant install must provision: ${rt.stderr}`);
+  mkdirSync(join(rtHome3, '.agents/skills/custom'), { recursive: true });
+  writeFileSync(join(rtHome3, '.agents/skills/custom/SKILL.md'), skillText('custom'));
+  symlinkSync(join(rtHome3, '.agents/skills'), join(rtHome3, '.omp/agent/skills'));
+  const rtData4 = join(tmp, 'data-shipped-rt-bridge-cap');
+  mkdirSync(rtData4);
+  rt = rtCapture(rtHome3, rtData4);
+  assert.equal(rt.status, 0, `bridge capture must succeed: ${rt.stderr}`);
+  for (const name of shippedNames) {
+    assert.ok(!existsSync(join(rtData4, 'user/agents/skills', name)), `bridge capture must leave ${name} out of user/agents/skills`);
+    assert.ok(!existsSync(join(rtData4, 'user/omp/agent/skills', name)), `bridge capture must leave ${name} out of user/omp/agent/skills`);
+    assert.ok(rt.stdout.includes(`note: user/omp/agent/skills/${name}: the bytes equal the vendored shipped copy`), `no bridge skip note for ${name}: ${rt.stdout}`);
+  }
+  assert.ok(existsSync(join(rtData4, 'user/omp/agent/skills/custom/SKILL.md')), 'the bridged custom skill still captures');
 
   // Property checks (fuzz tier via forAll in lib/data.mjs). Gate: 200 runs, fixed seed
   // 42; PROP_RUNS=<n> re-seeds randomly for the review deep tier.
