@@ -5,11 +5,11 @@
 // need to know about this repo; the snapshots here are refreshed copies, never hand-edited.
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
-import { parseArgs, resolveDataDir, checkDestination, assertSourceInside, safeRel, normText } from './lib/data.mjs';
+import { parseArgs, resolveDataDir, checkDestination, assertSourceInside, safeRel, fingerprint, readBaselines, writeBaselines } from './lib/data.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
 /** @typedef {{ contextFiles: string[], projects: Record<string, string[]> }} ProjectsManifest */
-/** @typedef {{ from: string, to: string, bytes: Buffer, old: Buffer | null }} CopyPlan */
+/** @typedef {{ key: string, from: string, to: string, bytes: Buffer, old: Buffer | null }} CopyPlan */
 
 const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--root', '--data', '--repo']));
 const data = resolveDataDir(args, { allowClone: false });
@@ -83,7 +83,7 @@ for (const [name, extras] of validated) {
     assertSourceInside(src, from); // throws if the source file escapes its project
     const to = join(data.dir, 'projects', name, rel);
     checkDestination(data.dir, to);
-    plan.push({ from, to, bytes: readFileSync(from), old: existsSync(to) ? readFileSync(to) : null });
+    plan.push({ key: `${name}/${rel}`, from, to, bytes: readFileSync(from), old: existsSync(to) ? readFileSync(to) : null });
   }
   for (const rel of have) {
     if (!existsSync(join(src, rel))) notes.push(`${rel} is gone in ${name}; delete projects/${name}/${rel} by hand if stale`);
@@ -94,15 +94,77 @@ if (problems.length) {
   process.exit(1);
 }
 
+// Capture baselines (specs/capture-baseline.md): per captured file, a fingerprint of the
+// snapshot bytes this machine last wrote or adopted. The record tells a machine edit
+// (capture) from a snapshot that changed elsewhere (refresh the machine copy); when both
+// moved, the file is a conflict and the run writes nothing — it never picks a side silently.
+const statePath = join(root, '.alate', 'captured-projects.json');
+let baselines;
+let stateUsable = true;
+try {
+  baselines = readBaselines(statePath);
+} catch (err) {
+  baselines = null;
+  stateUsable = false;
+  console.log(`note: ${statePath} is not a valid capture baseline (${/** @type {Error} */ (err).message}); every file counts as having no baseline`);
+}
+const actions = [];
+const conflicts = [];
+/** @type {Record<string, string>} */
+const updates = {};
+const noBase = [];
+let added = 0, updated = 0, unchanged = 0, refreshed = 0;
+for (const entry of plan) {
+  const { key, from, to, bytes, old } = entry;
+  const fpMachine = fingerprint(key, bytes);
+  const fpSnap = old ? fingerprint(key, old) : null;
+  const base = baselines ? baselines[key] ?? null : null;
+  if (old && fpMachine === fpSnap) { // unchanged: seed the baseline so the next run can judge
+    unchanged++;
+    if (stateUsable && base !== fpMachine) updates[key] = fpMachine;
+    continue;
+  }
+  if (old && base !== null && base !== fpMachine && base !== fpSnap) {
+    conflicts.push({ key, from });
+    continue;
+  }
+  if (base === null) noBase.push(key);
+  if (old && fpMachine === base) { // the snapshot moved elsewhere, the machine still holds the captured state
+    refreshed++;
+    actions.push({ key, from, snap: old });
+    if (stateUsable) updates[key] = fingerprint(key, old);
+    continue;
+  }
+  // capture: a machine edit, a first run, or a snapshot file missing in the data repo
+  actions.push({ key, to, bytes, old });
+  if (stateUsable) updates[key] = fpMachine;
+}
+if (conflicts.length) {
+  console.error('Nothing synced. Resolve by hand, then rerun:');
+  for (const { key, from } of conflicts)
+    console.error(`conflict: the snapshot ${join(data.dir, 'projects', key)} and the machine file ${from} both changed since the last capture; resolve by hand`);
+  process.exit(1);
+}
 // ponytail: preflight is not a transaction — one snapshot copy may land before a later
 // write fails; rerun after fixing the cause. Upgrade to staging+rename if atomicity matters.
-let added = 0, updated = 0, unchanged = 0;
-for (const { to, bytes, old } of plan) {
-  if (old && (old.equals(bytes) || normText(old) === normText(bytes))) { unchanged++; continue; }
-  mkdirSync(dirname(to), { recursive: true });
-  writeFileSync(to, bytes);
-  if (old) { updated++; console.log(`updated  ${relative(data.dir, to)}`); }
-  else { added++; console.log(`added    ${relative(data.dir, to)}`); }
+for (const a of actions) {
+  if (a.snap) { // refresh: the committed snapshot is the newer truth, so the machine takes it
+    writeFileSync(a.from, a.snap);
+    console.log(`refreshed projects/${a.key} into ${a.from} (the snapshot changed elsewhere; the machine copy was unchanged)`);
+    continue;
+  }
+  mkdirSync(dirname(a.to), { recursive: true });
+  writeFileSync(a.to, a.bytes);
+  if (a.old) { updated++; console.log(`updated  ${relative(data.dir, a.to)}`); }
+  else { added++; console.log(`added    ${relative(data.dir, a.to)}`); }
 }
+for (const key of noBase) console.log(`note: projects/${key} has no capture baseline; captured the machine copy`);
 notes.forEach(n => console.log(`note: ${n}`));
-console.log(`${added} added, ${updated} updated, ${unchanged} unchanged from ${root}`);
+console.log(`${added} added, ${updated} updated, ${unchanged} unchanged${refreshed ? `, ${refreshed} refreshed` : ''} from ${root}`);
+if (stateUsable && Object.keys(updates).length) {
+  try {
+    writeBaselines(statePath, { ...baselines, ...updates });
+  } catch (err) {
+    console.log(`note: ${statePath}: could not write the capture baseline (${/** @type {Error} */ (err).message}); the next capture runs without one`);
+  }
+}

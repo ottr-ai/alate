@@ -8,7 +8,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertSourceInside, CAPTURE_ROOTS, checkDestination, normText, parseArgs, resolveDataDir, toStoredForm, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
+import { assertSourceInside, CAPTURE_ROOTS, checkDestination, fingerprint, parseArgs, readBaselines, resolveDataDir, toStoredForm, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeBaselines, yamlProblems } from './lib/data.mjs';
 import { SHIPPED_SKILLS_DIR, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
@@ -407,6 +407,22 @@ if (!present) {
   process.exit(0);
 }
 
+// Capture baselines (specs/capture-baseline.md): per captured file, a fingerprint of the
+// snapshot bytes this machine last wrote. The record tells a machine edit (capture) from a
+// snapshot that changed elsewhere (keep the committed snapshot; the next provision brings
+// it to the machine — the capture never writes the home). When both moved, the file is a
+// conflict and the run writes nothing: it never picks a side silently.
+const statePath = join(home, '.alate', 'captured-user.json');
+let baselines;
+let stateUsable = true;
+try {
+  baselines = readBaselines(statePath);
+} catch (err) {
+  baselines = null;
+  stateUsable = false;
+  console.log(`note: ${statePath} is not a valid capture baseline (${/** @type {Error} */ (err).message}); every file counts as having no baseline`);
+}
+
 // Repos use autocrlf: the comparison shares the CRLF normalize rule with the fingerprints.
 try {
   // Stale names are collected and the output tree validated BEFORE any write, so a
@@ -418,22 +434,59 @@ try {
   // before the first write, so a bad destination refuses the whole capture untouched.
   /** @type {[string, string, Buffer, Buffer | null][]} */
   const staged = [];
-  let added = 0, updated = 0, unchanged = 0;
+  const conflicts = [];
+  /** @type {Record<string, string>} */
+  const updates = {};
+  const keptNotes = [];
+  let added = 0, updated = 0, unchanged = 0, kept = 0, noBase = 0;
   for (const [rel, bytes] of plan) {
     const to = join(data.dir, 'user', rel);
     checkDestination(data.dir, to);
     const old = existsSync(to) ? readFileSync(to) : null;
-    if (old && (old.equals(bytes) || normText(old) === normText(bytes))) { unchanged++; continue; }
+    const fpMachine = fingerprint(rel, bytes);
+    const fpSnap = old ? fingerprint(rel, old) : null;
+    const base = baselines ? baselines[rel] ?? null : null;
+    if (old && fpMachine === fpSnap) { // unchanged: seed the baseline so the next run can judge
+      unchanged++;
+      if (stateUsable && base !== fpMachine) updates[rel] = fpMachine;
+      continue;
+    }
+    if (old && base !== null && base !== fpMachine && base !== fpSnap) {
+      conflicts.push({ rel, to });
+      continue;
+    }
+    if (old && fpMachine === base) { // the committed snapshot moved; the machine still holds the captured state
+      kept++;
+      keptNotes.push(`note: user/${rel}: the committed snapshot changed elsewhere and this machine still holds the captured state; kept the snapshot (provision the machine to get it)`);
+      continue;
+    }
+    // capture: a machine edit, a first run, or a snapshot file missing in the data repo
     staged.push([rel, to, bytes, old]);
+    if (stateUsable) updates[rel] = fpMachine;
+    if (base === null) noBase++;
   }
+  if (conflicts.length) {
+    for (const { rel, to } of conflicts)
+      console.error(`conflict: the snapshot ${to} and the machine file ${join(home, `.${rel}`)} both changed since the last capture; resolve by hand`);
+    process.exit(1);
+  }
+  for (const note of keptNotes) console.log(note);
   for (const [rel, to, bytes, old] of staged) {
     mkdirSync(dirname(to), { recursive: true });
     writeFileSync(to, bytes);
     if (old) { updated++; console.log(`updated  user/${rel}`); }
     else { added++; console.log(`added    user/${rel}`); }
   }
+  if (noBase) console.log(`note: ${noBase} captured files had no baseline and were captured as today`);
   for (const rel of stale) console.log(`note: user/${rel} is gone from this machine; delete it by hand if stale`);
-  console.log(`${added} added, ${updated} updated, ${unchanged} unchanged from ${home}`);
+  console.log(`${added} added, ${updated} updated, ${unchanged} unchanged${kept ? `, ${kept} kept` : ''} from ${home}`);
+  if (stateUsable && Object.keys(updates).length) {
+    try {
+      writeBaselines(statePath, { ...baselines, ...updates });
+    } catch (err) {
+      console.log(`note: ${statePath}: could not write the capture baseline (${/** @type {Error} */ (err).message}); the next capture runs without one`);
+    }
+  }
 } catch (err) {
   console.error(/** @type {Error} */ (err).message);
   process.exit(1);

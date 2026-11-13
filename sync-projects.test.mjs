@@ -5,7 +5,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { forAll, keepTemp, safeRel } from './lib/data.mjs';
+import { fingerprint, forAll, keepTemp, safeRel } from './lib/data.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-projects-'));
 const repo = join(tmp, 'repo');
@@ -92,6 +92,82 @@ try {
   r = run();
   assert.equal(r.status, 0, r.stderr);
   assert.equal(snap('beta', 'scripts/tool.mjs'), '// helper v2\n', 're-listing an extra resumes refreshing it');
+
+  // --- capture baseline (ALAT-154): the capture never overwrites a newer committed snapshot ---
+  // The state file records, per machine and per file, the snapshot bytes the last capture
+  // wrote or adopted; a one-sided snapshot change refreshes the machine copy, a two-sided
+  // change is a conflict that writes nothing.
+  {
+    const data3 = join(tmp, 'data3');
+    const ws3 = join(tmp, 'ws3');
+    mkdirSync(join(data3, 'projects'), { recursive: true });
+    mkdirSync(join(ws3, 'delta'), { recursive: true });
+    writeFileSync(join(data3, 'projects/projects.json'), JSON.stringify({ contextFiles: ['AGENTS.md'], projects: { delta: [] } }, null, 2) + '\n');
+    const run3 = () => spawnSync(process.execPath, [join(repo, 'sync-projects.mjs'), '--root', ws3, '--data', data3], { encoding: 'utf8' });
+    const state3 = join(ws3, '.alate', 'captured-projects.json');
+    const machine3 = join(ws3, 'delta', 'AGENTS.md');
+    const snap3 = join(data3, 'projects', 'delta', 'AGENTS.md');
+    const base3 = text => fingerprint('delta/AGENTS.md', Buffer.from(text));
+    const state = () => JSON.parse(readFileSync(state3, 'utf8'));
+
+    writeFileSync(machine3, '# delta v1\n');
+    let r3 = run3();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /1 added, 0 updated, 0 unchanged/);
+    assert.match(r3.stdout, /projects\/delta\/AGENTS\.md has no capture baseline; captured the machine copy/);
+    assert.equal(state()['delta/AGENTS.md'], base3('# delta v1\n'), 'the first capture records its baseline');
+
+    // (b) machine edit, snapshot unchanged -> capture as today.
+    writeFileSync(machine3, '# delta v2\n');
+    r3 = run3();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /updated\s+projects.delta.AGENTS\.md/);
+    assert.equal(readFileSync(snap3, 'utf8'), '# delta v2\n');
+    assert.equal(state()['delta/AGENTS.md'], base3('# delta v2\n'));
+
+    // (a) snapshot changed elsewhere, machine copy unchanged -> the machine copy takes the
+    // snapshot, and the data repo stays clean.
+    writeFileSync(snap3, '# delta v3 board\n');
+    r3 = run3();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /refreshed projects\/delta\/AGENTS\.md into .+ \(the snapshot changed elsewhere; the machine copy was unchanged\)/);
+    assert.equal(readFileSync(machine3, 'utf8'), '# delta v3 board\n', 'the machine copy took the committed snapshot');
+    assert.equal(readFileSync(snap3, 'utf8'), '# delta v3 board\n', 'the data repo stays clean');
+    assert.equal(state()['delta/AGENTS.md'], base3('# delta v3 board\n'), 'the baseline adopts the snapshot');
+    r3 = run3();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /0 added, 0 updated, 1 unchanged/);
+
+    // (c) both changed -> exit non-zero, and nothing is written anywhere.
+    writeFileSync(snap3, '# delta v4 board\n');
+    writeFileSync(machine3, '# delta v5 local\n');
+    r3 = run3();
+    assert.equal(r3.status, 1);
+    assert.match(r3.stderr, /conflict: the snapshot .+projects.delta.AGENTS\.md and the machine file .+delta.AGENTS\.md both changed since the last capture; resolve by hand/);
+    assert.equal(readFileSync(machine3, 'utf8'), '# delta v5 local\n', 'a conflict leaves the machine copy alone');
+    assert.equal(readFileSync(snap3, 'utf8'), '# delta v4 board\n', 'a conflict leaves the snapshot alone');
+    assert.equal(state()['delta/AGENTS.md'], base3('# delta v3 board\n'), 'a conflict leaves the baseline alone');
+
+    // (d) no record -> today's behavior, and the run says the file had no baseline.
+    rmSync(state3);
+    r3 = run3();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /projects\/delta\/AGENTS\.md has no capture baseline; captured the machine copy/);
+    assert.match(r3.stdout, /0 added, 1 updated, 0 unchanged/);
+    assert.equal(readFileSync(snap3, 'utf8'), '# delta v5 local\n');
+    assert.equal(state()['delta/AGENTS.md'], base3('# delta v5 local\n'));
+
+    // A corrupt baseline file is named, never silently discarded: the run proceeds without
+    // baselines and leaves the file as it is.
+    writeFileSync(state3, 'not json');
+    writeFileSync(machine3, '# delta v6 local\n');
+    r3 = run3();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /is not a valid capture baseline/);
+    assert.match(r3.stdout, /projects\/delta\/AGENTS\.md has no capture baseline/);
+    assert.equal(readFileSync(state3, 'utf8'), 'not json', 'a corrupt baseline file is left as-is');
+    assert.equal(readFileSync(snap3, 'utf8'), '# delta v6 local\n');
+  }
 
   // safeRel pins: separator normalization, and every refusal with its exact label prefix.
   assert.equal(safeRel('a\\b.txt', 'L'), 'a/b.txt', 'backslashes normalize to /');

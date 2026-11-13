@@ -6,7 +6,7 @@ import { chmodSync, copyFileSync, cpSync, existsSync, linkSync, mkdirSync, mkdte
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { forAll, keepTemp, withoutHostPaths, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
+import { fingerprint, forAll, keepTemp, withoutHostPaths, withoutMemoryBackend, yamlProblems } from './lib/data.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-user-'));
 const repo = join(tmp, 'repo');
@@ -1054,6 +1054,66 @@ try {
     }, text => {
       assert.equal(withoutHostPaths(text), text, `no host keys, no change: ${JSON.stringify(text)}`);
     });
+  }
+
+  // --- capture baseline (ALAT-154): the capture keeps a newer committed snapshot ---
+  // The state file records, per machine and per file, the snapshot bytes the last capture
+  // wrote; a one-sided snapshot change keeps the committed snapshot (the capture never
+  // writes the home; the next provision installs it), a two-sided change refuses.
+  {
+    const bHome = join(tmp, 'home-baseline');
+    const bData = join(tmp, 'data-baseline');
+    mkdirSync(join(bHome, '.omp/agent'), { recursive: true });
+    mkdirSync(bData);
+    const bRun = () => spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', bHome, '--data', bData], { encoding: 'utf8' });
+    const bSnap = join(bData, 'user/omp/agent/config.yml');
+    const bMachine = join(bHome, '.omp/agent/config.yml');
+    const bState = join(bHome, '.alate/captured-user.json');
+    const bBase = text => fingerprint('omp/agent/config.yml', Buffer.from(text));
+    writeFileSync(bMachine, 'modelRoles:\n  default: zai/glm\n');
+    let r3 = bRun();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /1 added, 0 updated, 0 unchanged/);
+    assert.match(r3.stdout, /1 captured files had no baseline and were captured as today/);
+    assert.equal(JSON.parse(readFileSync(bState, 'utf8'))['omp/agent/config.yml'], bBase('modelRoles:\n  default: zai/glm\n'), 'the first capture records its baseline');
+
+    // The snapshot moves (a commit from another machine) while the machine stays: the
+    // capture keeps the committed snapshot, writes nothing, and says so.
+    writeFileSync(bSnap, 'modelRoles:\n  default: board/glm\n');
+    r3 = bRun();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /note: user\/omp\/agent\/config\.yml: the committed snapshot changed elsewhere and this machine still holds the captured state; kept the snapshot \(provision the machine to get it\)/);
+    assert.equal(readFileSync(bSnap, 'utf8'), 'modelRoles:\n  default: board/glm\n', 'the committed snapshot stays');
+    assert.equal(readFileSync(bMachine, 'utf8'), 'modelRoles:\n  default: zai/glm\n', 'the capture never writes the home');
+    assert.match(r3.stdout, /0 added, 0 updated, 0 unchanged, 1 kept/);
+    assert.equal(JSON.parse(readFileSync(bState, 'utf8'))['omp/agent/config.yml'], bBase('modelRoles:\n  default: zai/glm\n'), 'kept leaves the baseline at the captured state');
+
+    // Machine and snapshot both moved: the capture refuses and writes nothing.
+    writeFileSync(bMachine, 'modelRoles:\n  default: local/glm\n');
+    writeFileSync(bSnap, 'modelRoles:\n  default: board2/glm\n');
+    r3 = bRun();
+    assert.equal(r3.status, 1);
+    assert.match(r3.stderr, /conflict: the snapshot .+user.omp.agent.config.yml and the machine file .+.omp.agent.config.yml both changed since the last capture; resolve by hand/);
+    assert.equal(readFileSync(bSnap, 'utf8'), 'modelRoles:\n  default: board2/glm\n', 'a conflict leaves the snapshot alone');
+    assert.equal(readFileSync(bMachine, 'utf8'), 'modelRoles:\n  default: local/glm\n', 'a conflict leaves the machine alone');
+    assert.equal(JSON.parse(readFileSync(bState, 'utf8'))['omp/agent/config.yml'], bBase('modelRoles:\n  default: zai/glm\n'), 'a conflict leaves the baseline alone');
+
+    // No baseline record: today's behavior, and the run says the file had no baseline.
+    rmSync(bState);
+    writeFileSync(bMachine, 'modelRoles:\n  default: local2/glm\n');
+    r3 = bRun();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /updated {2}user\/omp\/agent\/config\.yml/);
+    assert.match(r3.stdout, /1 captured files had no baseline and were captured as today/);
+    assert.equal(readFileSync(bSnap, 'utf8'), 'modelRoles:\n  default: local2/glm\n');
+
+    // A corrupt baseline file is named, never silently discarded.
+    writeFileSync(bState, 'not json');
+    writeFileSync(bMachine, 'modelRoles:\n  default: local3/glm\n');
+    r3 = bRun();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /is not a valid capture baseline/);
+    assert.equal(readFileSync(bState, 'utf8'), 'not json', 'a corrupt baseline file is left as-is');
   }
 
   console.log('sync-user.mjs ok');

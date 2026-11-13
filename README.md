@@ -28,6 +28,8 @@ alate provisions an [omp](https://github.com/can1357/oh-my-pi) agent on any mach
    git add . && git commit -m "capture" && git push
    ```
 
+   Capture keeps a baseline state file per machine, outside the data repo: `sync-projects.mjs` at `<workspace-root>/.alate/captured-projects.json`, `sync-user.mjs` at `<home>/.alate/captured-user.json`. When only the snapshot changed elsewhere, the capture refreshes the project copy, or keeps the user snapshot for the next provision. When a file changed on both sides, the run refuses with exit 1 and names both paths. The state files are machine-local. Do not commit them.
+
 3. Run the server:
 
    ```sh
@@ -130,6 +132,8 @@ The SkillSpector scan gate therefore applies to every provision. A provision nee
 | `sync-projects.mjs` | Refresh per-project snapshots into the repo. | `--root` |
 
 All install scripts take `--data <dir>` or `--repo <owner/name[@ref]>` (set `GH_TOKEN` for private repos). The repo form also accepts `<host>/owner/name[@ref]` for a GitHub Enterprise Cloud tenant (`acme.ghe.com`) or Enterprise Server host (`git.example.com`), or a full `https://` URL; `ALATE_GITHUB_HOST` is the ambient default host. The token rides only to the configured host: a repo spec on another host clones without it, and the update checker queries github.com without a token unless the configured host and the repo source host are both github.com and no repo import named another host. Capture scripts take `--data <dir>` only.
+
+Each capture script keeps a baseline state file outside the data repo: `sync-projects.mjs` at `<workspace-root>/.alate/captured-projects.json`, `sync-user.mjs` at `<home>/.alate/captured-user.json`. When only the committed snapshot changed, the capture refreshes the project copy from the snapshot, or keeps the user snapshot for the next provision. When a file changed on both sides, the run refuses with exit 1 before any write and names both paths on stderr. The state files are machine-local. Do not commit them. See `specs/capture-baseline.md`.
 
 Before any target write or SkillSpector call, `install-user.mjs` checks every source skill directory for a readable `SKILL.md`.
 Each file needs frontmatter at byte 0, a complete closing marker, a non-empty `name` and `description`, and no forbidden hidden characters.
