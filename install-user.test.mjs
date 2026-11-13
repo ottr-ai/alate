@@ -2595,10 +2595,15 @@ exit 0
     const tmpReal = realpathSync(tmp);
     const ldataR = join(tmpReal, 'data-layer-report');
     const putR = (rel, text) => { mkdirSync(dirname(join(ldataR, 'user', rel)), { recursive: true }); writeFileSync(join(ldataR, 'user', rel), text); };
+    const homeR = join(tmpReal, 'layer-report-home');
     putR('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
     putR('omp/agent/skills/rep/SKILL.md', skillText('rep'));
+    putR('omp/agent/marketplaces.json', `${JSON.stringify({ marketplaces: [
+      { name: 'm', catalogPath: `${homeR}/.omp/marketplaces/catalog.json` },
+    ] }, null, 2)}\n`);
+    mkdirSync(join(ldataR, 'workers', 'web'), { recursive: true });
+    writeFileSync(join(ldataR, 'workers', 'web', 'apt.txt'), 'libnss3\n');
     writeFileSync(join(ldataR, 'report-rule.md'), '---\ndescription: report rule\n---\n\nBody\n');
-    const homeR = join(tmpReal, 'layer-report-home');
     const runR = (extra, env) => run(['--data', ldataR, ...extra], homeR, env);
     const liveLayer = () => realpathSync(join(homeR, '.alate', 'current'));
     const resultsPathR = join(tmp, 'results-layer-report.json');
@@ -2620,7 +2625,11 @@ exit 0
     let byKeyR = Object.fromEntries(resR.items.map(i => [i.item, i.status]));
     assert.equal(byKeyR['user/omp/agent/config.yml'], 'unchanged');
     assert.equal(byKeyR['user/omp/agent/skills/rep'], 'unchanged');
+    assert.equal(byKeyR['user/omp/agent/marketplaces.json'], 'unchanged', 'a file with re-rooted home paths is unchanged: only the layer prefix differs');
+    assert.equal(byKeyR['workers/web/apt.txt'], 'unchanged');
     assert.equal(byKeyR['report-rule.md'], 'unchanged', 'the nested sync rule reports unchanged');
+    assert.equal(JSON.parse(readFileSync(join(liveLayer(), '.omp/agent/marketplaces.json'), 'utf8')).marketplaces[0].catalogPath,
+      join(liveLayer(), '.omp/marketplaces/catalog.json'), 'the unchanged file still re-roots into the new layer');
 
     // One changed rule reports exactly one updated item.
     writeFileSync(join(ldataR, 'report-rule.md'), '---\ndescription: report rule\n---\n\nBody v2\n');
@@ -2662,6 +2671,33 @@ exit 0
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /0 updated, 0 added, \d+ unchanged, 1 deleted in /, 'the dropped skill file counts as deleted');
     assert.ok(existsSync(join(liveBeforeR2, '.omp/agent/skills/more/SKILL.md')), 'the previous layer keeps the dropped file');
+
+    // A planted alias on a worker-list read in the live layer refuses the run: machine-side
+    // reads never follow a link or special file out of the layer.
+    const liveB3 = liveLayer();
+    const outsideB3 = join(tmpReal, 'outside-worker.txt');
+    writeFileSync(outsideB3, 'planted\n');
+    rmSync(join(liveB3, '.ottr/workers/web/apt.txt'));
+    symlinkSync(outsideB3, join(liveB3, '.ottr/workers/web/apt.txt'));
+    r = runR(['--skip-plugins', '--layer']);
+    assert.equal(r.status, 1, 'a planted worker-list alias refuses the run');
+    assert.match(r.stderr, /not a regular file/);
+    assert.equal(liveLayer(), liveB3, 'the refused run keeps the current layer');
+    rmSync(join(liveB3, '.ottr/workers/web/apt.txt'));
+    writeFileSync(join(liveB3, '.ottr/workers/web/apt.txt'), 'libnss3\n');
+
+    // A planted alias on the live rules dir refuses the run before the nested sync reads
+    // anything: the compare root must resolve inside the live layer.
+    const liveB4 = liveLayer();
+    const outsideB4 = join(tmpReal, 'outside-rules');
+    mkdirSync(outsideB4, { recursive: true });
+    writeFileSync(join(outsideB4, 'stolen.md'), 'planted\n');
+    rmSync(join(liveB4, '.omp/agent/rules'), { recursive: true, force: true });
+    symlinkSync(outsideB4, join(liveB4, '.omp/agent/rules'));
+    r = runR(['--skip-plugins', '--layer']);
+    assert.equal(r.status, 1, 'a planted rules-dir alias refuses the run');
+    assert.match(r.stderr, /is outside/);
+    assert.equal(liveLayer(), liveB4, 'the refused run keeps the current layer');
   }
 
   // The server image must carry the scanner the gate refuses to run without; the two pins

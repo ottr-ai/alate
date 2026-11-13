@@ -8,8 +8,9 @@
 //   targetDir default: $PI_CODING_AGENT_DIR/rules, else ~/.omp/agent/rules
 //   data dir: --data <dir>, else --repo (shallow clone), else $ALATE_DATA, else ../agent-data beside this checkout
 //   --compare <dir>: label every rule against this existing rules dir (the live layer's, in
-//     a layer install) instead of the fresh target; the compare dir is read-only, a rule it
-//     drops counts as deleted there, and the fresh target still receives every rule byte.
+//     a layer install) instead of the fresh target; the compare dir is read-only, a rule
+//     the data repo drops counts as deleted there whether or not its live copy changed,
+//     and the fresh target still receives every rule byte.
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
@@ -144,14 +145,23 @@ try {
   const gone = new Set();
   for (const name of Object.keys(recorded)) {
     if (rules.has(name) || !existsSync(join(compareBase, name))) continue;
-    if (fingerprint(name, readFileSync(join(compareBase, name))) === recorded[name]) {
-      if (!compareMode) unlinkSync(join(target, name));
-      console.log(`deleted  ${name}`);
-      deleted++;
-      gone.add(name);
-    } else {
-      console.log(compareMode ? `changed here, left out: ${join(compare, name)}` : `changed here, kept: ${join(target, name)}`);
+    const same = fingerprint(name, readFileSync(join(compareBase, name))) === recorded[name];
+    if (!compareMode) {
+      if (same) {
+        unlinkSync(join(target, name));
+        console.log(`deleted  ${name}`);
+        deleted++;
+        gone.add(name);
+      } else {
+        console.log(`changed here, kept: ${join(target, name)}`);
+      }
+      continue;
     }
+    // Compare mode never unlinks: the new layer leaves the rule out whatever the live copy
+    // holds, so a changed copy counts as deleted too, with its own note.
+    deleted++;
+    gone.add(name);
+    console.log(same ? `deleted  ${name}` : `changed here, left out: ${join(compare, name)}`);
   }
   console.log(compareMode
     ? `${counts.updated} updated, ${counts.added} added, ${unchanged} unchanged, ${deleted} deleted in ${target}`

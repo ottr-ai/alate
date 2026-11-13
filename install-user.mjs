@@ -800,6 +800,21 @@ try {
     if (base !== null && layerMode) base = withoutMemoryBackend(base);
     return fingerprint(rel, base === null ? readFileSync(dest) : Buffer.from(base, 'utf8'));
   };
+  // The live copy's fingerprint in the new layer's coordinate space, for the snapshot
+  // comparison: paths the previous install re-rooted into the live layer re-root into the
+  // new layer here, so a file whose only difference from the snapshot is the layer prefix
+  // compares equal (the snapshot is remapped the same way). The plain machineFingerprint
+  // stays the record and deletion comparison: the record describes the live layer in its
+  // own coordinates.
+  const layerMachineFingerprint = (rel, dest, machineSrc) => {
+    if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) {
+      if (!existsSync(dest)) return null;
+      let text = readFileSync(dest).toString('utf8');
+      if (rel === 'omp/agent/config.yml') text = withoutMemoryBackend(withoutDeploymentBlocks(text));
+      return fingerprint(rel, Buffer.from(remapHomePaths(text, machineSrc, newLayerDir), 'utf8'));
+    }
+    return machineFingerprint(rel, dest);
+  };
   // The record an alate older than the memory-backend strip wrote hashes the snapshot bytes it
   // installed, and those still carried the entry. Layer mode accepts that legacy record too: a
   // home config.yml that, with only the deployment blocks stripped, still holds exactly the
@@ -919,6 +934,9 @@ try {
     // The machine text minus its deployment blocks (lib/data.mjs keeps the last kept line's
     // terminator). `dropped` holds credentials: never log it.
     const have = machineFingerprint(rel, readDest);
+    // The snapshot comparison uses the layer-normalized form: a file whose only difference
+    // from the snapshot is the layer prefix in re-rooted paths is unchanged.
+    const haveLayer = layerMachineFingerprint(rel, readDest, machineSrc);
     // The record-match: the plain form (strip-era records, and every non-config file) or the
     // legacy form above (records a pre-strip alate wrote, entry included). A matched file was
     // not changed on the machine since the install, so the snapshot may replace it.
@@ -926,7 +944,7 @@ try {
     // The item key rides on every plan entry, so the per-item results can aggregate by key.
     const itemKey = `user/${rel}`;
     if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey]);
-    else if (layerMode && have === want) plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, have)]);
+    else if (layerMode && haveLayer === want) plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);
     else if (layerMode && have !== null && !record) {
       // A machine change beyond the deployment blocks is never a refusal in layer mode:
       // machine state wins and rides into the new layer, --force takes the snapshot instead.
@@ -935,11 +953,11 @@ try {
       // over them, so a turn-edited copy must never ride into the new layer. The snapshot
       // wins, --force or not; a deliberate change goes through a data-repo commit.
       if (pluginInstallFile(rel)) {
-        plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, have)]);
+        plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);
         notes.push(`plugin install file takes the snapshot, machine change ignored: ${readDest}`);
       }
       else if (force) {
-        plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, have)]);
+        plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);
         notes.push(`machine change overridden by --force: ${readDest}`);
       } else {
         // A kept file can hold paths re-rooted into the live layer at its install, so they
@@ -950,11 +968,11 @@ try {
         // snapshot does above, so the choice never rides along with the machine part.
         if (rel === 'omp/agent/config.yml') keptBytes = Buffer.from(withoutMemoryBackend(keptBytes.toString('utf8')), 'utf8');
         if (/\.(?:json|ya?ml)$/.test(rel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, /** @type {string} */ (newLayerDir)), 'utf8');
-        plan.push(['installed', dest, keptBytes, itemKey, layerLabel(rel, keptBytes, have)]);
+        plan.push(['installed', dest, keptBytes, itemKey, layerLabel(rel, keptBytes, haveLayer)]);
         notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
       }
     }
-    else if (have === null || record || force) plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, have)]);
+    else if (have === null || record || force) plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);
     else conflicts.push(dest);
     current[rel] = want;
   }
@@ -979,6 +997,10 @@ try {
         // fresh layer being written. Layer mode still writes every file and labels it;
         // in-place mode skips a matching copy.
         const liveCopy = join(readRoot, '.ottr', 'workers', project, file);
+        // The compare base is machine side (the live layer in layer mode): the same alias
+        // guard every machine-side read gets, so a planted link or special file refuses the
+        // run instead of being followed out of the layer.
+        if (layerMode) checkDestination(readRoot, liveCopy);
         const haveWorker = existsSync(liveCopy) && sameContent('', readFileSync(liveCopy), src);
         plan.push(haveWorker && !layerMode ? ['unchanged', dest, null, `workers/${project}/${file}`]
           : ['installed', dest, src, `workers/${project}/${file}`, layerMode ? (haveWorker ? 'unchanged' : existsSync(liveCopy) ? 'updated' : 'added') : null]);
@@ -1213,8 +1235,11 @@ try {
       const rulesEnv = childEnv(['ALATE_TEST_SCRIPT_GATE']);
       if (resultsPath) rulesEnv[PROVISION_ENV] = resultsPath;
       // The nested sync labels its rules against the live layer's rules dir when there is
-      // one, so an unchanged layer install reports no rule changes.
+      // one, so an unchanged layer install reports no rule changes. The dir is a read root
+      // for the child, not a write destination: resolve it (any planted symlink chain) and
+      // refuse when it leaves the live layer, before sync reads anything.
       const compareRules = readRoot === newLayerDir ? null : join(readRoot, '.omp', 'agent', 'rules');
+      if (compareRules) assertSourceInside(readRoot, compareRules);
       const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), join(/** @type {string} */ (newLayerDir), '.omp', 'agent', 'rules'), '--data', data.dir, ...(compareRules ? ['--compare', compareRules] : [])], { encoding: 'utf8', env: rulesEnv });
       let nested = null;
       if (resultsPath) {

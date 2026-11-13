@@ -127,6 +127,9 @@ non-zero. A failure after the switch changes nothing about the switch itself.
 - A machine-kept JSON/YAML file can hold absolute paths that were re-rooted into the live
   layer at its install. The copy re-roots them into the new layer, so clean-up can delete
   the live layer; paths into the shared home stay shared.
+- The report labels compare the live copy with the new layer's bytes after re-rooting: a
+  file whose only difference from the snapshot is the layer prefix in re-rooted paths
+  stays `unchanged`.
 - A path the snapshot dropped is simply absent from the new layer. Nothing is deleted from
   the current layer; a pinned turn keeps reading it. The summary counts the live layer's
   dropped files as `deleted`.

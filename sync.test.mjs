@@ -543,6 +543,17 @@ try {
   assert.ok(existsSync(join(liveDir, 'r.md')), 'the compare dir keeps its dropped copy');
   assert.ok(!existsSync(join(freshCmp3, 'r.md')), 'the fresh target leaves the dropped rule out');
 
+  // A recorded rule that changed in the compare dir and is dropped counts as deleted too,
+  // with its own note: the new layer leaves it out either way.
+  writeFileSync(join(liveDir, 'r.md'), rule.replace('Body', 'Machine edit'));
+  rmSync(resultsPath, { force: true });
+  const freshCmp4 = freshTarget('compare-fresh4');
+  r = runRes(freshCmp4, ['--data', data2, '--compare', liveDir]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /changed here, left out: .+compare-live.{1,3}r\.md/);
+  assert.match(r.stdout, /0 updated, 0 added, 0 unchanged, 1 deleted in /, 'the changed dropped rule counts as deleted');
+  assert.ok(existsSync(join(liveDir, 'r.md')), 'the compare dir keeps its copy');
+
   if (process.platform === 'win32') {
     const link = join(tmp, 'rules-link');
     symlinkSync(data, link, 'junction');
