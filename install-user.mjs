@@ -45,10 +45,10 @@ import { assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, descr
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
-/** @typedef {{ item: string, status: 'installed' | 'unchanged' | 'rejected' | 'no-origin', rule: string | null, at: string | null, report?: string }} ProvisionItem */
+/** @typedef {{ item: string, status: 'installed' | 'unchanged' | 'added' | 'updated' | 'rejected' | 'no-origin', rule: string | null, at: string | null, report?: string }} ProvisionItem */
 /** @typedef {{ rule?: string, report: string }} ScanRejection */
 /** @typedef {{ name: string, url: string, sha256: string, unpack: string, bin?: string }} WorkerTool */
-/** @typedef {['unchanged', string, null, string] | ['installed', string, Buffer, string]} PlanEntry */
+/** @typedef {['unchanged', string, null, string, string | null] | ['installed', string, Buffer, string, string | null]} PlanEntry */
 
 const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--data', '--repo', '--home', '--commit'], ['--force', '--skip-plugins', '--layer']));
 // The imported commit names the layer id in layer mode: the server passes it for a repo
@@ -806,12 +806,13 @@ try {
   // compares equal (the snapshot is remapped the same way). The plain machineFingerprint
   // stays the record and deletion comparison: the record describes the live layer in its
   // own coordinates.
+  /** @param {string} rel @param {string} dest @param {string} machineSrc @returns {string | null} */
   const layerMachineFingerprint = (rel, dest, machineSrc) => {
     if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) {
       if (!existsSync(dest)) return null;
       let text = readFileSync(dest).toString('utf8');
       if (rel === 'omp/agent/config.yml') text = withoutMemoryBackend(withoutDeploymentBlocks(text));
-      return fingerprint(rel, Buffer.from(remapHomePaths(text, machineSrc, newLayerDir), 'utf8'));
+      return fingerprint(rel, Buffer.from(remapHomePaths(text, machineSrc, /** @type {string} */ (newLayerDir)), 'utf8'));
     }
     return machineFingerprint(rel, dest);
   };
@@ -833,6 +834,7 @@ try {
   // the bytes that land in the new layer match it through the machine-fingerprint
   // normalization, updated otherwise. The compare base is the live layer, never the fresh
   // one being written.
+  /** @param {string} rel @param {Buffer} bytes @param {string | null} have @returns {'added' | 'updated' | 'unchanged'} */
   const layerLabel = (rel, bytes, have) => {
     if (have === null) return 'added';
     const machineYaml = rel === 'omp/agent/config.yml' ? bytes.toString('utf8') : null;
@@ -943,7 +945,7 @@ try {
     const record = have !== null && (have === last[rel] || legacyFingerprint(rel, readDest) === last[rel]);
     // The item key rides on every plan entry, so the per-item results can aggregate by key.
     const itemKey = `user/${rel}`;
-    if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey]);
+    if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null]);
     else if (layerMode && haveLayer === want) plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);
     else if (layerMode && have !== null && !record) {
       // A machine change beyond the deployment blocks is never a refusal in layer mode:
@@ -1002,7 +1004,7 @@ try {
         // run instead of being followed out of the layer.
         if (layerMode) checkDestination(readRoot, liveCopy);
         const haveWorker = existsSync(liveCopy) && sameContent('', readFileSync(liveCopy), src);
-        plan.push(haveWorker && !layerMode ? ['unchanged', dest, null, `workers/${project}/${file}`]
+        plan.push(haveWorker && !layerMode ? ['unchanged', dest, null, `workers/${project}/${file}`, null]
           : ['installed', dest, src, `workers/${project}/${file}`, layerMode ? (haveWorker ? 'unchanged' : existsSync(liveCopy) ? 'updated' : 'added') : null]);
       }
     }
@@ -1109,7 +1111,7 @@ try {
       const have = existsSync(readDest) ? fingerprint(rel, readFileSync(readDest)) : null;
       const record = have !== null && have === last[rel];
       const itemKey = `user/${rel}`;
-      if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey]);
+      if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null]);
       else if (layerMode && have === want) plan.push(['installed', dest, readFileSync(srcPath), itemKey, layerLabel(rel, readFileSync(srcPath), have)]);
       else if (layerMode && have !== null && !record) {
         // Same machine-state rules as snapshot skills: layer mode keeps the machine copy,
@@ -1265,7 +1267,8 @@ try {
       mkdirSync(dirname(dest), { recursive: true });
       writeFileSync(dest, /** @type {Buffer} */ (bytes));
       installed++;
-      if (layerMode) labels[label]++;
+      // A layer-mode plan entry always carries a label string; null is the in-place shape.
+      if (layerMode) labels[/** @type {'added' | 'updated' | 'unchanged'} */ (label)]++;
     }
     let deleted = 0;
     for (const [dest, root] of deletions) {

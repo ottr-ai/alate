@@ -126,7 +126,7 @@ try {
   const counts = { added: 0, updated: 0 };
   for (const [name, bytes] of rules) {
     const oldBytes = old.get(name);
-    const same = oldBytes !== null && oldBytes.equals(bytes);
+    const same = oldBytes?.equals(bytes) ?? false;
     // Compare mode writes every rule: the fresh target needs the bytes even when the
     // compare dir already holds them.
     if (compareMode || !same) writeFileSync(join(target, name), bytes);
