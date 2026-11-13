@@ -12,7 +12,7 @@ are not product requirements and set no service-level target.
 
 | Gate | Threshold | Measured | Verdict |
 | --- | --- | --- | --- |
-| Alate 2 — responsiveness after work isolation | health p99 below 100 ms and no host-limit breach during imports and provisions | health p99 46–57 ms, max 53–237 ms across cold, warm, and three-concurrent runs at about 1 GB; peak process-tree RSS 1.3–2.3 GiB against the 8 GiB compose cap | **pass** — bounded Node isolation holds |
+| Alate 2 — responsiveness after work isolation | health p99 below 100 ms and no host-limit breach during imports and provisions | health p99 10.5–26.3 ms, max 52–327 ms (one 624 ms outlier) across cold, warm, and three-concurrent runs at about 1 GB on the final tree; peak process-tree RSS 1.2–2.2 GiB against the 8 GiB compose cap; `-wal` sidecar bounded at 0.1–0.7 MiB | **pass** — bounded Node isolation holds |
 | Alate 1 — provision cost | after safe design changes: own CPU above 1 s and above 30% of repeated provision wall time reopens native planning | warm repeated provision: own CPU 5.4–5.7 s of an 8.7–8.8 s wall (about 64%); cold provision: 3.7 s of 12.7 s (29%) — measured **before** any provision design change | **not evaluable yet** — this card changed no provision-path design, so the gate's precondition is unmet; the numbers are the before-design baseline for the design work first |
 
 A failed gate permits one bounded-component prototype comparison. It never
@@ -54,9 +54,14 @@ landed in the provision path yet.
   warm pair reuses the home (scan verdict cache and bun cache hot) and
   database.
 - Isolation under test: imports, provision snapshots, and snapshot cleanup
-  run in one bounded worker thread (`lib/server-worker.mjs`), with the
+  run in one worker client thread (`lib/server-worker.mjs`), with the
   main-thread database lock wait bounded at 50 ms and update checks deferred
-  while worker ops run or are queued.
+  while worker ops run or are queued. The store runs in WAL mode with
+  `journal_size_limit` at 64 MiB, and the import op runs a TRUNCATE
+  checkpoint when it commits, so the `-wal` sidecar stays small (measured
+  0.1–0.7 MiB) instead of growing with the snapshot. The server numbers
+  below were re-measured on this exact final tree, after the WAL and
+  worker-client changes.
 
 ## Alate 1 — provision cost (final code, about 1 GB fixture)
 
@@ -83,22 +88,37 @@ that design work lands; until then these numbers are its baseline, and they
 open no prototype discussion. Scanner and security behavior stayed
 identical throughout.
 
-## Alate 2 — responsiveness after work isolation (final code)
+## Alate 2 — responsiveness after work isolation (final tree, WAL store)
 
-| Scenario | Import wall | Provision wall | health p50 | health p99 | health max | peak tree RSS |
-| --- | --- | --- | --- | --- | --- | --- |
-| cold serial, run 1 | 2.27 s | 15.5 s | 11.4 ms | 46.3 ms | 53.4 ms | 2.31 GiB |
-| cold serial, run 2 | 1.98 s | 17.5 s | 12.4 ms | 48.0 ms | 59.3 ms | 2.29 GiB |
-| warm serial | 14.2 s | 11.4 s | 11.2 ms | 57.2 ms | 87.3 ms | 1.28 GiB |
-| 3-concurrent, run 1 | 23.9 s (3 imports) | 10.7 s | 14.9 ms | 56.8 ms | 236.6 ms | 1.43 GiB |
-| 3-concurrent, run 2 | 23.5 s (3 imports) | 10.7 s | 15.7 ms | 56.9 ms | 63.2 ms | 1.61 GiB |
+| Scenario | Import wall | Provision wall | health p50 | health p99 | health max | peak tree RSS | `-wal` after import |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| cold serial, run 1 | 22.1 s | 26.7 s | 1.1 ms | 26.3 ms | 327.1 ms | 2.21 GiB | 0.1 MiB |
+| cold serial, run 2 | 24.7 s | 19.8 s | 0.9 ms | 13.5 ms | 66.7 ms | 2.22 GiB | 0.1 MiB |
+| cold serial, run 3 | 15.2 s | 18.1 s | 1.0 ms | 16.0 ms | 52.0 ms | 2.22 GiB | 0.1 MiB |
+| warm serial | 19.4 s | 13.1 s | 7.7 ms | 11.6 ms | 623.9 ms | 1.24 GiB | 0.2 MiB |
+| 3-concurrent imports, run 1 | 34.5 s (3 imports) | 13.2 s | 7.5 ms | 10.5 ms | 50.8 ms | 1.26 GiB | — |
+| 3-concurrent imports, run 2 | 28.2 s (3 imports) | 11.1 s | 8.2 ms | 14.1 ms | 52.0 ms | 1.80 GiB | — |
 
-No host-limit breach: the highest process-tree RSS peak was 2.31 GiB against
-the 8 GiB compose memory cap, with no OOM kill and no error responses in the
-measured windows. Before the isolation, the same fixtures blocked `/health`
-for 2,571–2,710 ms on a cold import and 29,674 ms on a warm re-import, and
-the provision snapshot alone blocked the loop for about 1.6–1.8 s; those
+No host-limit breach: the highest process-tree RSS peak was 2.22 GiB against
+the 8 GiB compose memory cap, no OOM kill, and no error responses in the
+measured windows. The `-wal` sidecar stayed at 0.1–0.7 MiB after imports and
+provisions — the 64 MiB `journal_size_limit` and the TRUNCATE checkpoint
+after each import keep it from growing with the snapshot. Concurrent
+provisions serialize on the pre-existing one-provision-at-a-time guard (the
+second and third attempt answer 409 `provision already running`); the three
+imports themselves ran concurrently. One warm run saw a single 624 ms health
+probe (p99 unaffected) while the import's TRUNCATE checkpoint was syncing
+the store. Before the isolation, the same fixtures blocked `/health` for
+2,571–2,710 ms on a cold import and 29,674 ms on a warm re-import, and the
+provision snapshot alone blocked the loop for about 1.6–1.8 s; those
 baseline numbers are the fail-before evidence for the isolation change.
+
+Cost note: on the WAL store a cold import writes the snapshot to the `-wal`
+file and the TRUNCATE checkpoint copies it into the database, so the import
+wall rose from about 2–3 s (rollback journal, before the isolation work) to
+15–25 s at the 1 GB workload. That is a throughput cost of the readable
+store, not a responsiveness cost: health p99 stayed between 10.5 and
+26.3 ms in every scenario.
 
 ## Limits
 
