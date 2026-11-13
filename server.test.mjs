@@ -6830,10 +6830,10 @@ try {
         writeFileSync(join(threadSource, 'rule.md'), '---\ndescription: thread rule\n---\n\nBody\n');
         // One settling probe before the baseline: the first import also pays for the
         // single persistent worker's own threads.
-        await (await fetch(new URL('/api/import', threadBase), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${threadKey}` }, body: JSON.stringify({ source: threadSource }) })).text();
+        await (await fetch(new URL(`${threadBase}/api/import`), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${threadKey}` }, body: JSON.stringify({ source: threadSource }) })).text();
         const before = threadsOf(threadSrv.pid);
         for (let i = 0; i < 5; i++) {
-          const r = await fetch(new URL('/api/import', threadBase), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${threadKey}` }, body: JSON.stringify({ source: threadSource }) });
+          const r = await fetch(new URL(`${threadBase}/api/import`), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${threadKey}` }, body: JSON.stringify({ source: threadSource }) });
           assert.equal(r.status, 200);
           await r.text();
         }
