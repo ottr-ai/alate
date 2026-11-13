@@ -136,12 +136,6 @@ let running = false
 // `writing` still serializes concurrent edit requests in-process; `running` (provision) is the
 // check tests can reach.
 let writing = false
-// True while a worker op runs (import in the serialized selectSource chain, provision
-// snapshot). Main-thread SQLite writes defer or fail fast while either flag holds: the
-// worker's long transaction would otherwise block the event loop on a busy wait.
-let importing = false
-let snapshotting = false
-let checkDeferred = false
 
 
 // Worse status wins when both scripts report the same item key. `added` and `updated` are
