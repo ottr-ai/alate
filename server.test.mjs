@@ -6471,14 +6471,14 @@ try {
   };
 
   {
-    // Import isolation: a ~21k-file source. The pre-worker import read every file and
+    // Import isolation: a ~42k-file source. The pre-worker import read every file and
     // rewrote the files table synchronously on the event loop and stalled /health for
     // the whole run; now it runs in the worker thread.
     const bulkSource = join(tmp, 'bulk-source');
     mkdirSync(join(bulkSource, 'user', 'bulk'), { recursive: true });
     const bulkRule = '---\ndescription: bulk rule\n---\n\n' + 'Body line for the fixture. '.repeat(20);
-    for (let i = 0; i < 7000; i++) writeFileSync(join(bulkSource, `rule-${String(i).padStart(5, '0')}.md`), bulkRule);
-    for (let i = 0; i < 14000; i++) writeFileSync(join(bulkSource, 'user', 'bulk', `f-${String(i).padStart(5, '0')}.txt`), 'x'.repeat(1024));
+    for (let i = 0; i < 14000; i++) writeFileSync(join(bulkSource, `rule-${String(i).padStart(5, '0')}.md`), bulkRule);
+    for (let i = 0; i < 28000; i++) writeFileSync(join(bulkSource, 'user', 'bulk', `f-${String(i).padStart(5, '0')}.txt`), 'x'.repeat(1024));
     const bulkCfg = join(tmp, 'server-config-bulk.json');
     writeFileSync(bulkCfg, JSON.stringify({ apiKey: null }));
     const bulkSrv = spawnServer(['--port', '0', '--config', bulkCfg, '--db', join(tmp, 'state-bulk.db')], testServerEnv);
@@ -6486,15 +6486,20 @@ try {
       const { apiKey: bulkKey, base: bulkBase } = await awaitStartup(bulkSrv);
       const { result: importRes, times, elapsed } = await probeHealthWhile(bulkBase, () =>
         fetch(new URL(`${bulkBase}/api/import`), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bulkKey}` }, body: JSON.stringify({ source: bulkSource }) }));
-      assert.ok(elapsed >= 500, `the bulk import is heavy enough to have stalled the old loop (${elapsed} ms)`);
+      // Heaviness floor: a synchronous import of this fixture must stall /health past
+      // the 300 ms probe bound that assertFastProbes enforces, or the isolation check
+      // could pass vacuously. 400 stays above that bound with headroom for faster CI
+      // runners: the 21k fixture measured 371 ms on a 2026 runner, so this fixture
+      // lands near 750 ms there.
+      assert.ok(elapsed >= 400, `the bulk import is heavy enough to have stalled the old loop (${elapsed} ms)`);
       const importText = await importRes.text();
       assert.equal(importRes.status, 200, `bulk import failed: ${importText}`);
       const importBody = JSON.parse(importText);
       assert.equal(importBody.ok, true);
-      assert.equal(importBody.state.inventory.rules.length, 7000);
+      assert.equal(importBody.state.inventory.rules.length, 14000);
       assertFastProbes(times, 'the bulk import');
       const stored = await (await fetch(new URL('/api/files', bulkBase))).json();
-      assert.equal(stored.files.length, 21000, 'the import stored every fixture file');
+      assert.equal(stored.files.length, 42000, 'the import stored every fixture file');
     } finally { await stopServer(bulkSrv); }
   }
 
