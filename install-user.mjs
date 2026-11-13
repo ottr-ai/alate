@@ -544,11 +544,15 @@ const validateTools = (bytes, path) => {
 
 /** @param {Buffer} bytes @param {string} path @returns {void} */
 const validateEnv = (bytes, path) => {
-  // Names only, never values: a broken line is reported by number, its content is never printed.
+  // Reference grammar is ottr's parseEnvTxt (src/tools.ts); the two must stay in sync.
+  // A line holds one name, then optionally the word "plain". Names only, never values: a
+  // broken line is reported by number, its content is never printed.
   bytes.toString('utf8').split(/\r?\n/).forEach((raw, i) => {
-    const line = raw.trim();
-    if (!line || line.startsWith('#')) return;
-    if (!ENV_NAME.test(line)) throw new Error(`${path}: env.txt line ${i + 1}: a name must match ${ENV_NAME.source} (names only, never values)`);
+    const words = raw.replace(/#.*/, '').trim().split(/\s+/).filter(Boolean);
+    if (!words.length) return;
+    if (words.length > 2 || !ENV_NAME.test(words[0]) || (words.length === 2 && words[1] !== 'plain')) {
+      throw new Error(`${path}: env.txt line ${i + 1}: a line is one name, then optionally the word "plain" (a name must match ${ENV_NAME.source}; names only, never values)`);
+    }
   });
 };
 

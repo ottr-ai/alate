@@ -898,6 +898,20 @@ try {
   assert.equal(r.status, 0, `a changed list is no conflict: ${r.stderr}`);
   assert.equal(readFileSync(join(toolsHome, '.ottr/workers/web/env.txt'), 'utf8'), 'PIXEL_LAB_API_KEY\nOTHER_NAME\n');
 
+  // env.txt follows ottr's parseEnvTxt grammar (src/tools.ts): a line is one name, then
+  // optionally the word "plain". A comment or blank line stays fine; anything else refuses.
+  putWorker('web', 'env.txt', 'MQTT_HOST plain\nTOKEN\n# comment\n');
+  r = run(['--data', data, '--skip-plugins'], toolsHome);
+  assert.equal(r.status, 0, `a "plain" line is still a name list: ${r.stderr}`);
+  assert.equal(readFileSync(join(toolsHome, '.ottr/workers/web/env.txt'), 'utf8'), 'MQTT_HOST plain\nTOKEN\n# comment\n');
+  for (const bad of ['MQTT_HOST secret', 'A b c', 'mqtt_host plain']) {
+    putWorker('web', 'env.txt', `${bad}\n`);
+    r = run(['--data', data, '--skip-plugins'], toolsHome);
+    assert.equal(r.status, 1, `"${bad}": the provision fails`);
+    assert.ok(r.stderr.includes(join(data, 'workers/web/env.txt')), `"${bad}": the error names the file: ${r.stderr}`);
+    assert.ok(!`${r.stdout}${r.stderr}`.includes(bad), `"${bad}": the line content is never printed`);
+  }
+
   // The delete rule: a list the data repo drops is deleted, its siblings and the fleet folder stay.
   rmSync(join(data, 'workers/web/env.txt'));
   r = run(['--data', data, '--skip-plugins'], toolsHome);
