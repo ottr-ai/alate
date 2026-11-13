@@ -165,7 +165,9 @@ export default {
   //   (`seg.length === root + 2` — sqlite probe: GLOB match 1, isOverridePath false); the
   //   flipped operators return true and wrongly suppress it. The child-check drop
   //   (`seg[root + 1] === name` → true) is killed by the snapshot row
-  //   `user/skills/other/SKILL.md`, which must not suppress `retro`.
+  //   `user/skills/other/retro/SKILL.md` — a GLOB-matching row (it contains `retro/`) whose
+  //   override child is another skill: the original keeps the retro row, the mutant
+  //   suppresses it. The pre-existing deepRoot case kills the same mutant.
   // - updates.mjs glob escaping (:779): the shipped pin names contain none of `[`, `*`, `?`
   //   (`shippedSkills` list above), so the replace callback is never invoked (174), bracketing
   //   every character is a same-matching GLOB (173: `'user/skills/retro/SKILL.md' GLOB

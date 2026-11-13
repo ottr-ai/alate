@@ -3984,7 +3984,10 @@ try {
       assert.ok(r['retro'] != null, 'a matched row whose override folder is empty never suppresses');
       assert.deepEqual(names.filter(n => r[n] != null), names, 'the other pins keep their rows');
       // An override root whose child is another skill suppresses nothing else.
-      const suppOtherChild = await run({ 'user/skills/other/SKILL.md': 'x' });
+      // The row must pass the snapshot GLOB (user/*retro/*) for isOverridePath to run at
+      // all: a skills child that is another skill, with retro nested deeper, is not an
+      // override for retro and must not hide the row.
+      const suppOtherChild = await run({ 'user/skills/other/retro/SKILL.md': 'x' });
       assert.ok(rows(suppOtherChild)['retro'] != null, 'an override root whose child is another skill suppresses nothing else');
       // The override root is the snapshot's user layer only: a docs copy is not an override
       // and must not hide the row, and the installer skips by folder presence, so any file
