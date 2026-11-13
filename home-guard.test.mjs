@@ -6,7 +6,10 @@
 // snapcompact — the cache and session stores of the browser profiles under
 // .omp/browser-profiles, the live worker's .omp/plugins/cache downloads (anything
 // else under plugins/ stays checked), .omp/memories, .omp/oauth, .omp/install-id,
-// .omp/marketplaces.json, .omp/natives, and the two bookkeeping files under .alate)
+// .omp/marketplaces.json, .omp/natives, the two bookkeeping files under .alate, and the
+// live worker's layer runtime (each layer's .omp tree under .alate/layers — the same
+// ignore set as .omp, plus its puppeteer browser-tooling install; the layer's own
+// manifest files stay checked))
 // is excluded: a live worker writes it during any chain run, and none of it is a
 // test write.
 // Exists because a Stryker mutant once dropped install-user.mjs's --home handling, so the
@@ -30,25 +33,37 @@ const WATCHED = ['.alate', '.agents', '.omp'];
 // (.omp/natives), and the install-id and marketplaces.json bookkeeping files.
 // Everything else in the watched dirs — skills, rules, agent context, installed.json,
 // layers, current, the rest of a browser profile — is checked for presence and mtime.
+// Under .alate/layers only each layer's .omp runtime tree is live state (see layerOmpLive
+// below); the layer's manifest files and token-reminders.json stay checked.
+// The flat .omp runtime predicate, reused for the layer layout below.
+const OMP_LIVE = rel => rel === 'logs' || rel.startsWith('logs/') || rel === 'cache' || rel.startsWith('cache/')
+  || rel === 'run' || rel.startsWith('run/')
+  || rel === 'context-mode' || rel.startsWith('context-mode/')
+  || rel === 'agent/custom-session-files' || rel.startsWith('agent/custom-session-files/')
+  || rel === 'snapcompact-savings.jsonl'
+  || rel === 'agent/blobs' || rel.startsWith('agent/blobs/')
+  || (/^browser-profiles\//.test(rel)
+    && (/\/(?:Cache|Code Cache|GPUCache|GPUPersistentCache|GrShaderCache|ShaderCache|GraphiteDawnCache|DawnGraphiteCache|DawnWebGPUCache)(?:\/|$)/.test(rel)
+      || /\/(?:Cookies|History)(?:-wal|-journal)?$/.test(rel)))
+  || rel === 'plugins/cache' || rel.startsWith('plugins/cache/')
+  || rel === 'memories' || rel.startsWith('memories/')
+  || rel === 'oauth' || rel.startsWith('oauth/')
+  || rel === 'install-id'
+  || rel === 'marketplaces.json'
+  || rel === 'natives' || rel.startsWith('natives/')
+  || /^agent\/[A-Za-z0-9-]+\.db(?:\.|-|$)/.test(rel);
+// A live worker's layer .omp lives at .alate/layers/<id>/.omp and holds the same runtime
+// state as the flat .omp; its browser tooling also installs puppeteer there when a browser
+// session runs mid-chain. Same ignore set as .omp, plus puppeteer. Everything else under
+// .alate/layers — the layer's manifest files and token-reminders.json — stays checked.
+const layerOmpLive = rel => {
+  const m = /^layers\/[^/]+\/\.omp\/(.+)$/.exec(rel);
+  return m !== null && (OMP_LIVE(m[1]) || m[1] === 'puppeteer' || m[1].startsWith('puppeteer/'));
+};
 const LIVE = {
-  '.alate': rel => rel === 'in-use.json' || rel === 'skillspector-pass.json',
+  '.alate': rel => rel === 'in-use.json' || rel === 'skillspector-pass.json' || layerOmpLive(rel),
   '.agents': () => false,
-  '.omp': rel => rel === 'logs' || rel.startsWith('logs/') || rel === 'cache' || rel.startsWith('cache/')
-    || rel === 'run' || rel.startsWith('run/')
-    || rel === 'context-mode' || rel.startsWith('context-mode/')
-    || rel === 'agent/custom-session-files' || rel.startsWith('agent/custom-session-files/')
-    || rel === 'snapcompact-savings.jsonl'
-    || rel === 'agent/blobs' || rel.startsWith('agent/blobs/')
-    || (/^browser-profiles\//.test(rel)
-      && (/\/(?:Cache|Code Cache|GPUCache|GPUPersistentCache|GrShaderCache|ShaderCache|GraphiteDawnCache|DawnGraphiteCache|DawnWebGPUCache)(?:\/|$)/.test(rel)
-        || /\/(?:Cookies|History)(?:-wal|-journal)?$/.test(rel)))
-    || rel === 'plugins/cache' || rel.startsWith('plugins/cache/')
-    || rel === 'memories' || rel.startsWith('memories/')
-    || rel === 'oauth' || rel.startsWith('oauth/')
-    || rel === 'install-id'
-    || rel === 'marketplaces.json'
-    || rel === 'natives' || rel.startsWith('natives/')
-    || /^agent\/[A-Za-z0-9-]+\.db(?:\.|-|$)/.test(rel),
+  '.omp': OMP_LIVE,
 };
 const resolveSnap = (argv) => argv[3] ?? process.env.ALATE_HOME_GUARD_SNAPSHOT ?? join(tmpdir(), 'alate-home-guard-snapshot.json');
 
@@ -133,7 +148,9 @@ const selfCheck = () => {
     '.omp/snapcompact-savings.jsonl', 'unwatched.txt',
     '.omp/plugins/cache/marketplaces/idx.json', '.omp/plugins/installed/p/manifest.json',
     '.omp/memories/m.md', '.omp/oauth/tokens.json', '.omp/install-id',
-    '.omp/marketplaces.json', '.omp/natives/grammars/en.wasm']) {
+    '.omp/marketplaces.json', '.omp/natives/grammars/en.wasm',
+    '.alate/layers/w1/.omp/puppeteer/package.json', '.alate/layers/w1/.omp/install-id',
+    '.alate/layers/w1/config.yml', '.alate/layers/token-reminders.json']) {
     mkdirSync(join(fake, rel, '..'), { recursive: true });
     writeFileSync(join(fake, rel), rel);
   }
@@ -141,6 +158,7 @@ const selfCheck = () => {
   // So does the live worker's own state: the plugin download cache, memories, oauth,
   // natives, install-id and marketplaces.json.
   mkdirSync(join(fake, '.omp/agent/blobs'), { recursive: true });
+  mkdirSync(join(fake, '.alate/layers/w1/.omp/cache'), { recursive: true });
   const snap = join(tmp, 'snap.json');
   try {
     assert.equal(run('record', fake, snap).status, 0, 'record passes');
@@ -174,7 +192,16 @@ const selfCheck = () => {
     writeFileSync(join(fake, '.omp/install-id'), 'id-2\n');
     writeFileSync(join(fake, '.omp/marketplaces.json'), '[]\n');
     writeFileSync(join(fake, '.omp/natives/grammars/en.wasm'), 'wasm\n');
+    // The live worker's layer runtime churns the same way inside .alate/layers/<id>/.omp,
+    // and its browser tooling rewrites puppeteer there mid-chain.
+    writeFileSync(join(fake, '.alate/layers/w1/.omp/puppeteer/package.json'), '{"puppeteer":true}\n');
+    writeFileSync(join(fake, '.alate/layers/w1/.omp/install-id'), 'id-2\n');
+    writeFileSync(join(fake, '.alate/layers/w1/.omp/cache/idx'), '{}\n');
     assert.equal(run('check', fake, snap).status, 0, 'live runtime churn passes');
+    // Non-runtime layer content stays checked.
+    utimesSync(join(fake, '.alate/layers/w1/config.yml'), new Date(), new Date(Date.now() + 9000));
+    utimesSync(join(fake, '.alate/layers/token-reminders.json'), new Date(), new Date(Date.now() + 9000));
+    assert.notEqual(run('check', fake, snap).status, 0, 'watched layer manifest write fails');
     // Anything under plugins/ outside cache/ stays checked.
     utimesSync(join(fake, '.omp/plugins/installed/p/manifest.json'), new Date(), new Date(Date.now() + 9000));
     assert.notEqual(run('check', fake, snap).status, 0, 'plugins entry outside cache fails');
@@ -203,6 +230,7 @@ const selfCheck = () => {
     assert.deepEqual(Object.keys(recorded).sort(), ['agent', 'agent/rules', 'agent/rules/r.md',
       'browser-profiles', 'browser-profiles/chrome-x', 'browser-profiles/chrome-x/Default',
       'browser-profiles/chrome-x/Default/Preferences',
+      'layers', 'layers/token-reminders.json', 'layers/w1', 'layers/w1/.omp', 'layers/w1/config.yml',
       'plugins', 'plugins/installed', 'plugins/installed/p', 'plugins/installed/p/manifest.json',
       'skills', 'skills/x', 'skills/x/SKILL.md', 'state.json']);
     assert.ok(!('agent/agent.db' in recorded) && !('logs' in recorded) && !('in-use.json' in recorded)
@@ -214,7 +242,9 @@ const selfCheck = () => {
       && !('browser-profiles/chrome-x/GrShaderCache' in recorded)
       && !('browser-profiles/chrome-x/GPUPersistentCache' in recorded)
       && !('browser-profiles/chrome-x/Default/Cookies' in recorded)
-      && !('browser-profiles/chrome-x/Default/History-journal' in recorded),
+      && !('browser-profiles/chrome-x/Default/History-journal' in recorded)
+      && !('layers/w1/.omp/puppeteer' in recorded) && !('layers/w1/.omp/cache' in recorded)
+      && !('layers/w1/.omp/install-id' in recorded),
       'live runtime entries stay out of the snapshot');
     console.log('home-guard ok');
   } finally {

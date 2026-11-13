@@ -32,8 +32,10 @@ with `--data`. `examples/data` is a neutral fixture used by tests and CI.
   each profile stays watched), the agent
   blob cache `agent/blobs`, the plugin download cache `plugins/cache` (anything
   else under `plugins/` stays checked), the live worker's `memories`, `oauth`,
-  `install-id`, `marketplaces.json` and `natives` files, and the two
-  bookkeeping files under `.alate`): a live worker writes them during any chain.
+  `install-id`, `marketplaces.json` and `natives` files, the live worker's layer
+  runtime under `.alate/layers/<id>/.omp` (the same ignore set as `.omp`, plus the
+  layer's `puppeteer` browser-tooling install; the layer's other files stay watched),
+  and the two bookkeeping files under `.alate`): a live worker writes them during any chain.
 - `web/index.html`/`style.css`/`app.js`/`diff.mjs`: the dashboard's static assets (Galley Proof world, see `DESIGN.md`; `diff.mjs` is the editor's line diff for proof marks; `manifest.webmanifest`, `sw.js`, and `icons/` make the dashboard installable as a PWA — `sw.js` is a network-first offline shell, and its precache list mirrors the static table in `server.ts`), and `web/dashboard.mjs` its inventory and file-edit logic, served by `server.ts` on the same loopback port as the provisioning API; the dashboard's self-check lives in `server.test.mjs`.
 - `server.ts` (+ `server.test.mjs`): long-running loopback provisioning server (key-authenticated provision API, server-side config, periodic data-repo update checks), built on Fastify and run via `node server.ts` type stripping — no build step; it also serves the dashboard UI, its inventory API (`GET /api/state`, `POST /api/import`) and its file editor API (`GET /api/files`, `GET`/`PUT`/`DELETE /api/file`: snapshot reads plus edits that verify a base hash, commit and push) with `--db <file>` (SQLite snapshot of source files and inventory, default `alate.db` beside the config file) and `--data <dir>` (import at startup) flags; `server.test.mjs` is its self-check.
 - `package.json` + `package-lock.json` + `tsconfig.json`: the only manifest, lockfile, and TS config; `dependencies` holds the server's runtime deps (`fastify`) and the two self-hosted dashboard fonts (`@fontsource-variable/source-serif-4`, `@fontsource-variable/jetbrains-mono`, served as woff2 from `/fonts/`), `devDependencies` the tooling (`typescript`, `@types/node`, `@stryker-mutator/core`). Everything else stays plain node with no third-party imports.
