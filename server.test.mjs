@@ -6811,6 +6811,39 @@ try {
     } finally { await stopServer(lockSrv); }
   }
 
+  {
+    // Worker-thread bound: the client keeps ONE worker for every operation. A worker
+    // created per operation would add a thread and an isolate to the server on every
+    // import, without a limit, for as long as the server runs.
+    const threadCfg = join(tmp, 'server-config-thread.json');
+    writeFileSync(threadCfg, JSON.stringify({ apiKey: null }));
+    const threadSrv = spawnServer(['--port', '0', '--config', threadCfg, '--db', join(tmp, 'state-thread.db')], testServerEnv);
+    try {
+      const { apiKey: threadKey, base: threadBase } = await awaitStartup(threadSrv);
+      if (process.platform === 'linux') {
+        const threadsOf = pid => {
+          const m = /Threads:\s+(\d+)/.exec(readFileSync(`/proc/${pid}/status`, 'utf8'));
+          return m ? +m[1] : -1;
+        };
+        const threadSource = join(tmp, 'thread-source');
+        mkdirSync(threadSource, { recursive: true });
+        writeFileSync(join(threadSource, 'rule.md'), '---\ndescription: thread rule\n---\n\nBody\n');
+        // One settling probe before the baseline: the first import also pays for the
+        // single persistent worker's own threads.
+        await (await fetch(new URL('/api/import', threadBase), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${threadKey}` }, body: JSON.stringify({ source: threadSource }) })).text();
+        const before = threadsOf(threadSrv.pid);
+        for (let i = 0; i < 5; i++) {
+          const r = await fetch(new URL('/api/import', threadBase), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${threadKey}` }, body: JSON.stringify({ source: threadSource }) });
+          assert.equal(r.status, 200);
+          await r.text();
+        }
+        const after = threadsOf(threadSrv.pid);
+        assert.ok(before > 0 && after > 0, `thread counts were read (${before} -> ${after})`);
+        assert.ok(after - before <= 3, `the client keeps one worker: 5 imports added ${after - before} threads`);
+      }
+    } finally { await stopServer(threadSrv); }
+  }
+
   // Teardown escalation: a server that ignores SIGTERM (what a mutant can become) must still
   // die, and no process may be left behind. Windows cannot ignore SIGTERM, so the check is
   // POSIX-only.

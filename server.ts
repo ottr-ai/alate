@@ -121,6 +121,9 @@ db.exec('PRAGMA busy_timeout = 50')
 // in rollback-journal mode every /api/state, /api/files and /api/file read would wait
 // out the busy timeout and fail. WAL readers see the last committed snapshot instead.
 db.exec('PRAGMA journal_mode = WAL')
+// Cap the -wal sidecar at 64 MiB once checkpoints run, so a large import never leaves
+// a sidecar that grows with the snapshot size.
+db.exec('PRAGMA journal_size_limit = 67108864')
 if (process.platform !== 'win32') chmodSync(dbFile, 0o600)
 db.exec(`
   CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL);
