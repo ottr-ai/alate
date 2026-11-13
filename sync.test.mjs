@@ -495,6 +495,54 @@ try {
   assert.equal(r.status, 1);
   assert.match(r.stdout, /uvx package "mcp-atlassian" is not pinned to a version/);
 
+  // --- --compare: the labels and the deleted count come from an existing rules dir (the
+  // live layer's rules dir in a layer install), never from the fresh target; the compare
+  // dir stays read-only, the fresh target still receives every rule byte. ---
+  reset2();
+  put2('r.md', rule);
+  const liveDir = freshTarget('compare-live');
+  r = run(liveDir, ['--data', data2]);
+  assert.equal(r.status, 0, r.stderr);
+  const freshCmp = freshTarget('compare-fresh');
+  rmSync(resultsPath, { force: true });
+  r = runRes(freshCmp, ['--data', data2, '--compare', liveDir]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /0 updated, 0 added, 1 unchanged, 0 deleted in /, 'an unchanged rule is labeled against the compare dir');
+  assert.deepEqual(JSON.parse(readFileSync(resultsPath, 'utf8')).items, [
+    { item: 'r.md', status: 'unchanged', rule: null, at: null },
+  ]);
+  assert.equal(installed(freshCmp, 'r.md'), rule, 'the fresh target still receives the rule bytes');
+  assert.equal(installed(liveDir, 'r.md'), rule, 'the compare dir keeps its bytes');
+
+  // One changed rule and one new rule: exactly one updated and one added label.
+  writeFileSync(join(data2, 'r.md'), rule.replace('Body', 'New body'));
+  put2('n.md', rule);
+  rmSync(resultsPath, { force: true });
+  const freshCmp2 = freshTarget('compare-fresh2');
+  r = runRes(freshCmp2, ['--data', data2, '--compare', liveDir]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /updated  r\.md/);
+  assert.match(r.stdout, /added  n\.md/);
+  assert.match(r.stdout, /1 updated, 1 added, 0 unchanged, 0 deleted in /);
+  assert.deepEqual(JSON.parse(readFileSync(resultsPath, 'utf8')).items.map(i => [i.item, i.status]), [
+    ['n.md', 'added'],
+    ['r.md', 'updated'],
+  ]);
+  assert.equal(installed(freshCmp2, 'r.md'), rule.replace('Body', 'New body'), 'the fresh target holds the new bytes');
+  assert.equal(installed(liveDir, 'r.md'), rule, 'the compare dir keeps its bytes');
+
+  // One removed rule counts as deleted; the compare dir is never unlinked.
+  rmSync(join(data2, 'r.md'));
+  rmSync(join(data2, 'n.md'));
+  rmSync(resultsPath, { force: true });
+  const freshCmp3 = freshTarget('compare-fresh3');
+  r = runRes(freshCmp3, ['--data', data2, '--compare', liveDir]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /deleted  r\.md/);
+  assert.match(r.stdout, /0 updated, 0 added, 0 unchanged, 1 deleted in /);
+  assert.ok(existsSync(join(liveDir, 'r.md')), 'the compare dir keeps its dropped copy');
+  assert.ok(!existsSync(join(freshCmp3, 'r.md')), 'the fresh target leaves the dropped rule out');
+
   if (process.platform === 'win32') {
     const link = join(tmp, 'rules-link');
     symlinkSync(data, link, 'junction');

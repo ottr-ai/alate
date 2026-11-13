@@ -220,7 +220,7 @@ try {
       for (const value of ['Private body sentinel.', 'Prefix sentinel.', 'Comment sentinel.', 'bad_name', 'café']) {
         assert.ok(!result.stdout.includes(value) && !result.stderr.includes(value), 'diagnostics do not print field or body text');
       }
-      assert.match(result.stdout, /\d+ installed/, 'the surviving items still install');
+      assert.match(result.stdout, layer ? /\d+ (?:updated|added|unchanged), / : /\d+ installed/, 'the surviving items still install');
       // Layer mode writes into the new layer; in-place mode into the home itself.
       const runRoot = layer ? realpathSync(join(target, '.alate', 'current')) : target;
       assert.ok(readFileSync(join(runRoot, '.omp/agent/config.yml'), 'utf8').includes('changed/model'), 'the good snapshot change lands');
@@ -2584,6 +2584,84 @@ exit 0
     } finally {
       copyTree(fileURLToPath(new URL('./shipped/ottr', import.meta.url)), vendoredTree);
     }
+  }
+
+  // The layer install report compares with the live layer, not with the empty new layer:
+  // labels (added/updated/unchanged) and the deleted count come from the live layer, so an
+  // unchanged provision reports no changes and a first layer still reports every file as
+  // added. The nested sync.mjs run gets the live rules dir as its compare base.
+  if (process.platform !== 'win32') {
+    writeStub(0);
+    const tmpReal = realpathSync(tmp);
+    const ldataR = join(tmpReal, 'data-layer-report');
+    const putR = (rel, text) => { mkdirSync(dirname(join(ldataR, 'user', rel)), { recursive: true }); writeFileSync(join(ldataR, 'user', rel), text); };
+    putR('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putR('omp/agent/skills/rep/SKILL.md', skillText('rep'));
+    writeFileSync(join(ldataR, 'report-rule.md'), '---\ndescription: report rule\n---\n\nBody\n');
+    const homeR = join(tmpReal, 'layer-report-home');
+    const runR = (extra, env) => run(['--data', ldataR, ...extra], homeR, env);
+    const liveLayer = () => realpathSync(join(homeR, '.alate', 'current'));
+    const resultsPathR = join(tmp, 'results-layer-report.json');
+    const resultsEnvR = { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ALATE_PROVISION_RESULTS: resultsPathR };
+
+    // First layer: no live layer to compare with, everything counts as added.
+    let r = runR(['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /added  report-rule\.md/, 'the nested sync labels its rule against the absent live rules dir');
+    assert.match(r.stdout, /0 updated, \d+ added, 0 unchanged, 0 deleted in /, 'the first layer reports every user-layer file as added');
+
+    // An unchanged second install reports no adds and no updates.
+    rmSync(resultsPathR, { force: true });
+    r = runR(['--skip-plugins', '--layer'], resultsEnvR);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /0 updated, 0 added, \d+ unchanged, 0 deleted in /, 'an unchanged install updates nothing');
+    assert.match(r.stdout, /0 updated, 0 added, 1 unchanged, 0 deleted in /, 'the nested sync labels its unchanged rule');
+    let resR = JSON.parse(readFileSync(resultsPathR, 'utf8'));
+    let byKeyR = Object.fromEntries(resR.items.map(i => [i.item, i.status]));
+    assert.equal(byKeyR['user/omp/agent/config.yml'], 'unchanged');
+    assert.equal(byKeyR['user/omp/agent/skills/rep'], 'unchanged');
+    assert.equal(byKeyR['report-rule.md'], 'unchanged', 'the nested sync rule reports unchanged');
+
+    // One changed rule reports exactly one updated item.
+    writeFileSync(join(ldataR, 'report-rule.md'), '---\ndescription: report rule\n---\n\nBody v2\n');
+    rmSync(resultsPathR, { force: true });
+    r = runR(['--skip-plugins', '--layer'], resultsEnvR);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /updated  report-rule\.md/);
+    assert.equal((r.stdout.match(/1 updated, 0 added, 0 unchanged, 0 deleted in /g) ?? []).length, 1, 'exactly one updated rule');
+    resR = JSON.parse(readFileSync(resultsPathR, 'utf8'));
+    assert.equal(resR.items.find(i => i.item === 'report-rule.md')?.status, 'updated');
+
+    // One new skill file reports one added item; unchanged files stay unchanged.
+    putR('omp/agent/skills/more/SKILL.md', skillText('more'));
+    rmSync(resultsPathR, { force: true });
+    r = runR(['--skip-plugins', '--layer'], resultsEnvR);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /0 updated, 1 added, \d+ unchanged, 0 deleted in /);
+    resR = JSON.parse(readFileSync(resultsPathR, 'utf8'));
+    byKeyR = Object.fromEntries(resR.items.map(i => [i.item, i.status]));
+    assert.equal(byKeyR['user/omp/agent/skills/more'], 'added');
+    assert.equal(byKeyR['user/omp/agent/skills/rep'], 'unchanged');
+    assert.equal(byKeyR['report-rule.md'], 'unchanged');
+
+    // One removed rule reports one deleted file, and the live layer keeps its copy.
+    const liveBeforeR = liveLayer();
+    rmSync(join(ldataR, 'report-rule.md'));
+    r = runR(['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /deleted  report-rule\.md/);
+    assert.match(r.stdout, /0 updated, 0 added, 0 unchanged, 1 deleted in /, 'the removed rule counts as deleted');
+    assert.match(r.stdout, /0 updated, 0 added, \d+ unchanged, 0 deleted in /, 'the user layer is untouched by the rule removal');
+    assert.ok(existsSync(join(liveBeforeR, '.omp/agent/rules/report-rule.md')), 'the live layer keeps its dropped rule copy');
+    assert.ok(!existsSync(join(liveLayer(), '.omp/agent/rules/report-rule.md')), 'the new layer leaves the dropped rule out');
+
+    // One removed user-layer skill file counts as deleted too; the previous layer keeps it.
+    const liveBeforeR2 = liveLayer();
+    rmSync(join(ldataR, 'user/omp/agent/skills/more'), { recursive: true, force: true });
+    r = runR(['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /0 updated, 0 added, \d+ unchanged, 1 deleted in /, 'the dropped skill file counts as deleted');
+    assert.ok(existsSync(join(liveBeforeR2, '.omp/agent/skills/more/SKILL.md')), 'the previous layer keeps the dropped file');
   }
 
   // The server image must carry the scanner the gate refuses to run without; the two pins

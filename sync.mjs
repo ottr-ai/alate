@@ -4,9 +4,12 @@
 // a rule alate never installed is only reported.
 // Per-item contract (specs/provision-item-by-item.md): one rejected rule or one uncovered origin
 // stays out and is reported; every item that passed still installs. Global refusals stay fatal.
-// Usage: node sync.mjs [targetDir] [--data <dir>|--repo <owner/name[@ref]>]
+// Usage: node sync.mjs [targetDir] [--data <dir>|--repo <owner/name[@ref]>] [--compare <dir>]
 //   targetDir default: $PI_CODING_AGENT_DIR/rules, else ~/.omp/agent/rules
 //   data dir: --data <dir>, else --repo (shallow clone), else $ALATE_DATA, else ../agent-data beside this checkout
+//   --compare <dir>: label every rule against this existing rules dir (the live layer's, in
+//     a layer install) instead of the fresh target; the compare dir is read-only, a rule it
+//     drops counts as deleted there, and the fresh target still receives every rule byte.
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
@@ -14,9 +17,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { assertSourceInside, checkDestination, cleanupData, describeProblem, die, fingerprint, NOT_RULES, originGate, parseArgs, PROVISION_ENV, resolveDataDir, ruleProblems, writeProvisionResults } from './lib/data.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
-/** @typedef {{ item: string, status: 'installed' | 'unchanged' | 'rejected' | 'no-origin', rule: string | null, at: string | null, report?: string }} ProvisionItem */
+/** @typedef {{ item: string, status: 'installed' | 'unchanged' | 'added' | 'updated' | 'rejected' | 'no-origin', rule: string | null, at: string | null, report?: string }} ProvisionItem */
 
-const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--data', '--repo'], [], true));
+const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--data', '--repo', '--compare'], [], true));
 if (args.positional.length > 1) die('Usage: node sync.mjs [targetDir] [--data <dir>|--repo <owner/name[@ref]>]');
 const data = resolveDataDir(args, { allowClone: true });
 const target = args.positional[0] ?? join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.omp', 'agent'), 'rules');
@@ -83,14 +86,24 @@ try {
   // record — hand-made, or installed by an older alate — is only reported, never deleted.
   const manifestFile = join(target, '.alate-installed.json');
   checkDestination(target, manifestFile);
+  // --compare labels every rule against an existing rules dir (the live layer's rules dir,
+  // when install-user.mjs builds a layer) instead of the fresh target. Reads and the
+  // deletion count use the compare dir; writes and the rewritten record stay in the
+  // target, and the compare dir is never unlinked: the new layer simply leaves a dropped
+  // rule out.
+  const compare = args.values['--compare'];
+  const compareMode = compare !== undefined;
+  const compareBase = compareMode ? compare : target;
+  const recordedFile = compareMode ? join(compare, '.alate-installed.json') : manifestFile;
+  if (compareMode) checkDestination(compare, recordedFile);
   /** @type {Record<string, string>} */
   let recorded = {};
-  if (existsSync(manifestFile)) {
+  if (existsSync(recordedFile)) {
     try {
-      const parsed = JSON.parse(readFileSync(manifestFile, 'utf8'));
+      const parsed = JSON.parse(readFileSync(recordedFile, 'utf8'));
       recorded = Object.fromEntries(Object.entries(parsed).filter(([, v]) => typeof v === 'string'));
     } catch (err) {
-      console.error(`Ignoring unreadable ${manifestFile} (/** @type {Error} */ (err).message): dropped rules are only reported.`);
+      console.error(`Ignoring unreadable ${recordedFile} (${/** @type {Error} */ (err).message}): dropped rules are only reported.`);
     }
   }
 
@@ -98,41 +111,51 @@ try {
   // alias, or hardlink at one rule name cannot let earlier rule names through —
   // deletions included: never delete through a symlink, a hardlink alias or a directory.
   for (const name of rules.keys()) checkDestination(target, join(target, name));
-  for (const name of Object.keys(recorded)) if (!rules.has(name)) checkDestination(target, join(target, name));
+  for (const name of Object.keys(recorded)) if (!rules.has(name)) checkDestination(compareBase, join(compareBase, name));
 
   mkdirSync(target, { recursive: true });
   /** @type {Map<string, Buffer | null>} */
   const old = new Map();
   for (const [name] of rules) {
-    const dest = join(target, name);
-    old.set(name, existsSync(dest) ? readFileSync(dest) : null);
+    const src = join(compareBase, name);
+    if (compareMode) checkDestination(compare, src);
+    old.set(name, existsSync(src) ? readFileSync(src) : null);
   }
   let unchanged = 0;
+  const counts = { added: 0, updated: 0 };
   for (const [name, bytes] of rules) {
-    if (old.get(name)?.equals(bytes)) {
+    const oldBytes = old.get(name);
+    const same = oldBytes !== null && oldBytes.equals(bytes);
+    // Compare mode writes every rule: the fresh target needs the bytes even when the
+    // compare dir already holds them.
+    if (compareMode || !same) writeFileSync(join(target, name), bytes);
+    if (same) {
       unchanged++;
       failItem(name, 'unchanged');
       continue;
     }
-    writeFileSync(join(target, name), bytes);
-    console.log(`${old.get(name) ? 'updated' : 'added'}  ${name}`);
-    failItem(name, 'installed');
+    const label = oldBytes === null ? 'added' : 'updated';
+    console.log(`${label}  ${name}`);
+    failItem(name, compareMode ? label : 'installed');
+    if (compareMode) counts[label]++;
   }
   let deleted = 0;
   /** @type {Set<string>} */
   const gone = new Set();
   for (const name of Object.keys(recorded)) {
-    if (rules.has(name) || !existsSync(join(target, name))) continue;
-    if (fingerprint(name, readFileSync(join(target, name))) === recorded[name]) {
-      unlinkSync(join(target, name));
+    if (rules.has(name) || !existsSync(join(compareBase, name))) continue;
+    if (fingerprint(name, readFileSync(join(compareBase, name))) === recorded[name]) {
+      if (!compareMode) unlinkSync(join(target, name));
       console.log(`deleted  ${name}`);
       deleted++;
       gone.add(name);
     } else {
-      console.log(`changed here, kept: ${join(target, name)}`);
+      console.log(compareMode ? `changed here, left out: ${join(compare, name)}` : `changed here, kept: ${join(target, name)}`);
     }
   }
-  console.log(`${unchanged} unchanged, ${deleted} deleted in ${target}`);
+  console.log(compareMode
+    ? `${counts.updated} updated, ${counts.added} added, ${unchanged} unchanged, ${deleted} deleted in ${target}`
+    : `${unchanged} unchanged, ${deleted} deleted in ${target}`);
   // A rule alate did not own after this run stays and is reported: deleted ones are gone,
   // a kept-but-changed copy loses its record when the manifest is rewritten below.
   const stale = readdirSync(target).filter(name => isMd(name) && !rules.has(name) && !gone.has(name));

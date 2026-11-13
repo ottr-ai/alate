@@ -70,7 +70,11 @@ results and fails closed.
 }
 ```
 
-- `status`: `installed` | `unchanged` | `rejected` | `no-origin`.
+- `status`: `installed` | `unchanged` | `added` | `updated` | `rejected` | `no-origin`.
+  `added` and `updated` replace `installed` in layer mode, where every item is compared
+  with the live layer instead of the empty new layer: `added` when the live layer lacks
+  the file, `updated` when its bytes differ, `unchanged` when they are equal. `sync.mjs`
+  reports the same labels when install-user.mjs calls it with `--compare <dir>`.
 - `fatal: true` + `error`: the run was refused as a whole (see below). `items` may
   still hold results gathered before the refusal.
 
@@ -140,8 +144,8 @@ failure; `provisionedSha` still moves only on `ok`.
 - `dashState.provision` = `{ at, sha, ok, items, failures }`, persisted with the dashboard
   state, served by `GET /api/state`. `sha` is the imported snapshot sha, so a stale
   result set is never shown for a newer snapshot. Items are merged by key from both
-  scripts; the worse status wins (`rejected` > `no-origin` > `installed` >
-  `unchanged`).
+  scripts; the worse status wins (`rejected` > `no-origin` > `installed` = `added` =
+  `updated` > `unchanged`; `added`/`updated` are the layer-mode labels of `installed`).
 - `failures` lists the scripts that exited non-zero or closed with a null code, in
   run order, with their captured (redacted, truncated) output.
 - The dashboard shows each item's status next to it in the Rules, Skills, and User

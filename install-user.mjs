@@ -814,6 +814,18 @@ try {
       ? fingerprint(rel, Buffer.from(withoutDeploymentBlocks(readFileSync(dest).toString('utf8')), 'utf8'))
       : null;
 
+  // The report label against the live layer: added when it lacks the file, unchanged when
+  // the bytes that land in the new layer match it through the machine-fingerprint
+  // normalization, updated otherwise. The compare base is the live layer, never the fresh
+  // one being written.
+  const layerLabel = (rel, bytes, have) => {
+    if (have === null) return 'added';
+    const machineYaml = rel === 'omp/agent/config.yml' ? bytes.toString('utf8') : null;
+    let base = machineYaml === null ? null : withoutDeploymentBlocks(machineYaml);
+    if (base !== null) base = withoutMemoryBackend(base);
+    return fingerprint(rel, base === null ? bytes : Buffer.from(base, 'utf8')) === have ? 'unchanged' : 'updated';
+  };
+
   // Deletes the directories a deletion left empty, up to the mapped root (the top-level
   // dot-dir of the snapshot path, or ~/.ottr for worker lists); never the root itself.
   /** @param {string} dest @param {string} root @returns {void} */
@@ -914,7 +926,7 @@ try {
     // The item key rides on every plan entry, so the per-item results can aggregate by key.
     const itemKey = `user/${rel}`;
     if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey]);
-    else if (layerMode && have === want) plan.push(['installed', dest, src, itemKey]);
+    else if (layerMode && have === want) plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, have)]);
     else if (layerMode && have !== null && !record) {
       // A machine change beyond the deployment blocks is never a refusal in layer mode:
       // machine state wins and rides into the new layer, --force takes the snapshot instead.
@@ -923,11 +935,11 @@ try {
       // over them, so a turn-edited copy must never ride into the new layer. The snapshot
       // wins, --force or not; a deliberate change goes through a data-repo commit.
       if (pluginInstallFile(rel)) {
-        plan.push(['installed', dest, src, itemKey]);
+        plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, have)]);
         notes.push(`plugin install file takes the snapshot, machine change ignored: ${readDest}`);
       }
       else if (force) {
-        plan.push(['installed', dest, src, itemKey]);
+        plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, have)]);
         notes.push(`machine change overridden by --force: ${readDest}`);
       } else {
         // A kept file can hold paths re-rooted into the live layer at its install, so they
@@ -938,11 +950,11 @@ try {
         // snapshot does above, so the choice never rides along with the machine part.
         if (rel === 'omp/agent/config.yml') keptBytes = Buffer.from(withoutMemoryBackend(keptBytes.toString('utf8')), 'utf8');
         if (/\.(?:json|ya?ml)$/.test(rel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, /** @type {string} */ (newLayerDir)), 'utf8');
-        plan.push(['installed', dest, keptBytes, itemKey]);
+        plan.push(['installed', dest, keptBytes, itemKey, layerLabel(rel, keptBytes, have)]);
         notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
       }
     }
-    else if (have === null || record || force) plan.push(['installed', dest, src, itemKey]);
+    else if (have === null || record || force) plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, have)]);
     else conflicts.push(dest);
     current[rel] = want;
   }
@@ -963,7 +975,13 @@ try {
         shipped.add(`${project}/${file}`);
         const dest = join(writeRoot, '.ottr', 'workers', project, file);
         checkDestination(writeRoot, dest);
-        plan.push(existsSync(dest) && sameContent('', readFileSync(dest), src) ? ['unchanged', dest, null, `workers/${project}/${file}`] : ['installed', dest, src, `workers/${project}/${file}`]);
+        // The compare base is the machine side (the live layer in layer mode), never the
+        // fresh layer being written. Layer mode still writes every file and labels it;
+        // in-place mode skips a matching copy.
+        const liveCopy = join(readRoot, '.ottr', 'workers', project, file);
+        const haveWorker = existsSync(liveCopy) && sameContent('', readFileSync(liveCopy), src);
+        plan.push(haveWorker && !layerMode ? ['unchanged', dest, null, `workers/${project}/${file}`]
+          : ['installed', dest, src, `workers/${project}/${file}`, layerMode ? (haveWorker ? 'unchanged' : existsSync(liveCopy) ? 'updated' : 'added') : null]);
       }
     }
   }
@@ -1070,19 +1088,19 @@ try {
       const record = have !== null && have === last[rel];
       const itemKey = `user/${rel}`;
       if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey]);
-      else if (layerMode && have === want) plan.push(['installed', dest, readFileSync(srcPath), itemKey]);
+      else if (layerMode && have === want) plan.push(['installed', dest, readFileSync(srcPath), itemKey, layerLabel(rel, readFileSync(srcPath), have)]);
       else if (layerMode && have !== null && !record) {
         // Same machine-state rules as snapshot skills: layer mode keeps the machine copy,
         // --force takes the shipped bytes.
         if (force) {
-          plan.push(['installed', dest, readFileSync(srcPath), itemKey]);
+          plan.push(['installed', dest, readFileSync(srcPath), itemKey, layerLabel(rel, readFileSync(srcPath), have)]);
           notes.push(`machine change overridden by --force: ${readDest}`);
         } else {
-          plan.push(['installed', dest, readFileSync(readDest), itemKey]);
+          plan.push(['installed', dest, readFileSync(readDest), itemKey, layerLabel(rel, readFileSync(readDest), have)]);
           notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
         }
       }
-      else if (have === null || record || force) plan.push(['installed', dest, readFileSync(srcPath), itemKey]);
+      else if (have === null || record || force) plan.push(['installed', dest, readFileSync(srcPath), itemKey, layerLabel(rel, readFileSync(srcPath), have)]);
       else conflicts.push(dest);
       current[rel] = want;
     }
@@ -1127,15 +1145,30 @@ try {
       return !relRejected(rel.startsWith('.') ? rel.slice(1) : rel);
     });
   }
-  // A path the snapshot dropped: delete the machine copy when it still holds what alate last
-  // installed (nobody changed it since), keep it with a note when it changed here, and drop
-  // the record either way — alate no longer vouches for a path the snapshot lacks. --force
-  // never deletes: a file that does not match its record is never deleted. A fresh layer
-  // never carries dropped paths, so layer mode collects nothing here.
+  // A path the snapshot dropped: in-place mode deletes the machine copy when it still
+  // holds what alate last installed (nobody changed it since), keeps it with a note when
+  // it changed here, and drops the record either way — alate no longer vouches for a path
+  // the snapshot lacks. --force never deletes: a file that does not match its record is
+  // never deleted. Layer mode counts the live layer's dropped files for the summary and
+  // leaves every layer dir untouched on disk.
   /** @type {[string, string][]} */
   const deletions = [];
-  if (!layerMode) for (const [rel, fp] of Object.entries(last)) {
+  let layerDropped = 0;
+  for (const [rel, fp] of Object.entries(last)) {
     if (Object.hasOwn(current, rel) || typeof fp !== 'string') continue;
+    if (layerMode) {
+      // The new layer simply leaves a dropped file out; the live layer stays untouched on
+      // disk. A first layer (no resolvable live layer) has nothing to compare with.
+      if (readRoot === newLayerDir) continue;
+      const dest = join(readRoot, '.' + rel);
+      // Same guard as the machine reads in the walk: never follow an alias out of the
+      // live layer; a violated guard refuses the whole run.
+      checkDestination(readRoot, dest);
+      if (!existsSync(dest)) continue;
+      layerDropped++;
+      if (machineFingerprint(rel, dest) !== fp) notes.push(`changed here, left out of the new layer: ${dest}`);
+      continue;
+    }
     const dest = join(home, '.' + rel);
     // Same guard as installs: never delete through a symlink, a hardlink alias or a
     // directory, and never outside the home; a violated guard refuses the whole run.
@@ -1179,7 +1212,10 @@ try {
       const resultsPath = process.env[PROVISION_ENV] ? `${process.env[PROVISION_ENV]}.rules.json` : null;
       const rulesEnv = childEnv(['ALATE_TEST_SCRIPT_GATE']);
       if (resultsPath) rulesEnv[PROVISION_ENV] = resultsPath;
-      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), join(/** @type {string} */ (newLayerDir), '.omp', 'agent', 'rules'), '--data', data.dir], { encoding: 'utf8', env: rulesEnv });
+      // The nested sync labels its rules against the live layer's rules dir when there is
+      // one, so an unchanged layer install reports no rule changes.
+      const compareRules = readRoot === newLayerDir ? null : join(readRoot, '.omp', 'agent', 'rules');
+      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), join(/** @type {string} */ (newLayerDir), '.omp', 'agent', 'rules'), '--data', data.dir, ...(compareRules ? ['--compare', compareRules] : [])], { encoding: 'utf8', env: rulesEnv });
       let nested = null;
       if (resultsPath) {
         try { nested = JSON.parse(readFileSync(resultsPath, 'utf8')); } catch { nested = null; }
@@ -1195,11 +1231,15 @@ try {
       if (rules.stdout) console.log(rules.stdout);
     }
     let installed = 0, unchanged = 0;
-    for (const [kind, dest, bytes] of plan) {
-      if (kind === 'unchanged') { unchanged++; continue; }
+    // Layer mode counts the labels against the live layer; every plan entry still writes,
+    // because the fresh layer needs the bytes even when the live layer already holds them.
+    const labels = { added: 0, updated: 0, unchanged: 0 };
+    for (const [kind, dest, bytes, , label] of plan) {
+      if (!layerMode && kind === 'unchanged') { unchanged++; continue; }
       mkdirSync(dirname(dest), { recursive: true });
       writeFileSync(dest, /** @type {Buffer} */ (bytes));
       installed++;
+      if (layerMode) labels[label]++;
     }
     let deleted = 0;
     for (const [dest, root] of deletions) {
@@ -1208,7 +1248,8 @@ try {
       pruneEmptyDirs(dest, root);
       deleted++;
     }
-    console.log(`${installed} installed, ${unchanged} unchanged, ${deleted} deleted in ${writeRoot}`);
+    if (layerMode) console.log(`${labels.updated} updated, ${labels.added} added, ${labels.unchanged} unchanged, ${layerDropped} deleted in ${writeRoot}`);
+    else console.log(`${installed} installed, ${unchanged} unchanged, ${deleted} deleted in ${writeRoot}`);
     for (const note of notes) console.log(note);
 
     if (layerMode) {
@@ -1324,10 +1365,25 @@ try {
     };
     /** @type {Map<string, ProvisionItem['status']>} */
     const statuses = new Map();
-    for (const [kind, , , key] of plan) {
-      const item = itemKeyOf(key);
-      const prev = statuses.get(item);
-      statuses.set(item, kind === 'installed' || prev === 'installed' ? 'installed' : 'unchanged');
+    if (layerMode) {
+      // The labels aggregate per key: a key whose files are all added stays added, any
+      // other change makes it updated, unchanged files keep it unchanged.
+      const counts = new Map();
+      for (const [, , , key, label] of plan) {
+        const item = itemKeyOf(key);
+        const agg = counts.get(item) ?? { added: 0, changed: 0, total: 0 };
+        agg.total++;
+        if (label === 'added') agg.added++;
+        else if (label === 'updated') agg.changed++;
+        counts.set(item, agg);
+        statuses.set(item, agg.added === agg.total ? 'added' : agg.added + agg.changed > 0 ? 'updated' : 'unchanged');
+      }
+    } else {
+      for (const [kind, , , key] of plan) {
+        const item = itemKeyOf(key);
+        const prev = statuses.get(item);
+        statuses.set(item, kind === 'installed' || prev === 'installed' ? 'installed' : 'unchanged');
+      }
     }
     if (pluginsStatus) statuses.set('user/omp/plugins', pluginsStatus);
     for (const [key, status] of statuses) items.push({ item: key, status, rule: null, at: null });

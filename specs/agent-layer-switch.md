@@ -128,7 +128,8 @@ non-zero. A failure after the switch changes nothing about the switch itself.
   layer at its install. The copy re-roots them into the new layer, so clean-up can delete
   the live layer; paths into the shared home stay shared.
 - A path the snapshot dropped is simply absent from the new layer. Nothing is deleted from
-  the current layer; a pinned turn keeps reading it.
+  the current layer; a pinned turn keeps reading it. The summary counts the live layer's
+  dropped files as `deleted`.
 - Machine-side reads in layer mode never follow an alias out of the live layer. An agent
   turn runs with `HOME=<live layer>` on the shared home volume, so it can replace a
   snapshot path, or the layer's own install record, with a symlink, hard link, or special

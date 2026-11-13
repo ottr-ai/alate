@@ -62,7 +62,7 @@ interface Config {
 interface ProvisionResult { script: string; code: number | null; output: string; truncated: boolean }
 // One provisioning item's per-item outcome, as written to the results file by the script
 // (specs/provision-item-by-item.md). rule/at name the first finding for a failed item.
-interface ProvisionItem { item: string; status: 'installed' | 'unchanged' | 'rejected' | 'no-origin'; rule: string | null; at: string | null; report?: string }
+interface ProvisionItem { item: string; status: 'installed' | 'unchanged' | 'added' | 'updated' | 'rejected' | 'no-origin'; rule: string | null; at: string | null; report?: string }
 // Stored on the dashboard state after every provision run; served by GET /api/state. sha pins
 // the results to the imported snapshot, so a stale set is never shown for a newer snapshot.
 // failures holds the scripts of a whole-run failure (non-zero exit or null code) with their
@@ -127,8 +127,9 @@ let running = false
 let writing = false
 
 
-// Worse status wins when both scripts report the same item key.
-const STATUS_RANK: Record<ProvisionItem['status'], number> = { unchanged: 0, installed: 1, 'no-origin': 2, rejected: 3 }
+// Worse status wins when both scripts report the same item key. `added` and `updated` are
+// the layer-mode labels of `installed`: they rank the same.
+const STATUS_RANK: Record<ProvisionItem['status'], number> = { unchanged: 0, installed: 1, added: 1, updated: 1, 'no-origin': 2, rejected: 3 }
 const REPORT_CAP = 4000
 
 // Read one child's results file (specs/provision-item-by-item.md). A missing or unparseable
