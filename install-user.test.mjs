@@ -2686,6 +2686,18 @@ exit 0
     rmSync(join(liveB3, '.ottr/workers/web/apt.txt'));
     writeFileSync(join(liveB3, '.ottr/workers/web/apt.txt'), 'libnss3\n');
 
+    // A live layer whose rules dir a turn removed still provisions: every rule labels
+    // 'added' against the absent compare dir, and the new layer gets the rules back.
+    writeFileSync(join(ldataR, 'report-rule.md'), '---\ndescription: report rule\n---\n\nBody v3\n');
+    rmSync(join(liveLayer(), '.omp/agent/rules'), { recursive: true, force: true });
+    rmSync(resultsPathR, { force: true });
+    r = runR(['--skip-plugins', '--layer'], resultsEnvR);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /added  report-rule\.md/, 'the rule labels added against the absent compare dir');
+    assert.match(r.stdout, /0 updated, 1 added, 0 unchanged, 0 deleted in /, 'the absent compare dir labels every rule added');
+    resR = JSON.parse(readFileSync(resultsPathR, 'utf8'));
+    assert.equal(resR.items.find(i => i.item === 'report-rule.md')?.status, 'added');
+
     // A planted alias on the live rules dir refuses the run before the nested sync reads
     // anything: the compare root must resolve inside the live layer.
     const liveB4 = liveLayer();

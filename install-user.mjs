@@ -1235,11 +1235,12 @@ try {
       const rulesEnv = childEnv(['ALATE_TEST_SCRIPT_GATE']);
       if (resultsPath) rulesEnv[PROVISION_ENV] = resultsPath;
       // The nested sync labels its rules against the live layer's rules dir when there is
-      // one, so an unchanged layer install reports no rule changes. The dir is a read root
-      // for the child, not a write destination: resolve it (any planted symlink chain) and
+      // one, so an unchanged layer install reports no rule changes. An absent rules dir is
+      // fine: sync labels every rule 'added' against it. A present one is a read root for
+      // the child, not a write destination: resolve it (any planted symlink chain) and
       // refuse when it leaves the live layer, before sync reads anything.
       const compareRules = readRoot === newLayerDir ? null : join(readRoot, '.omp', 'agent', 'rules');
-      if (compareRules) assertSourceInside(readRoot, compareRules);
+      if (compareRules && lstatSync(compareRules, { throwIfNoEntry: false })) assertSourceInside(readRoot, compareRules);
       const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), join(/** @type {string} */ (newLayerDir), '.omp', 'agent', 'rules'), '--data', data.dir, ...(compareRules ? ['--compare', compareRules] : [])], { encoding: 'utf8', env: rulesEnv });
       let nested = null;
       if (resultsPath) {
