@@ -4866,7 +4866,7 @@ try {
           const err = new TypeError('fetch failed', { cause: Object.assign(new Error('connect ETIMEDOUT 1.2.3.4:443'), { code: 'ETIMEDOUT' }) });
           for (const k of proxyKeys) {
             process.env[k] = '1';
-            assert.equal(rowErrorText(err), 'fetch failed (ETIMEDOUT; proxy?)', `${k} alone trips the proxy hint`);
+            assert.equal(rowErrorText(err), 'fetch failed (ETIMEDOUT; set HTTP_PROXY/HTTPS_PROXY and NODE_USE_ENV_PROXY=1)', `${k} alone trips the proxy hint`);
             delete process.env[k];
           }
           assert.equal(rowErrorText(undefined), 'undefined', 'a missing error renders as text instead of throwing');
