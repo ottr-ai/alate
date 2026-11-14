@@ -6,6 +6,7 @@
 // turn reads; see specs/agent-layer-switch.md for the layout, link set, and cleanup rules.
 //   data dir: --data <dir>, else --repo (shallow clone), else $ALATE_DATA, else ../agent-data beside this checkout
 // Paths mirror the home directory minus the leading dot (user/omp/agent/config.yml -> ~/.omp/agent/config.yml).
+// A snapshot entry user/alate (any case) refuses the run: it would land in ~/.alate, alate's own state.
 // On a live machine omp's own state is the source of truth, so an existing file that differs is refused,
 // never overwritten, unless it still holds what alate last installed there (~/.alate/installed.json
 // records it): nobody changed it since, so the newer snapshot replaces it. --force overrides for a
@@ -617,6 +618,12 @@ try {
   // user/ itself is not a user-chosen root: a junction here would relocate the whole
   // snapshot outside the data dir, so it is pinned to canonical data.dir before walking.
   assertSourceInside(data.dir, userRoot);
+  // ~/.alate holds alate's own state (installed.json, the scan pass cache, layers). A
+  // snapshot entry user/alate would map onto it and plant scan verdicts or install records,
+  // so it refuses the run before any scan or write. The match ignores case: a
+  // case-insensitive file system maps user/Alate onto the same dir.
+  const reserved = readdirSync(userRoot).find(name => name.toLowerCase() === 'alate');
+  if (reserved !== undefined) throw new Error(`refusing: user/${reserved} would install into ~/.alate, alate's own state dir; remove it from the snapshot`);
   // Check source bytes on every install, before target reads, scanner calls, or layer creation.
   const skillDirs = collectSkillDirs(userRoot);
   // Origin gate (upstreams.json): fatal problems mean the gate itself is broken, so no origin

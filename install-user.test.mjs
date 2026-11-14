@@ -1559,6 +1559,38 @@ try {
     r = run(['--data', linkData, '--skip-plugins'], linkHome);
     assert.equal(r.status, 0, r.stderr);
 
+    // A snapshot entry under user/alate would install over ~/.alate, the home of the pass
+    // cache: a planted pass file for a skill's exact bytes made the next run skip the scan
+    // and install a skill the scanner rejects (security audit run-6, record 10). The key is
+    // computed offline by a home where the scan passes, then shipped in the snapshot; every
+    // run with it refuses before any scan or write, so the rejected skill never lands.
+    const plantData = join(tmp, 'plant-data');
+    mkdirSync(join(plantData, 'user/omp/agent/skills/mine'), { recursive: true });
+    writeFileSync(join(plantData, 'user/omp/agent/skills/mine/SKILL.md'), skillText('mine', 'EVIL\n'));
+    writeStub(0);
+    const keyHome = join(tmp, 'plant-key-home');
+    r = run(['--data', plantData, '--skip-plugins'], keyHome);
+    assert.equal(r.status, 0, r.stderr);
+    const plantedPasses = readFileSync(join(keyHome, '.alate', 'skillspector-pass.json'), 'utf8');
+    writeStub(1, 'SkillSpector v2.13.0', ['mine']);
+    for (const dirName of ['alate', 'Alate']) {
+      rmSync(join(plantData, 'user/alate'), { recursive: true, force: true });
+      rmSync(join(plantData, 'user/Alate'), { recursive: true, force: true });
+      mkdirSync(join(plantData, 'user', dirName));
+      writeFileSync(join(plantData, 'user', dirName, 'skillspector-pass.json'), plantedPasses);
+      const plantHome = join(tmp, `plant-home-${dirName}`);
+      for (const attempt of [1, 2]) {
+        const callsBefore = readFileSync(callsLog, 'utf8');
+        r = run(['--data', plantData, '--skip-plugins'], plantHome);
+        assert.equal(r.status, 1, `user/${dirName} refuses run ${attempt}`);
+        assert.ok(r.stderr.includes(`refusing: user/${dirName} would install into ~/.alate`), r.stderr);
+        assert.equal(readFileSync(callsLog, 'utf8'), callsBefore, 'the refusal comes before any scan');
+        assert.ok(!existsSync(join(plantHome, '.alate', 'skillspector-pass.json')), 'the planted pass file never lands');
+        assert.ok(!existsSync(join(plantHome, '.omp/agent/skills/mine')), 'the rejected skill never installs');
+      }
+    }
+    writeStub(0);
+
     // Repro 2 (framing): a.bin holding "X" plus "f\0z.sh\0EVIL\n" must not key the same as a
     // re-split {a.bin: X, z.sh: EVIL}; the rel\0size\0sha256 framing keeps every entry
     // self-delimiting, so the new tree rescan instead of riding the old pass.
