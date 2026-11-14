@@ -778,21 +778,36 @@ try {
       `the installed config.yml names no ungated skill folder: ${JSON.stringify(entry)}`);
     assert.match(r.stdout, /user\/omp\/agent\/config\.yml: dropped skills\.customDirectories/);
   }
+  // Only a mapping key counts: a comment or a scalar value that mentions customDirectories
+  // names no folder, so the config installs byte for byte over the earlier install and the
+  // home keeps its config.yml (send-back 3).
+  for (const cfg of [
+    'skills: # customDirectories are host-specific\n  enableSkillCommands: false\n',
+    'shellPath: /opt/customDirectories/bash\n',
+    'paths:\n  - /opt/customDirectories\n  - "/srv/customDirectories:x"\n  - \'customDirectories\'\nnote: see customDirectories # customDirectories: [x]\n',
+  ]) {
+    put('omp/agent/config.yml', cfg + memBase);
+    r = run(['--data', data, '--skip-plugins'], cdHome);
+    assert.equal(r.status, 0, `${JSON.stringify(cfg)}: ${r.stdout}${r.stderr}`);
+    assert.equal(readFileSync(join(cdHome, '.omp/agent/config.yml'), 'utf8'), cfg + memBase, `installs byte for byte: ${JSON.stringify(cfg)}`);
+    assert.doesNotMatch(r.stdout, /rejected|dropped skills\.customDirectories/);
+  }
   // Shapes the line-based strip cannot remove whole never install with the entry in them:
   // the fail-closed syntax gate rejects the config.yml item (a flow mapping, an escaped key
   // spelling YAML decodes to customDirectories, a multi-line flow list whose tail the strip
-  // would leave behind, an indented root mapping, CR-only line breaks), and a literal
-  // customDirectories the strip left (here under a dotted root key) is rejected too. The
-  // run exits non-zero, and a fresh home gets no config.yml.
-  for (const [cfg, why] of [
+  // would leave behind, an indented root mapping, CR-only line breaks), and a mapping key
+  // that names customDirectories after the strip (a dotted root key, a quoted key in a
+  // sequence entry) is rejected too. The run exits non-zero, and a fresh home gets no config.yml.
+  for (const [n, [cfg, why]] of [
     [`skills: {customDirectories: [${customDir}]}\n` + memBase, /unsupported YAML syntax \(node indicator "\{"\)/],
     [`skills:\n  "custom\\u0044irectories": [${customDir}]\n  enableSkillCommands: true\n` + memBase, /unsupported YAML syntax \(escape in a double-quoted scalar\)/],
     [`skills:\n  customDirectories: [\n    ${customDir},\n  ]\n  enableSkillCommands: true\n` + memBase, /unsupported YAML syntax \(node indicator "\]"\)/],
     [`  skills:\n    customDirectories:\n      - ${customDir}\n`, /unsupported YAML syntax \(indented root mapping\)/],
     [`skills:\r  customDirectories:\r    - ${customDir}\r`, /unsupported YAML syntax \(line break other than LF or CRLF\)/],
     [`skills.customDirectories:\n  - ${customDir}\n` + memBase, /skills\.customDirectories left after the strip/],
-  ]) {
-    const badHome = join(tmp, `custom-dirs-bad-${why.source.replace(/\W/g, '')}`);
+    [`items:\n  - 'customDirectories': # quoted key in a sequence entry\n    - ${customDir}\n` + memBase, /skills\.customDirectories left after the strip/],
+  ].entries()) {
+    const badHome = join(tmp, `custom-dirs-bad-${n}`);
     put('omp/agent/config.yml', cfg);
     r = run(['--data', data, '--skip-plugins'], badHome);
     assert.equal(r.status, 1, `unsupported syntax rejects the item: ${JSON.stringify(cfg)}`);

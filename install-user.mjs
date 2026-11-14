@@ -135,18 +135,33 @@ const SKILL_ROOT_NAMES = new Set(['skills', 'managed-skills']);
 // only omp's own block shape, so the bytes that install must pass configProblems: the
 // fail-closed yamlProblems gate that capture runs too (a flow mapping, an escaped key
 // spelling, a tag, an indented root, a CR-only line break are refused), and with that gate
-// passed every key is spelled as its raw bytes, so a literal customDirectories outside a
-// comment is an entry the strip did not remove (omp has no other key of that name). The
-// gate judges the whole text, deployment blocks included: they ride from the machine, which
-// a turn can write in layer mode.
+// passed every key is spelled as its raw bytes, so a mapping key that names customDirectories
+// (alone, dotted, or behind an invisible prefix) is an entry the strip did not remove; omp
+// has no other key of that name. Comments and scalar values are never keys. The gate judges
+// the whole text, deployment blocks included: they ride from the machine, which a turn can
+// write in layer mode.
 /** @param {string} text @returns {string[]} */
 const configProblems = text => {
   const problems = yamlProblems(text, '.omp/agent/config.yml');
   text.split('\n').forEach((line, i) => {
-    if (!line.trimStart().startsWith('#') && /customDirectories/i.test(line))
+    const key = lineKey(line);
+    if (key !== null && /customDirectories/i.test(key))
       problems.push(`~/.omp/agent/config.yml:${i + 1}: skills.customDirectories left after the strip; take it out of the data repo`);
   });
   return problems;
+};
+// The decoded mapping key a line opens, or null. A line that passed yamlProblems is an
+// indent, any `- ` sequence markers, then a plain or quoted key whose `:` comes before a
+// blank or the line end (one key per line: block style allows no second one). A comment
+// starts at a `#` after a blank, so a `#` ahead of the colon means the line opens no key.
+/** @param {string} line @returns {string | null} */
+const lineKey = line => {
+  let s = line.replace(/\r$/, '').trimStart();
+  while (/^-(?:[ \t]|$)/.test(s)) s = s.slice(1).trimStart();
+  if (s.startsWith('"')) return /^"([^"]*)"[ \t]*:(?:[ \t]|$)/.exec(s)?.[1] ?? null;
+  if (s.startsWith("'")) return /^'((?:[^']|'')*)'[ \t]*:(?:[ \t]|$)/.exec(s)?.[1].replaceAll("''", "'") ?? null;
+  const m = /^(.*?)[ \t]*:(?:[ \t]|$)/.exec(s);
+  return m && !s.startsWith('#') && !/[ \t]#/.test(m[1]) ? m[1] : null;
 };
 /** @param {string} text @returns {{ text: string, dropped: boolean, problems: string[] }} */
 const gatedConfig = text => {
