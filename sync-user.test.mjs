@@ -538,6 +538,16 @@ try {
       const line = ch === '%' ? 'k: %v\n' : `${ch} x\n`;
       bad(line, `node indicator "${ch}"`);
     }
+    // The line-based strips read LF/CRLF lines and a root at column 0: YAML's CR-only line
+    // break and an indented root mapping would hide a key from them (send-back 2), so both
+    // refuse; a comment or a document marker ahead of a column-0 root does not.
+    bad('skills:\r  customDirectories:\r    - /x\r', 'line break other than LF or CRLF');
+    bad('a: 1\nb: x\ry: z\n', 'line break other than LF or CRLF');
+    bad('  skills:\n    customDirectories:\n      - /x\n', 'indented root mapping');
+    bad('# note\n\n---\n  k: v\n', 'indented root mapping');
+    bad('\uFEFF  k: v\n', 'indented root mapping');
+    ok('# note\n  # indented comment\n\nk:\n  j: w\n', 'comments and blanks ahead of a column-0 root');
+    ok('\uFEFFk: v\r\n', 'a BOM ahead of a column-0 root');
 
     // The refusal message names the file, the line, and the construct.
     assert.deepEqual(issues('k: &a v\n'),

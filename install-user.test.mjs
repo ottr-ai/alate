@@ -780,22 +780,44 @@ try {
   }
   // Shapes the line-based strip cannot remove whole never install with the entry in them:
   // the fail-closed syntax gate rejects the config.yml item (a flow mapping, an escaped key
-  // spelling YAML decodes to customDirectories, and a multi-line flow list whose tail the
-  // strip would leave behind), the run exits non-zero, and a fresh home gets no config.yml.
+  // spelling YAML decodes to customDirectories, a multi-line flow list whose tail the strip
+  // would leave behind, an indented root mapping, CR-only line breaks), and a literal
+  // customDirectories the strip left (here under a dotted root key) is rejected too. The
+  // run exits non-zero, and a fresh home gets no config.yml.
   for (const [cfg, why] of [
-    [`skills: {customDirectories: [${customDir}]}\n`, /node indicator "\{"/],
-    [`skills:\n  "custom\\u0044irectories": [${customDir}]\n  enableSkillCommands: true\n`, /escape in a double-quoted scalar/],
-    [`skills:\n  customDirectories: [\n    ${customDir},\n  ]\n  enableSkillCommands: true\n`, /node indicator "\]"/],
+    [`skills: {customDirectories: [${customDir}]}\n` + memBase, /unsupported YAML syntax \(node indicator "\{"\)/],
+    [`skills:\n  "custom\\u0044irectories": [${customDir}]\n  enableSkillCommands: true\n` + memBase, /unsupported YAML syntax \(escape in a double-quoted scalar\)/],
+    [`skills:\n  customDirectories: [\n    ${customDir},\n  ]\n  enableSkillCommands: true\n` + memBase, /unsupported YAML syntax \(node indicator "\]"\)/],
+    [`  skills:\n    customDirectories:\n      - ${customDir}\n`, /unsupported YAML syntax \(indented root mapping\)/],
+    [`skills:\r  customDirectories:\r    - ${customDir}\r`, /unsupported YAML syntax \(line break other than LF or CRLF\)/],
+    [`skills.customDirectories:\n  - ${customDir}\n` + memBase, /skills\.customDirectories left after the strip/],
   ]) {
     const badHome = join(tmp, `custom-dirs-bad-${why.source.replace(/\W/g, '')}`);
-    put('omp/agent/config.yml', cfg + memBase);
+    put('omp/agent/config.yml', cfg);
     r = run(['--data', data, '--skip-plugins'], badHome);
     assert.equal(r.status, 1, `unsupported syntax rejects the item: ${JSON.stringify(cfg)}`);
-    assert.match(r.stdout, /user\/omp\/agent\/config\.yml — rejected: unsupported YAML syntax/);
+    assert.match(r.stdout, /user\/omp\/agent\/config\.yml — rejected: /);
     assert.match(r.stdout, why);
     assert.ok(!existsSync(join(badHome, '.omp/agent/config.yml')), `no config.yml installs from ${JSON.stringify(cfg)}`);
     assert.ok(existsSync(join(badHome, '.omp/agent/skills/mine/SKILL.md')), 'the other items still install');
   }
+  // The machine's deployment blocks ride into every installed config.yml, so the gate judges
+  // them too: a CR-only break inside a block would hide a root skills: key from the strip.
+  const cdBlockHome = join(tmp, 'custom-dirs-block-home');
+  put('omp/agent/config.yml', memBase);
+  r = run(['--data', data, '--skip-plugins'], cdBlockHome);
+  assert.equal(r.status, 0, r.stderr);
+  writeFileSync(join(cdBlockHome, '.omp/agent/config.yml'),
+    memBase + `hindsight:\n  apiUrl: http://nas:8888\rskills:\r  customDirectories:\r  - ${customDir}\n`);
+  put('omp/agent/config.yml', memBase.replace('zai/glm', 'zai/glm-next'));
+  r = run(['--data', data, '--skip-plugins'], cdBlockHome);
+  assert.equal(r.status, 1, 'a hidden key in the machine blocks rejects the item');
+  assert.match(r.stdout, /user\/omp\/agent\/config\.yml — rejected: unsupported YAML syntax \(line break other than LF or CRLF\)/);
+  assert.ok(!r.stdout.includes('nas:8888'), 'block content is never printed');
+  // A rejected item goes like a rejected skill: the copy that still matches its record is
+  // deleted, so the hidden key stops loading too.
+  assert.match(r.stdout, /deleted {2}\.omp\/agent\/config\.yml/);
+  assert.ok(!existsSync(join(cdBlockHome, '.omp/agent/config.yml')), 'the machine copy with the hidden key is gone');
   put('omp/agent/config.yml', v3);
 
   // Ottr's per-project package lists come from the data repo only: a changed list replaces the copy.

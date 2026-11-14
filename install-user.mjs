@@ -132,15 +132,27 @@ const SKILL_ROOT_NAMES = new Set(['skills', 'managed-skills']);
 // The config.yml that installs: no memory backend entry (a deployment choice) and no
 // skills.customDirectories entry. The skill gates judge only the SKILL_ROOT_NAMES folders,
 // so a folder named there would load skills that no gate saw. The line-based strip knows
-// only block style, so the result must pass the fail-closed yamlProblems gate that capture
-// runs too: a flow mapping, an escaped key spelling, a tag or a flow list the strip did not
-// remove whole is refused, never installed with the entry still in it. The deployment
-// blocks are machine settings outside the gate.
+// only omp's own block shape, so the bytes that install must pass configProblems: the
+// fail-closed yamlProblems gate that capture runs too (a flow mapping, an escaped key
+// spelling, a tag, an indented root, a CR-only line break are refused), and with that gate
+// passed every key is spelled as its raw bytes, so a literal customDirectories outside a
+// comment is an entry the strip did not remove (omp has no other key of that name). The
+// gate judges the whole text, deployment blocks included: they ride from the machine, which
+// a turn can write in layer mode.
+/** @param {string} text @returns {string[]} */
+const configProblems = text => {
+  const problems = yamlProblems(text, '.omp/agent/config.yml');
+  text.split('\n').forEach((line, i) => {
+    if (!line.trimStart().startsWith('#') && /customDirectories/i.test(line))
+      problems.push(`~/.omp/agent/config.yml:${i + 1}: skills.customDirectories left after the strip; take it out of the data repo`);
+  });
+  return problems;
+};
 /** @param {string} text @returns {{ text: string, dropped: boolean, problems: string[] }} */
 const gatedConfig = text => {
   const base = withoutMemoryBackend(text);
   const out = withoutHostPaths(base, { shellPath: false });
-  return { text: out, dropped: out !== base, problems: yamlProblems(withoutDeploymentBlocks(out), '.omp/agent/config.yml') };
+  return { text: out, dropped: out !== base, problems: configProblems(out) };
 };
 
 // Spawned children get allowlisted environments: ALATE_API_KEY and every other server
@@ -952,6 +964,15 @@ try {
       // snapshot that does not end in a newline still gets the blocks on a new line.
       const kept = base.kept[base.kept.length - 1] === '' ? base.kept.slice(0, -1) : base.kept;
       src = Buffer.from([...kept, ...deployed.dropped].join('\n'), 'utf8');
+      // The machine's blocks ride into the installed file, so the whole text passes the
+      // config gate (the snapshot alone passed it above); its messages carry line numbers
+      // only, never block content.
+      const problems = configProblems(src.toString('utf8'));
+      if (problems.length) {
+        const first = describeProblem(problems[0]);
+        failItem(`user/${rel}`, 'rejected', first.rule, first.at, problems.join('\n'));
+        continue;
+      }
     }
     // Rules restored through user/ land in the live agent rules dir, so every Markdown there
     // passes the same content gate sync.mjs applies to data-root rules: hidden characters
