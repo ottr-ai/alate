@@ -140,6 +140,37 @@ try {
   assert.match(r.stderr, /projects\.json: project name: invalid segment in \.\.\/outside/);
   assert.ok(!existsSync(join(data, 'outside')), 'nothing escaped the projects dir');
 
+  // (l) A laced .md snapshot is rejected per item: it never lands, a copy an earlier install
+  // put in the checkout is removed, passing items still install, and the run exits 1.
+  manifest({ contextFiles: ['AGENTS.md', 'clean.txt'], projects: { gamma: ['laced2.md'] } });
+  mkdirSync(join(ws, 'gamma'), { recursive: true });
+  put(data, 'projects/gamma/AGENTS.md', '# gamma \u202E rules\n');
+  put(data, 'projects/gamma/clean.txt', 'clean\n');
+  put(data, 'projects/gamma/laced2.md', '# laced \u202E two\n');
+  put(ws, 'gamma/laced2.md', '# laced \u202E two\n'); // installed by an earlier run: ours to remove
+  const resultsL = join(tmp, 'results-l.json');
+  r = run(withRoot, { env: { ...process.env, ALATE_PROVISION_RESULTS: resultsL } });
+  assert.equal(r.status, 1, `a laced md must fail the run: ${r.stdout}`);
+  assert.ok(!existsSync(machineOf('gamma/AGENTS.md')), 'a rejected file must not install');
+  assert.ok(!existsSync(machineOf('gamma/laced2.md')), 'a rejected copy installed before must be removed');
+  assert.equal(readFileSync(machineOf('gamma/clean.txt'), 'utf8'), 'clean\n', 'a passing item still installs');
+  assert.match(r.stdout, /removed projects\/gamma\/laced2\.md from .+ \(the snapshot copy installed here before is rejected now\)/, r.stdout);
+  assert.match(r.stdout, /Failed items:/, r.stdout);
+  assert.match(r.stdout, /projects\/gamma\/AGENTS\.md — rejected: .+ at .+/, r.stdout);
+  const parsedL = JSON.parse(readFileSync(resultsL, 'utf8'));
+  assert.equal(parsedL.fatal, false, 'a per-item rejection is not a whole-run refusal');
+  const rej = parsedL.items.find(it => it.item === 'projects/gamma/AGENTS.md');
+  assert.equal(rej.status, 'rejected');
+  assert.ok(rej.rule && rej.at, 'the rejection names the rule and position');
+  assert.ok(rej.report.length > 0, 'the rejection carries the problem lines');
+
+  // A machine-changed laced copy is not ours to delete: it stays with a note, still rejected.
+  put(ws, 'gamma/laced2.md', '# laced \u202E machine edition\n');
+  r = run(withRoot);
+  assert.equal(r.status, 1);
+  assert.equal(readFileSync(machineOf('gamma/laced2.md'), 'utf8'), '# laced \u202E machine edition\n');
+  assert.match(r.stdout, /kept projects\/gamma\/laced2\.md at .+ \(the machine copy changed since the last capture; it is not ours to delete\)/, r.stdout);
+
   // (j) No --root: the exact note on both streams, exit 0.
   r = run(['--data', data]);
   assert.equal(r.status, 0, r.stderr);

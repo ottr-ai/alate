@@ -41,7 +41,15 @@ Per listed file `<name>/<rel>` (the snapshot-relative key format of
    a source that escapes the snapshot (`assertSourceInside`), a destination that
    escapes the checkout, a symlink component below the checkout root, a directory
    or multiply-linked file at the destination (`checkDestination`).
-4. Decision with `fingerprint()` (CRLF-normalized sha256; `M` = machine bytes,
+4. Content gate for `.md`/`.mdc` snapshot items (per item, like the sibling
+   scripts): `ruleProblems(key, text, { frontmatter: false })` — project context is
+   never a rule, so the frontmatter requirement stays off. A file with problems is
+   rejected: it never installs, its item result is `rejected` with the first finding
+   as `rule`/`at` and the problem lines as the report, and the run exits 1 with a
+   "Failed items:" block. A checkout copy this path wrote or adopted before (it
+   matches the snapshot bytes or the baseline fingerprint) is removed with the
+   sibling deletion rule; a copy the machine changed stays with a note.
+5. Decision with `fingerprint()` (CRLF-normalized sha256; `M` = machine bytes,
    `S` = snapshot bytes, `B` = baseline fingerprint from
    `<root>/.alate/captured-projects.json`):
    - `fp(M) == fp(S)`: `unchanged`. Seed `B` when it differs. Never rewrite.
@@ -56,7 +64,7 @@ Per listed file `<name>/<rel>` (the snapshot-relative key format of
      copy changed since the last capture; its local changes were replaced)` and, when
      no baseline exists, `(no capture baseline exists; the machine copy differed from
      the snapshot)`. The log names both paths.
-5. After every write and every unchanged seeding: `B := fp(S)` for that key, written
+6. After every write and every unchanged seeding: `B := fp(S)` for that key, written
    to the shared baseline record (same file, same key format as `sync-projects.mjs`).
    A corrupt record: one note, the run treats every file as having no baseline, and
    the record is never rewritten (same as capture).
@@ -103,6 +111,10 @@ h. Destination symlink below the checkout root: refusal, nothing written.
 i. Manifest path `../outside`: refusal.
 j. No `--root`: the note, exit 0.
 k. Baseline record is written with the shared key format and the shared state file.
+l. A `.md` snapshot item with hidden characters: rejected per item, never installed;
+   a checkout copy that a previous install wrote is removed; a machine-changed laced
+   copy stays with a note; passing items still install; exit 1; the results file
+   carries the `rejected` item with `rule`, `at` and the report.
 
 ## Alternatives considered
 

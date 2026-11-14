@@ -11,14 +11,16 @@
 // '<name>/<rel>' key format): a machine copy that still holds the captured state is refreshed from
 // the snapshot, and a machine edit is replaced by the snapshot (the accepted gate decision: the
 // snapshot is the source of truth). The log line names every replacement, so nothing changes
-// silently. A refusal (invalid manifest, a path guard) writes nothing and exits 1.
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+// silently. A refusal (invalid manifest, a path guard) writes nothing and exits 1. Snapshot
+// .md/.mdc items pass the sibling hidden-character gate before they install: a laced file
+// stays out per item, a copy this path installed before is removed, and the run exits 1.
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { assertSourceInside, checkDestination, fingerprint, parseArgs, PROVISION_ENV, readBaselines, resolveDataDir, safeRel, writeBaselines, writeProvisionResults } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, describeProblem, fingerprint, parseArgs, PROVISION_ENV, readBaselines, resolveDataDir, ruleProblems, safeRel, writeBaselines, writeProvisionResults } from './lib/data.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
 /** @typedef {{ contextFiles: string[], projects: Record<string, string[]> }} ProjectsManifest */
-/** @typedef {{ item: string, status: 'added' | 'updated' | 'unchanged', rule: null, at: null }} ProvisionItem */
+/** @typedef {{ item: string, status: 'added' | 'updated' | 'unchanged' | 'rejected', rule: string | null, at: string | null, report?: string }} ProvisionItem */
 /** @typedef {{ key: string, dest: string, snapBytes: Buffer, fpSnap: string, status: 'added' | 'updated' | 'unchanged', log: string | null }} Plan */
 
 const NO_ROOT = 'install-projects: no --root; project files not provisioned';
@@ -93,6 +95,30 @@ function install(root, manifestPath) {
       const fpSnap = fingerprint(key, snapBytes);
       const base = baselines ? baselines[key] ?? null : null;
       const fpMachine = machine ? fingerprint(key, machine) : null;
+      // omp loads agent-context Markdown in project checkouts as always-on instructions too
+      // (AGENTS.md and friends), so .md/.mdc snapshot items get the sibling hidden-character
+      // gate: a laced file stays out per item — frontmatter: false, project context is never
+      // a rule — while every item that passes still installs, and the run exits 1. A checkout
+      // copy this install path wrote or adopted itself (it matches the snapshot or the capture
+      // baseline) is removed with the same deletion rule the sibling contracts use; a copy the
+      // machine changed is not ours to delete and stays with a note.
+      if (/\.mdc?$/.test(rel)) {
+        const problems = ruleProblems(key, snapBytes.toString('utf8'), { frontmatter: false });
+        if (problems.length) {
+          const first = describeProblem(problems[0]);
+          const report = problems.join('\n');
+          const entry = { item: `projects/${key}`, status: /** @type {const} */ ('rejected'), rule: first.rule, at: first.at };
+          entry.report = report.length > 4000 ? `${report.slice(0, 4000)}…` : report;
+          items.push(entry);
+          if (machine && (fpMachine === fpSnap || (base !== null && fpMachine === base))) {
+            unlinkSync(dest);
+            console.log(`removed projects/${key} from ${dest} (the snapshot copy installed here before is rejected now)`);
+          } else if (machine) {
+            console.log(`kept projects/${key} at ${dest} (the machine copy changed since the last capture; it is not ours to delete)`);
+          }
+          continue;
+        }
+      }
       let status;
       let log;
       if (machine && fpMachine === fpSnap) {
@@ -141,6 +167,12 @@ function install(root, manifestPath) {
     } catch (err) {
       console.log(`note: ${statePath}: could not write the capture baseline (${/** @type {Error} */ (err).message}); the next run judges without one`);
     }
+  }
+  const failed = items.filter(it => it.status === 'rejected');
+  if (failed.length) {
+    console.log('Failed items:');
+    for (const it of failed) console.log(`  ${it.item} — rejected: ${it.rule} at ${it.at}`);
+    process.exitCode = 1;
   }
 }
 
