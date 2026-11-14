@@ -45,7 +45,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeProvisionResults } from './lib/data.mjs';
+import { assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeProvisionResults, yamlProblems } from './lib/data.mjs';
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
@@ -128,6 +128,20 @@ const pluginInstallFile = rel =>
 // suppress nothing.
 const SKILLSPECTOR_REF = 'v2.13.0';
 const SKILL_ROOT_NAMES = new Set(['skills', 'managed-skills']);
+
+// The config.yml that installs: no memory backend entry (a deployment choice) and no
+// skills.customDirectories entry. The skill gates judge only the SKILL_ROOT_NAMES folders,
+// so a folder named there would load skills that no gate saw. The line-based strip knows
+// only block style, so the result must pass the fail-closed yamlProblems gate that capture
+// runs too: a flow mapping, an escaped key spelling, a tag or a flow list the strip did not
+// remove whole is refused, never installed with the entry still in it. The deployment
+// blocks are machine settings outside the gate.
+/** @param {string} text @returns {{ text: string, dropped: boolean, problems: string[] }} */
+const gatedConfig = text => {
+  const base = withoutMemoryBackend(text);
+  const out = withoutHostPaths(base, { shellPath: false });
+  return { text: out, dropped: out !== base, problems: yamlProblems(withoutDeploymentBlocks(out), '.omp/agent/config.yml') };
+};
 
 // Spawned children get allowlisted environments: ALATE_API_KEY and every other server
 // secret never crosses a spawn boundary (specs/skillspector-scanner-trust.md, contract 5).
@@ -905,14 +919,18 @@ try {
     // The memory backend is a deployment choice the board injects at spawn (--config overlay),
     // never snapshot content: capture strips it, and a snapshot captured by an older alate
     // loses the entry here, so the provisioned config.yml never carries the choice.
-    // skills.customDirectories goes too: the skill gates above judge only the skills and
-    // managed-skills folders, so a directory a hand-written snapshot names there would load
-    // skills that no gate saw. Capture strips the entry already (sync-user.mjs).
+    // skills.customDirectories goes too (gatedConfig above); capture strips it already, so
+    // only a hand-written snapshot carries it. A config the syntax gate refuses is rejected
+    // per item: no plan entry, no manifest record, no conflict.
     if (rel === 'omp/agent/config.yml') {
-      const text = withoutMemoryBackend(snapshot.toString('utf8'));
-      const gated = withoutHostPaths(text, { shellPath: false });
-      if (gated !== text) notes.push(`user/${rel}: dropped skills.customDirectories (the skill gates never judge those folders)`);
-      snapshot = Buffer.from(gated, 'utf8');
+      const gated = gatedConfig(snapshot.toString('utf8'));
+      if (gated.problems.length) {
+        const first = describeProblem(gated.problems[0]);
+        failItem(`user/${rel}`, 'rejected', first.rule, first.at, gated.problems.join('\n'));
+        continue;
+      }
+      if (gated.dropped) notes.push(`user/${rel}: dropped skills.customDirectories (the skill gates never judge those folders)`);
+      snapshot = Buffer.from(gated.text, 'utf8');
     }
     // The remap prefix must spell the home exactly as forTarget rooted it above, so a
     // non-canonical --home still re-roots once; the layer side is canonical.
@@ -986,17 +1004,22 @@ try {
         // shared home stay shared.
         let keptBytes = machineBytes;
         // The entry is a deployment choice: a kept config.yml loses it here, the same way the
-        // snapshot does above, so the choice never rides along with the machine part. A
-        // turn writes the live layer, so its customDirectories goes the same way too.
-        if (rel === 'omp/agent/config.yml') {
-          const text = withoutMemoryBackend(keptBytes.toString('utf8'));
-          const gated = withoutHostPaths(text, { shellPath: false });
-          if (gated !== text) notes.push(`user/${rel}: dropped skills.customDirectories from the kept machine copy (the skill gates never judge those folders)`);
-          keptBytes = Buffer.from(gated, 'utf8');
+        // snapshot does above, so the choice never rides along with the machine part. A turn
+        // writes the live layer, so its customDirectories goes the same way too, and a kept
+        // copy the syntax gate refuses gives way to the snapshot, which passed it above.
+        const gated = rel === 'omp/agent/config.yml' ? gatedConfig(keptBytes.toString('utf8')) : null;
+        if (gated?.problems.length) {
+          plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);
+          notes.push(`machine copy takes the snapshot, its YAML syntax is unsupported (${describeProblem(gated.problems[0]).rule}): ${readDest}`);
+        } else {
+          if (gated) {
+            if (gated.dropped) notes.push(`user/${rel}: dropped skills.customDirectories from the kept machine copy (the skill gates never judge those folders)`);
+            keptBytes = Buffer.from(gated.text, 'utf8');
+          }
+          if (/\.(?:json|ya?ml)$/.test(rel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, /** @type {string} */ (newLayerDir)), 'utf8');
+          plan.push(['installed', dest, keptBytes, itemKey, layerLabel(rel, keptBytes, haveLayer)]);
+          notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
         }
-        if (/\.(?:json|ya?ml)$/.test(rel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, /** @type {string} */ (newLayerDir)), 'utf8');
-        plan.push(['installed', dest, keptBytes, itemKey, layerLabel(rel, keptBytes, haveLayer)]);
-        notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
       }
     }
     else if (have === null || record || force) plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);

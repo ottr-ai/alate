@@ -1039,10 +1039,24 @@ try {
     assert.equal(withoutHostPaths('shellPath: /bin/bash\nskills:\n  customDirectories: [/x]\n  other: keep\n', { shellPath: false }),
       'shellPath: /bin/bash\nskills:\n  other: keep\n', 'shellPath: false keeps shellPath, drops customDirectories');
     assert.equal(withoutHostPaths('shellPath: /bin/bash\n', { shellPath: false }), 'shellPath: /bin/bash\n', 'shellPath alone stays');
+    // Shapes the review found (send-back 1): a comment on either key line, a tagged block
+    // list (items deeper or at the parent's indent), and a multi-line flow list whose
+    // continuation lines sit deeper. Each strips to valid block YAML; the comment after a
+    // value on the key line still stays with the next sibling.
+    for (const [input, want] of [
+      ['skills: # enabled skills\n  customDirectories:\n    - /a\n  other: keep\n', 'skills: # enabled skills\n  other: keep\n'],
+      ['skills:\n  customDirectories: # local paths\n    - /a\n  other: keep\n', 'skills:\n  other: keep\n'],
+      ['skills:\n  customDirectories: !!seq\n    - /a\n  other: keep\n', 'skills:\n  other: keep\n'],
+      ['skills:\n  customDirectories: !!seq\n  - /a\n  other: keep\n', 'skills:\n  other: keep\n'],
+      ['skills:\n  customDirectories: [\n    /a,\n    /b ]\n  # about other\n  other: keep\n', 'skills:\n  # about other\n  other: keep\n'],
+      ['skills: #\r\n  customDirectories: #c\r\n    - /a\r\n  other: keep\r\n', 'skills: #\r\n  other: keep\r\n'],
+      ['skills:#x\n  customDirectories: [/a]\n', 'skills:#x\n  customDirectories: [/a]\n'], // `skills:#x` is no key line: stays
+    ]) assert.equal(withoutHostPaths(input, { shellPath: false }), want, `strip of ${JSON.stringify(input)}`);
 
     const HOST_LINES = ['a: v', 'shellPath: C:\\x\\pwsh.exe', '"shellPath": C:\\x', "'shellPath': C:\\x",
       'skills:', '"skills":', "'skills':", '  customDirectories: [C:/u]', '  customDirectories:',
-      '  - C:/a', '    - C:/d', '  other: keep', '    deeper: x', '  # note', '', 'b: w', 'theme:', '  dark: x', '- C:/top'];
+      '  - C:/a', '    - C:/d', '  other: keep', '    deeper: x', '  # note', '', 'b: w', 'theme:', '  dark: x', '- C:/top',
+      'skills: # s', '  customDirectories: # c', '  customDirectories: !!seq', '  customDirectories: [', '    C:/e ]'];
     const PLAIN_LINES = HOST_LINES.filter(l => !/shellPath|[Cc]ustomDirectories|skills/.test(l));
     forAll((rand, size) => {
       const lines = Array.from({ length: Math.floor(rand() * (size + 4)) }, () => HOST_LINES[Math.floor(rand() * HOST_LINES.length)]);
@@ -1051,6 +1065,8 @@ try {
     }, text => {
       const out = withoutHostPaths(text);
       assert.equal(withoutHostPaths(out), out, `the strip is idempotent: ${JSON.stringify(text)}`);
+      const dirs = withoutHostPaths(text, { shellPath: false });
+      assert.equal(withoutHostPaths(dirs, { shellPath: false }), dirs, `the install strip is idempotent: ${JSON.stringify(text)}`);
     });
     forAll((rand, size) => {
       const lines = Array.from({ length: Math.floor(rand() * (size + 4)) }, () => PLAIN_LINES[Math.floor(rand() * PLAIN_LINES.length)]);

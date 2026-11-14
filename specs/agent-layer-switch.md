@@ -127,6 +127,8 @@ non-zero. A failure after the switch changes nothing about the switch itself.
   The `customDirectories:` entry under the top-level `skills:` key goes the same way from
   the snapshot and from a kept `config.yml`: the skill gates check only the `skills` and
   `managed-skills` folders, so a folder named there would load skills that no gate saw.
+  If a kept `config.yml` fails the YAML syntax gate after that drop, the snapshot
+  replaces it.
 - Plugin install files are the exception: a machine change to `omp/plugins/package.json`,
   `omp/plugins/bun.lock`, or anything under `omp/plugins/patches/` never rides into the
   new layer. The provisioner itself runs `bun install` over these files, so the snapshot

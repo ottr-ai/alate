@@ -757,19 +757,44 @@ try {
   // skills.customDirectories never installs (security audit run-6, record 11): the skill
   // gates judge only the skills and managed-skills folders, so a folder named there would
   // load a skill that no gate saw, here one whose SKILL.md has no frontmatter. Capture strips
-  // the entry; install strips it from a hand-written snapshot too, flow or block style, keeps
-  // the other skills: keys, and says so.
+  // the entry; install strips it from a hand-written snapshot too, keeps the other skills:
+  // keys, and says so. Every shape the strip removes whole installs valid block YAML: the
+  // one-line flow list, the block list, comments on both key lines, and a tagged list.
   const customDir = join(tmp, 'custom-skills');
   mkdirSync(join(customDir, 'ungated'), { recursive: true });
   writeFileSync(join(customDir, 'ungated', 'SKILL.md'), 'no frontmatter, never gated\n');
   const cdHome = join(tmp, 'custom-dirs-home');
-  for (const entry of [`  customDirectories: [${customDir}]\n`, `  customDirectories:\n    - ${customDir}\n`]) {
-    put('omp/agent/config.yml', `skills:\n${entry}  enableSkillCommands: true\n` + memBase);
+  for (const [head, entry] of [
+    ['skills:\n', `  customDirectories: [${customDir}]\n`],
+    ['skills:\n', `  customDirectories:\n    - ${customDir}\n`],
+    ['skills: # enabled skills\n', `  customDirectories: # local paths\n    - ${customDir}\n`],
+    ['skills:\n', `  customDirectories: !!seq\n    - ${customDir}\n`],
+    ['skills:\n', `  customDirectories: !!seq\n  - ${customDir}\n`],
+  ]) {
+    put('omp/agent/config.yml', `${head}${entry}  enableSkillCommands: true\n` + memBase);
     r = run(['--data', data, '--skip-plugins'], cdHome);
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(readFileSync(join(cdHome, '.omp/agent/config.yml'), 'utf8'), 'skills:\n  enableSkillCommands: true\n' + memBase,
+    assert.equal(readFileSync(join(cdHome, '.omp/agent/config.yml'), 'utf8'), `${head}  enableSkillCommands: true\n` + memBase,
       `the installed config.yml names no ungated skill folder: ${JSON.stringify(entry)}`);
     assert.match(r.stdout, /user\/omp\/agent\/config\.yml: dropped skills\.customDirectories/);
+  }
+  // Shapes the line-based strip cannot remove whole never install with the entry in them:
+  // the fail-closed syntax gate rejects the config.yml item (a flow mapping, an escaped key
+  // spelling YAML decodes to customDirectories, and a multi-line flow list whose tail the
+  // strip would leave behind), the run exits non-zero, and a fresh home gets no config.yml.
+  for (const [cfg, why] of [
+    [`skills: {customDirectories: [${customDir}]}\n`, /node indicator "\{"/],
+    [`skills:\n  "custom\\u0044irectories": [${customDir}]\n  enableSkillCommands: true\n`, /escape in a double-quoted scalar/],
+    [`skills:\n  customDirectories: [\n    ${customDir},\n  ]\n  enableSkillCommands: true\n`, /node indicator "\]"/],
+  ]) {
+    const badHome = join(tmp, `custom-dirs-bad-${why.source.replace(/\W/g, '')}`);
+    put('omp/agent/config.yml', cfg + memBase);
+    r = run(['--data', data, '--skip-plugins'], badHome);
+    assert.equal(r.status, 1, `unsupported syntax rejects the item: ${JSON.stringify(cfg)}`);
+    assert.match(r.stdout, /user\/omp\/agent\/config\.yml — rejected: unsupported YAML syntax/);
+    assert.match(r.stdout, why);
+    assert.ok(!existsSync(join(badHome, '.omp/agent/config.yml')), `no config.yml installs from ${JSON.stringify(cfg)}`);
+    assert.ok(existsSync(join(badHome, '.omp/agent/skills/mine/SKILL.md')), 'the other items still install');
   }
   put('omp/agent/config.yml', v3);
 
@@ -2089,6 +2114,16 @@ exit 0
       'the first layer takes the machine part of config.yml from the home');
     assert.match(r.stdout, /machine change kept: /);
     assert.equal(lgot(l4, '.ottr/workers/web/apt.txt'), 'libnss3\n', 'everything else starts from the snapshot');
+    // A kept machine copy the syntax gate refuses never rides into the new layer: a turn could
+    // name a folder through a flow mapping the strip cannot remove, so the snapshot (which
+    // passed the gate) takes its place, and the deployment blocks still ride along.
+    writeFileSync(join(l4, '.omp/agent/config.yml'),
+      `modelRoles:\n  default: zai/glm-5.3\nskills: {customDirectories: [${tmp}/turn-skills]}\n` + blocksL);
+    r = runL(layerHome4, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /machine copy takes the snapshot, its YAML syntax is unsupported \(unsupported YAML syntax \(node indicator "\{"\)/);
+    assert.equal(lgot(join(base4, 'layers', 'nogit-2'), '.omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm-5.3\n' + blocksL,
+      'the refused machine copy gives way to the snapshot, the blocks ride along');
 
     // Plugin install files drive the provisioner's own bun install, so a turn-edited copy
     // in the live layer never rides into the new layer: the snapshot wins, and a planted
