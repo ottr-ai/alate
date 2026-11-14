@@ -45,7 +45,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend, writeProvisionResults } from './lib/data.mjs';
+import { assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeProvisionResults } from './lib/data.mjs';
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
@@ -905,7 +905,15 @@ try {
     // The memory backend is a deployment choice the board injects at spawn (--config overlay),
     // never snapshot content: capture strips it, and a snapshot captured by an older alate
     // loses the entry here, so the provisioned config.yml never carries the choice.
-    if (rel === 'omp/agent/config.yml') snapshot = Buffer.from(withoutMemoryBackend(snapshot.toString('utf8')), 'utf8');
+    // skills.customDirectories goes too: the skill gates above judge only the skills and
+    // managed-skills folders, so a directory a hand-written snapshot names there would load
+    // skills that no gate saw. Capture strips the entry already (sync-user.mjs).
+    if (rel === 'omp/agent/config.yml') {
+      const text = withoutMemoryBackend(snapshot.toString('utf8'));
+      const gated = withoutHostPaths(text, { shellPath: false });
+      if (gated !== text) notes.push(`user/${rel}: dropped skills.customDirectories (the skill gates never judge those folders)`);
+      snapshot = Buffer.from(gated, 'utf8');
+    }
     // The remap prefix must spell the home exactly as forTarget rooted it above, so a
     // non-canonical --home still re-roots once; the layer side is canonical.
     if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) snapshot = Buffer.from(remapHomePaths(snapshot.toString('utf8'), home, /** @type {string} */ (newLayerDir)), 'utf8');
@@ -978,8 +986,14 @@ try {
         // shared home stay shared.
         let keptBytes = machineBytes;
         // The entry is a deployment choice: a kept config.yml loses it here, the same way the
-        // snapshot does above, so the choice never rides along with the machine part.
-        if (rel === 'omp/agent/config.yml') keptBytes = Buffer.from(withoutMemoryBackend(keptBytes.toString('utf8')), 'utf8');
+        // snapshot does above, so the choice never rides along with the machine part. A
+        // turn writes the live layer, so its customDirectories goes the same way too.
+        if (rel === 'omp/agent/config.yml') {
+          const text = withoutMemoryBackend(keptBytes.toString('utf8'));
+          const gated = withoutHostPaths(text, { shellPath: false });
+          if (gated !== text) notes.push(`user/${rel}: dropped skills.customDirectories from the kept machine copy (the skill gates never judge those folders)`);
+          keptBytes = Buffer.from(gated, 'utf8');
+        }
         if (/\.(?:json|ya?ml)$/.test(rel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, /** @type {string} */ (newLayerDir)), 'utf8');
         plan.push(['installed', dest, keptBytes, itemKey, layerLabel(rel, keptBytes, haveLayer)]);
         notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);

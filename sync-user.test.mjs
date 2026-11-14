@@ -1035,6 +1035,10 @@ try {
     ];
     for (const [input, want] of HOST_CASES)
       assert.equal(withoutHostPaths(input), want, `strip of ${JSON.stringify(input)}`);
+    // Install strips only the customDirectories entries (shellPath: false): shellPath stays.
+    assert.equal(withoutHostPaths('shellPath: /bin/bash\nskills:\n  customDirectories: [/x]\n  other: keep\n', { shellPath: false }),
+      'shellPath: /bin/bash\nskills:\n  other: keep\n', 'shellPath: false keeps shellPath, drops customDirectories');
+    assert.equal(withoutHostPaths('shellPath: /bin/bash\n', { shellPath: false }), 'shellPath: /bin/bash\n', 'shellPath alone stays');
 
     const HOST_LINES = ['a: v', 'shellPath: C:\\x\\pwsh.exe', '"shellPath": C:\\x', "'shellPath': C:\\x",
       'skills:', '"skills":', "'skills':", '  customDirectories: [C:/u]', '  customDirectories:',

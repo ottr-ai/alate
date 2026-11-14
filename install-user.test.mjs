@@ -753,6 +753,24 @@ try {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(join(memBlocksHome, '.omp/agent/config.yml'), 'utf8'), memBase + blocks,
     'the stale entry goes, the target deployment blocks stay');
+
+  // skills.customDirectories never installs (security audit run-6, record 11): the skill
+  // gates judge only the skills and managed-skills folders, so a folder named there would
+  // load a skill that no gate saw, here one whose SKILL.md has no frontmatter. Capture strips
+  // the entry; install strips it from a hand-written snapshot too, flow or block style, keeps
+  // the other skills: keys, and says so.
+  const customDir = join(tmp, 'custom-skills');
+  mkdirSync(join(customDir, 'ungated'), { recursive: true });
+  writeFileSync(join(customDir, 'ungated', 'SKILL.md'), 'no frontmatter, never gated\n');
+  const cdHome = join(tmp, 'custom-dirs-home');
+  for (const entry of [`  customDirectories: [${customDir}]\n`, `  customDirectories:\n    - ${customDir}\n`]) {
+    put('omp/agent/config.yml', `skills:\n${entry}  enableSkillCommands: true\n` + memBase);
+    r = run(['--data', data, '--skip-plugins'], cdHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(join(cdHome, '.omp/agent/config.yml'), 'utf8'), 'skills:\n  enableSkillCommands: true\n' + memBase,
+      `the installed config.yml names no ungated skill folder: ${JSON.stringify(entry)}`);
+    assert.match(r.stdout, /user\/omp\/agent\/config\.yml: dropped skills\.customDirectories/);
+  }
   put('omp/agent/config.yml', v3);
 
   // Ottr's per-project package lists come from the data repo only: a changed list replaces the copy.
@@ -1894,16 +1912,19 @@ exit 0
     // Machine state wins in layer mode: a machine edit beyond the deployment blocks rides
     // into the new layer (a top-level memoryBackend: key is machine content too — the strip
     // only removes backend: under memory:), the blocks ride along either way, and block
-    // content never reaches the output.
+    // content never reaches the output. A turn writes the live layer, so a customDirectories
+    // entry it adds never rides along: the skill gates never judge that folder.
     const blocksL = 'hindsight:\n  apiUrl: http://nas:8888\n  apiToken: $HINDSIGHT_TOKEN\n';
     const live6 = lgot(join(llayers, 'nogit-6'), '.omp/agent/config.yml');
-    writeFileSync(join(llayers, 'nogit-6', '.omp/agent/config.yml'), live6.replace('zai/glm', 'zai/glm-edited') + blocksL);
+    writeFileSync(join(llayers, 'nogit-6', '.omp/agent/config.yml'),
+      live6.replace('zai/glm', 'zai/glm-edited') + `skills:\n  customDirectories: [${tmp}/turn-skills]\n` + blocksL);
     putL('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm-5.3\n');
     r = runL(layerHome, ['--skip-plugins', '--layer']);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /machine change kept: /);
+    assert.match(r.stdout, /dropped skills\.customDirectories from the kept machine copy/);
     assert.equal(lgot(join(llayers, 'nogit-7'), '.omp/agent/config.yml'),
-      live6.replace('zai/glm', 'zai/glm-edited') + blocksL, 'machine bytes win and the blocks ride along');
+      live6.replace('zai/glm', 'zai/glm-edited') + blocksL, 'machine bytes win, the blocks ride along, customDirectories does not');
     assert.ok(!`${r.stdout}${r.stderr}`.includes('apiToken') && !`${r.stdout}${r.stderr}`.includes('nas:8888'),
       'deployment block content is never printed');
     r = runL(layerHome, ['--skip-plugins', '--layer', '--force']);

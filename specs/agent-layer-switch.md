@@ -124,6 +124,9 @@ non-zero. A failure after the switch changes nothing about the switch itself.
   `backend:` entry under the top-level `memory:` key, install drops the entry from the
   snapshot, a kept `config.yml` loses the entry the same way, and the layer comparison
   of the machine file ignores the entry, so it never rides along with the machine part.
+  The `customDirectories:` entry under the top-level `skills:` key goes the same way from
+  the snapshot and from a kept `config.yml`: the skill gates check only the `skills` and
+  `managed-skills` folders, so a folder named there would load skills that no gate saw.
 - Plugin install files are the exception: a machine change to `omp/plugins/package.json`,
   `omp/plugins/bun.lock`, or anything under `omp/plugins/patches/` never rides into the
   new layer. The provisioner itself runs `bun install` over these files, so the snapshot
