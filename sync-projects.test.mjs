@@ -29,8 +29,14 @@ try {
   put(tmp, 'beta/scripts/tool.mjs', '// helper\n');
   put(tmp, 'gamma/.keep', '');
   manifest({ contextFiles: ['AGENTS.md', 'CLAUDE.md'], projects: { alpha: [], beta: ['scripts/tool.mjs'] } });
-  put(data, 'projects/alpha/AGENTS.md', '# alpha rules v0\n'); // stale -> updated
+  const alphaV0 = '# alpha rules v0\n';
+  put(data, 'projects/alpha/AGENTS.md', alphaV0); // stale -> updated
   put(data, 'projects/alpha/OLD.md', '# stale\n'); // gone in project -> note only
+  // The snapshot predates the record: seed its baseline, because a first sight of a
+  // differing committed snapshot now refuses the file (a stale checkout copy must
+  // never capture over a newer commit).
+  mkdirSync(join(tmp, '.alate'), { recursive: true });
+  writeFileSync(join(tmp, '.alate', 'captured-projects.json'), JSON.stringify({ 'alpha/AGENTS.md': fingerprint('alpha/AGENTS.md', Buffer.from(alphaV0)) }));
 
   let r = run();
   assert.equal(r.status, 0, r.stderr);
@@ -148,25 +154,53 @@ try {
     assert.equal(readFileSync(snap3, 'utf8'), '# delta v4 board\n', 'a conflict leaves the snapshot alone');
     assert.equal(state()['delta/AGENTS.md'], base3('# delta v3 board\n'), 'a conflict leaves the baseline alone');
 
-    // (d) no record -> today's behavior, and the run says the file had no baseline.
+    // (d) no record, machine copy differs from the snapshot -> refuse this file:
+    // a capture cannot tell a machine edit from a stale checkout copy that never
+    // provisioned, and the stale case would overwrite a newer committed file.
+    rmSync(state3);
+    r3 = run3();
+    assert.equal(r3.status, 1);
+    assert.match(r3.stderr, /no baseline: the snapshot .+projects.delta.AGENTS\.md and the machine file .+delta.AGENTS\.md differ and no capture baseline exists; wrote nothing for it \(machine sha256 [0-9a-f]{64}, snapshot sha256 [0-9a-f]{64}\)/);
+    assert.equal(readFileSync(machine3, 'utf8'), '# delta v5 local\n', 'the refusal leaves the machine copy alone');
+    assert.equal(readFileSync(snap3, 'utf8'), '# delta v4 board\n', 'the refusal leaves the snapshot alone');
+    assert.equal(existsSync(state3), false, 'the refused file writes no baseline record');
+    assert.doesNotMatch(r3.stdout, /has no capture baseline/);
+
+    // (d2) a provision ends the refusal: the machine copy takes the snapshot, and the
+    // next capture seeds the baseline.
+    writeFileSync(machine3, '# delta v4 board\n');
+    r3 = run3();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /0 added, 0 updated, 1 unchanged/);
+    assert.equal(state()['delta/AGENTS.md'], base3('# delta v4 board\n'));
+
+    // (d3) no record, machine copy equals the snapshot: seeds the baseline, exits 0.
+    writeFileSync(machine3, '# delta v7 board\n');
+    writeFileSync(snap3, '# delta v7 board\n');
     rmSync(state3);
     r3 = run3();
     assert.equal(r3.status, 0, r3.stderr);
-    assert.match(r3.stdout, /projects\/delta\/AGENTS\.md has no capture baseline; captured the machine copy/);
-    assert.match(r3.stdout, /0 added, 1 updated, 0 unchanged/);
-    assert.equal(readFileSync(snap3, 'utf8'), '# delta v5 local\n');
-    assert.equal(state()['delta/AGENTS.md'], base3('# delta v5 local\n'));
+    assert.match(r3.stdout, /0 added, 0 updated, 1 unchanged/);
+    assert.doesNotMatch(r3.stdout, /has no capture baseline/);
+    assert.equal(state()['delta/AGENTS.md'], base3('# delta v7 board\n'));
 
     // A corrupt baseline file is named, never silently discarded: the run proceeds without
-    // baselines and leaves the file as it is.
+    // baselines and leaves the file as it is. Every file counts as having no baseline,
+    // so a differing machine copy is refused instead of captured.
     writeFileSync(state3, 'not json');
     writeFileSync(machine3, '# delta v6 local\n');
     r3 = run3();
-    assert.equal(r3.status, 0, r3.stderr);
+    assert.equal(r3.status, 1);
     assert.match(r3.stdout, /is not a valid capture baseline/);
-    assert.match(r3.stdout, /projects\/delta\/AGENTS\.md has no capture baseline/);
+    assert.match(r3.stderr, /no baseline: the snapshot .* and the machine file .* differ/);
     assert.equal(readFileSync(state3, 'utf8'), 'not json', 'a corrupt baseline file is left as-is');
-    assert.equal(readFileSync(snap3, 'utf8'), '# delta v6 local\n');
+    assert.equal(readFileSync(snap3, 'utf8'), '# delta v7 board\n');
+    // Equal bytes need no baseline judgment: the run exits 0 and the corrupt file
+    // stays as it is.
+    writeFileSync(machine3, '# delta v7 board\n');
+    r3 = run3();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.equal(readFileSync(state3, 'utf8'), 'not json', 'a corrupt baseline file is left as-is');
   }
 
   // safeRel pins: separator normalization, and every refusal with its exact label prefix.

@@ -411,7 +411,9 @@ if (!present) {
 // snapshot bytes this machine last wrote. The record tells a machine edit (capture) from a
 // snapshot that changed elsewhere (keep the committed snapshot; the next provision brings
 // it to the machine — the capture never writes the home). When both moved, the file is a
-// conflict and the run writes nothing: it never picks a side silently.
+// conflict and the run writes nothing: it never picks a side silently. A first sight of a
+// committed snapshot that differs, with no baseline, refuses that file too: the capture
+// never picks a side silently.
 const statePath = join(home, '.alate', 'captured-user.json');
 let baselines;
 let stateUsable = true;
@@ -435,6 +437,8 @@ try {
   /** @type {[string, string, Buffer, Buffer | null][]} */
   const staged = [];
   const conflicts = [];
+  /** @type {{ rel: string, to: string, fpMachine: string, fpSnap: string }[]} */
+  const noBaseStale = [];
   /** @type {Record<string, string>} */
   const updates = {};
   const keptNotes = [];
@@ -455,6 +459,15 @@ try {
       conflicts.push({ rel, to });
       continue;
     }
+    if (old && base === null) {
+      // First sight of a committed snapshot that differs, with no baseline: a capture
+      // cannot tell a machine edit from a stale machine copy that never provisioned,
+      // and the stale case overwrites a newer committed file (OTTR-944, 2026-11-14).
+      // Refuse this file; a provision writes the snapshot to the home and the next
+      // capture sees the file unchanged.
+      noBaseStale.push({ rel, to, fpMachine, fpSnap: /** @type {string} */ (fpSnap) });
+      continue;
+    }
     if (old && fpMachine === base) { // the committed snapshot moved; the machine still holds the captured state
       kept++;
       keptNotes.push(`note: user/${rel}: the committed snapshot changed elsewhere and this machine still holds the captured state; kept the snapshot (provision the machine to get it)`);
@@ -469,6 +482,11 @@ try {
     for (const { rel, to } of conflicts)
       console.error(`conflict: the snapshot ${to} and the machine file ${join(home, `.${rel}`)} both changed since the last capture; resolve by hand`);
     process.exit(1);
+  }
+  if (noBaseStale.length) {
+    console.error('Nothing synced for these files. Provision first or resolve by hand, then rerun:');
+    for (const m of noBaseStale)
+      console.error(`no baseline: the snapshot ${m.to} and the machine file ${join(home, `.${m.rel}`)} differ and no capture baseline exists; wrote nothing for it (machine sha256 ${m.fpMachine}, snapshot sha256 ${m.fpSnap})`);
   }
   for (const note of keptNotes) console.log(note);
   for (const [rel, to, bytes, old] of staged) {
@@ -487,6 +505,7 @@ try {
       console.log(`note: ${statePath}: could not write the capture baseline (${/** @type {Error} */ (err).message}); the next capture runs without one`);
     }
   }
+  if (noBaseStale.length) process.exit(1);
 } catch (err) {
   console.error(/** @type {Error} */ (err).message);
   process.exit(1);

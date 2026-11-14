@@ -650,15 +650,24 @@ try {
     return h;
   };
   const nopatch = plainHome('home-nopatch');
-  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', nopatch, '--data', data], { encoding: 'utf8' });
+  // A fresh data dir: the shared one holds snapshots from the main home, and a home
+  // with no baseline record must not overwrite them. The fresh dir proves the run
+  // still captures every present item, and the patch file stays out.
+  const dataNopatch = join(tmp, 'data-nopatch');
+  mkdirSync(dataNopatch);
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', nopatch, '--data', dataNopatch], { encoding: 'utf8' });
   assert.equal(r2.status, 0, `a home without patches/ must still capture: ${r2.stderr}`);
+  assert.ok(!existsSync(join(dataNopatch, 'user', patchPath)), 'a home without patches/ writes no patch file');
 
   // A normal fresh Windows omp home misses all four state files. Their absence is never
   // an error: each is one 'not present' line, and the present items still capture.
   const winhome = plainHome('home-windows-missing');
   const WIN_MISSING = ['.pi/agent/pix.json', '.omp/agent/skills', '.omp/marketplaces.json', '.omp/plugins/installed_plugins.json'];
   for (const it of WIN_MISSING) rmSync(join(winhome, it), { recursive: true });
-  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', winhome, '--data', data], { encoding: 'utf8' });
+  // A fresh data dir again: this home has no baseline record for the shared snapshots.
+  const dataWin = join(tmp, 'data-win');
+  mkdirSync(dataWin);
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', winhome, '--data', dataWin], { encoding: 'utf8' });
   assert.equal(r2.status, 0, `a fresh Windows home must capture: ${r2.stderr}`);
   for (const it of WIN_MISSING)
     assert.ok(r2.stdout.includes(`~/${it}: not present`), `no 'not present' line for ${it}: ${r2.stdout}`);
@@ -708,25 +717,30 @@ try {
   // worker that installs the snapshot cannot use them. Capture strips both and says so;
   // the rest of the config stays byte for byte.
   const shellhome = plainHome('home-shell-setup');
+  // A fresh data dir: this synthetic home holds no baseline record for the shared
+  // snapshots, and the stripped bytes must be read from what this run wrote.
+  const dataShell = join(tmp, 'data-shell');
+  mkdirSync(dataShell);
+  const snapShell = rel => readFileSync(join(dataShell, 'user', rel), 'utf8');
   // The card's shape: a YAML flow list. The strip runs before the fail-closed syntax gate,
   // so the machine-only entry leaves before the gate judges the portable text — a flow list
   // in a portable key (the gate refuses those) must not take the capture down with it.
   writeFileSync(join(shellhome, '.omp/agent/config.yml'),
     'modelRoles:\n  default: zai/glm\nshellPath: C:\\Program Files\\PowerShell\\7\\pwsh.exe\n' +
     'skills:\n  customDirectories: [C:/Users/dev/omp-skills]\n  theme: portable\n');
-  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', shellhome, '--data', data], { encoding: 'utf8' });
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', shellhome, '--data', dataShell], { encoding: 'utf8' });
   assert.equal(r2.status, 0, r2.stderr);
   assert.ok(r2.stdout.includes('note: user/omp/agent/config.yml: dropped the machine shell setup (shellPath, skills.customDirectories)'), r2.stdout);
-  const clean = snap('omp/agent/config.yml');
+  const clean = snapShell('omp/agent/config.yml');
   assert.ok(!/(?:shellPath|customDirectories|[A-Za-z]:[\\/])/.test(clean), `host paths survived the capture: ${clean}`);
   assert.equal(clean, 'modelRoles:\n  default: zai/glm\nskills:\n  theme: portable\n', clean);
   // The block style captures clean the same way.
   writeFileSync(join(shellhome, '.omp/agent/config.yml'),
     'modelRoles:\n  default: zai/glm\nshellPath: C:\\Program Files\\PowerShell\\7\\pwsh.exe\n' +
     'skills:\n  customDirectories:\n    - C:/Users/dev/omp-skills\n  theme: portable\n');
-  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', shellhome, '--data', data], { encoding: 'utf8' });
+  r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', shellhome, '--data', dataShell], { encoding: 'utf8' });
   assert.equal(r2.status, 0, r2.stderr);
-  assert.equal(snap('omp/agent/config.yml'), clean, 'block style strips to the same portable text');
+  assert.equal(snapShell('omp/agent/config.yml'), clean, 'block style strips to the same portable text');
   // A CRLF config (the Windows norm) strips too: kept lines keep their '\r', host keys leave.
   // A fresh data dir, so the snapshot bytes are written from this run: the shared data dir
   // would count the CRLF text as unchanged (normText is CRLF-stable) and keep the LF copy.
@@ -1128,21 +1142,45 @@ try {
     assert.equal(readFileSync(bMachine, 'utf8'), 'modelRoles:\n  default: local/glm\n', 'a conflict leaves the machine alone');
     assert.equal(JSON.parse(readFileSync(bState, 'utf8'))['omp/agent/config.yml'], bBase('modelRoles:\n  default: zai/glm\n'), 'a conflict leaves the baseline alone');
 
-    // No baseline record: today's behavior, and the run says the file had no baseline.
+    // No baseline record, machine copy differs from the snapshot -> refuse this file:
     rmSync(bState);
     writeFileSync(bMachine, 'modelRoles:\n  default: local2/glm\n');
     r3 = bRun();
-    assert.equal(r3.status, 0, r3.stderr);
-    assert.match(r3.stdout, /updated {2}user\/omp\/agent\/config\.yml/);
-    assert.match(r3.stdout, /1 captured files had no baseline and were captured as today/);
-    assert.equal(readFileSync(bSnap, 'utf8'), 'modelRoles:\n  default: local2/glm\n');
+    assert.equal(r3.status, 1);
+    assert.match(r3.stderr, /no baseline: the snapshot .+user.omp.agent.config.yml and the machine file .+.omp.agent.config.yml differ and no capture baseline exists; wrote nothing for it \(machine sha256 [0-9a-f]{64}, snapshot sha256 [0-9a-f]{64}\)/);
+    assert.equal(readFileSync(bSnap, 'utf8'), 'modelRoles:\n  default: board2/glm\n', 'the refusal leaves the snapshot alone');
+    assert.equal(readFileSync(bMachine, 'utf8'), 'modelRoles:\n  default: local2/glm\n', 'the refusal leaves the machine alone');
+    assert.doesNotMatch(r3.stdout, /had no baseline/);
 
-    // A corrupt baseline file is named, never silently discarded.
+    // a provision ends the refusal: the home takes the snapshot, and the next capture seeds the baseline
+    writeFileSync(bMachine, 'modelRoles:\n  default: board2/glm\n');
+    r3 = bRun();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /0 added, 0 updated, 1 unchanged/);
+    assert.equal(JSON.parse(readFileSync(bState, 'utf8'))['omp/agent/config.yml'], bBase('modelRoles:\n  default: board2/glm\n'), 'the provisioned pair seeds its baseline');
+
+    // no record, machine copy equals the snapshot: seeds the baseline, exits 0
+    writeFileSync(bMachine, 'modelRoles:\n  default: local4/glm\n');
+    writeFileSync(bSnap, 'modelRoles:\n  default: local4/glm\n');
+    rmSync(bState);
+    r3 = bRun();
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /0 added, 0 updated, 1 unchanged/);
+    assert.doesNotMatch(r3.stdout, /had no baseline/);
+    assert.equal(JSON.parse(readFileSync(bState, 'utf8'))['omp/agent/config.yml'], bBase('modelRoles:\n  default: local4/glm\n'), 'the unchanged pair seeds its baseline');
+
+    // A corrupt baseline file is named, never silently discarded; with it, a differing
+    // machine copy counts as no baseline and is refused, while equal bytes still pass.
     writeFileSync(bState, 'not json');
     writeFileSync(bMachine, 'modelRoles:\n  default: local3/glm\n');
     r3 = bRun();
-    assert.equal(r3.status, 0, r3.stderr);
+    assert.equal(r3.status, 1);
     assert.match(r3.stdout, /is not a valid capture baseline/);
+    assert.match(r3.stderr, /no baseline: the snapshot .* and the machine file .* differ/);
+    assert.equal(readFileSync(bState, 'utf8'), 'not json', 'a corrupt baseline file is left as-is');
+    writeFileSync(bMachine, 'modelRoles:\n  default: local4/glm\n');
+    r3 = bRun();
+    assert.equal(r3.status, 0, r3.stderr);
     assert.equal(readFileSync(bState, 'utf8'), 'not json', 'a corrupt baseline file is left as-is');
   }
 

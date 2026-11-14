@@ -98,6 +98,8 @@ if (problems.length) {
 // snapshot bytes this machine last wrote or adopted. The record tells a machine edit
 // (capture) from a snapshot that changed elsewhere (refresh the machine copy); when both
 // moved, the file is a conflict and the run writes nothing — it never picks a side silently.
+// A differing committed snapshot seen with no baseline refuses that file for the same
+// reason: the capture never picks a side silently.
 const statePath = join(root, '.alate', 'captured-projects.json');
 let baselines;
 let stateUsable = true;
@@ -113,6 +115,8 @@ const conflicts = [];
 /** @type {Record<string, string>} */
 const updates = {};
 const noBase = [];
+/** @type {{ key: string, from: string, to: string, fpMachine: string, fpSnap: string }[]} */
+const noBaseStale = [];
 let added = 0, updated = 0, unchanged = 0, refreshed = 0;
 for (const entry of plan) {
   const { key, from, to, bytes, old } = entry;
@@ -126,6 +130,15 @@ for (const entry of plan) {
   }
   if (old && base !== null && base !== fpMachine && base !== fpSnap) {
     conflicts.push({ key, from });
+    continue;
+  }
+  if (old && base === null) {
+    // First sight of a committed snapshot that differs, with no baseline: a capture
+    // cannot tell a machine edit from a stale checkout copy that never provisioned,
+    // and the stale case overwrites a newer committed file (OTTR-944, 2026-11-14).
+    // Refuse this file; a provision writes the snapshot and seeds the baseline, so
+    // the next capture sees the file unchanged.
+    noBaseStale.push({ key, from, to, fpMachine, fpSnap: /** @type {string} */ (fpSnap) });
     continue;
   }
   if (base === null) noBase.push(key);
@@ -158,6 +171,11 @@ for (const a of actions) {
   if (a.old) { updated++; console.log(`updated  ${relative(data.dir, a.to)}`); }
   else { added++; console.log(`added    ${relative(data.dir, a.to)}`); }
 }
+if (noBaseStale.length) {
+  console.error('Nothing synced for these files. Provision first or resolve by hand, then rerun:');
+  for (const m of noBaseStale)
+    console.error(`no baseline: the snapshot ${m.to} and the machine file ${m.from} differ and no capture baseline exists; wrote nothing for it (machine sha256 ${m.fpMachine}, snapshot sha256 ${m.fpSnap})`);
+}
 for (const key of noBase) console.log(`note: projects/${key} has no capture baseline; captured the machine copy`);
 notes.forEach(n => console.log(`note: ${n}`));
 console.log(`${added} added, ${updated} updated, ${unchanged} unchanged${refreshed ? `, ${refreshed} refreshed` : ''} from ${root}`);
@@ -168,3 +186,4 @@ if (stateUsable && Object.keys(updates).length) {
     console.log(`note: ${statePath}: could not write the capture baseline (${/** @type {Error} */ (err).message}); the next capture runs without one`);
   }
 }
+if (noBaseStale.length) process.exit(1);

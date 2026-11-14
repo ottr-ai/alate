@@ -14,6 +14,15 @@ per file, the fingerprint of the snapshot bytes that the capture last wrote or a
 Both scripts compare with `fingerprint()` from `lib/data.mjs` (sha256 over
 CRLF-normalized bytes), the repo's existing comparison rule.
 
+## First-sight refusal (OTTR-944)
+
+On 2026-11-14, board card OTTR-944 ran `sync-projects.mjs` on a workspace whose
+project checkouts never saw a provision (`install-projects.mjs` had no `--root`
+there), so no baseline record existed. The `B` missing fallback captured the stale
+checkout copies over newer committed files and reverted a committed fix
+(agent-data commit `80cc2a4`, AGEN-68). A first sight of a committed snapshot that
+differs now refuses the file, per the `B` missing rules below.
+
 ## The baseline record
 
 One JSON file per script, machine-local, outside the data repo. The file is a JSON map:
@@ -34,10 +43,25 @@ and `B` the baseline fingerprint. `fp()` is `fingerprint()` from `lib/data.mjs`.
 
 - `S` missing: capture, as today; the repo holds nothing to lose. Set `B := fp(M)`.
 - `fp(M) == fp(S)`: the file is unchanged. Seed or update `B` when it differed.
-- `B` missing (first run): capture as today. `sync-projects.mjs` prints, per file,
+- `B` missing and `S` missing (a file the repo does not hold yet): capture as
+  today; the repo holds nothing to lose. `sync-projects.mjs` prints, per file,
   `note: projects/<key> has no capture baseline; captured the machine copy`.
   `sync-user.mjs` prints one aggregate line when N > 0:
   `note: N captured files had no baseline and were captured as today`.
+- `B` missing and `S` present with `fp(M) != fp(S)`: a first sight of a committed
+  snapshot that differs. The capture cannot tell a machine edit from a stale
+  machine copy that never provisioned, and the stale case overwrites a newer
+  committed file. The run writes nothing for the file, still captures every other
+  file, and exits with code 1 at the end. stderr holds one line per refused file:
+
+  ```
+  no baseline: the snapshot <data>/projects/<key> and the machine file <machine path> differ and no capture baseline exists; wrote nothing for it (machine sha256 <fp(M)>, snapshot sha256 <fp(S)>)
+  ```
+
+  `sync-user.mjs` prints the same line with the snapshot path under `<data>/user/`
+  and the machine path under the home. A refused file gets no baseline entry. A
+  provision ends the refusal: the install script writes the snapshot bytes to the
+  machine copy, and the next capture sees the file unchanged and seeds `B`.
 - `fp(M) != B` and `fp(S) == B`: a local machine edit. Capture as today. Set `B := fp(M)`.
 - `fp(M) == B` and `fp(S) != B`: the snapshot changed elsewhere (another machine or the
   board). See "Refresh and keep".
@@ -79,11 +103,13 @@ The run exits with code 1.
 
 ## First run and corrupt state
 
-A missing record file is a first run: every file follows the `B` missing rule above.
+A missing record file is a first run: every file follows the `B` missing rules above.
 
 A corrupt or unreadable record file does not stop the capture. One note names the file,
-and the run then behaves like a first run. The corrupt file stays as-is; the run does
-not rewrite it.
+and the run then behaves like a first run: a machine copy that differs from its
+committed snapshot refuses as above, and a machine copy that equals its snapshot
+passes unchanged. No record is written while the file stays corrupt. The corrupt
+file stays as-is; the run does not rewrite it.
 
 ## Acceptance checks
 
@@ -96,7 +122,10 @@ b. The machine file changed since the last capture: the capture runs as today, a
    repo holds the machine bytes.
 c. A file changed on both sides: exit code 1, nothing is written anywhere, and stderr
    names both paths.
-d. No record exists: the behavior of today, plus the no-baseline note per file.
+d. No record exists: a machine copy that equals its committed snapshot seeds `B` and
+   the run exits 0; a machine copy that differs writes nothing, stderr names both
+   paths and both sha256 values, and the run exits 1; a file with no committed
+   snapshot still captures, with its no-baseline note.
 
 `sync-user.mjs` mirrors the cases:
 
@@ -105,7 +134,10 @@ e. The snapshot is newer and the machine copy is unchanged: the home stays untou
 f. The machine file changed since the last capture: the capture runs as today.
 g. A file changed on both sides: exit code 1, nothing is written anywhere, and stderr
    names both paths.
-h. No record exists: the behavior of today, plus the aggregate note.
+h. No record exists: a machine copy that equals its committed snapshot seeds `B` and
+   the run exits 0; a machine copy that differs writes nothing, stderr names both
+   paths and both sha256 values, and the run exits 1; a file with no committed
+   snapshot still captures, with the aggregate note.
 
 ## Alternatives considered
 
@@ -118,9 +150,10 @@ h. No record exists: the behavior of today, plus the aggregate note.
 
 ## Risks
 
-- A lost or deleted record file falls back to the behavior of today: the next capture
-  copies the machine bytes over a newer snapshot again. The incident can recur after a
-  record loss.
+- A lost or deleted record file falls back to the first-sight refusal: the next
+  capture refuses a machine copy that differs from its snapshot instead of copying
+  it. The overwrite cannot recur silently, but a genuine machine edit after a record
+  loss needs a provision or a hand resolution.
 - Two data repos that share one workspace root share one `captured-projects.json`. The
   key holds only the snapshot-relative path, so one repo's capture seeds the other
   repo's baselines.
