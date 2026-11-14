@@ -73,6 +73,7 @@ works for a dry run).
   as a gate (the gate tier runs inside the chain above at the fixed seed 42, 200 runs):
   `PROP_RUNS=20000 node server.test.mjs && PROP_RUNS=20000 node sync-projects.test.mjs && PROP_RUNS=20000 node sync-user.test.mjs && PROP_RUNS=20000 node clone.test.mjs && PROP_RUNS=20000 node zero-deps.test.mjs && PROP_RUNS=20000 node license-gate.test.mjs`.
   A failure there becomes a finding with the seed and the failing input; triage decides whether the code or the property is wrong.
+- A new test file joins `npm test`, the verified chain above, and `.github/workflows/sync.yml` in the commit that adds it. A test file that no chain entry runs is not verification.
 - Every mutant declared equivalent in a stryker config comment must cite its proof: a command with its output, or a pinned example input. Prose alone is not a proof.
 
 ## Releases and versions
@@ -93,6 +94,7 @@ release.
 ## Ready reports
 
 - Before a ready report, check the diff against every acceptance clause of the card, one clause at a time. List each clause with its evidence in the report.
+- A ready report states every deviation from the card or steer text, with the reason. The implementation ships the mechanism the card or steer names unless the ready report gives that reason.
 
 ## Merging changes
 
