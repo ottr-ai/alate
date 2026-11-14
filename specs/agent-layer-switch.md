@@ -78,10 +78,16 @@ Rules for the links:
    one at a time and never through a symlink. The layer dir itself must not exist yet, not
    even as a dangling link. A planted entry at the layer path, or a symlink at `.alate` or
    `.alate/layers`, refuses the run, and the run does not delete the planted entry. The run
-   creates `<layer>/.omp/agent/rules` the same way before step 4.
-4. Rules: spawn `node sync.mjs <layer>/.omp/agent/rules --data <dir>`. Its gates stay
-   fail-closed; a failure surfaces its error text, deletes the layer folder, and exits
-   non-zero with `current` unchanged.
+   creates `<layer>/.omp/agent/rules` the same way before step 4. The run records the
+   device and inode of the layer dir and of the rules dir. Each later write, the scan
+   clean-up, the plugins install, the link set, and the switch first check that the layer
+   path still names the recorded layer dir. A layer that a turn replaced (by a symlink or
+   by a fresh dir) refuses the run, and the failure path leaves the replacement in place.
+4. Rules: spawn `node sync.mjs <layer>/.omp/agent/rules --data <dir> --within <home> --pin
+   <dev:ino>`. With `--within`, each sync write refuses a symlink on its whole path below
+   the home. With `--pin`, each sync write refuses when the rules dir has a different
+   identity. Its gates stay fail-closed; a failure surfaces its error text, deletes the
+   layer folder, and exits non-zero with `current` unchanged.
 5. Write the user snapshot and the worker lists into the layer (conflict rule below).
 6. SkillSpector scan of the skills inside the installed layer, same pin, same flags
    (`--no-llm --fail-on-findings --use-shipped-baseline`). A failed scan deletes the layer
@@ -245,6 +251,9 @@ them at turn end.
 - A symlink planted at `layers/nogit-9007199254740992` does not receive the layer: the run
   switches to `layers/nogit-9007199254740993`. A symlinked `.alate/layers` refuses the run,
   and the link target receives no file.
+- While the test gate holds the nested sync, a turn renames the layer away and puts a symlink
+  to it, or a fresh dir, at the layer path. The sync refuses, no rule lands in either dir,
+  the replacement stays, and `current` does not switch.
 - The non-layer suite (`install-user.test.mjs`) passes unchanged.
 
 ## Non-goals
@@ -260,13 +269,14 @@ them at turn end.
 - The ottr server, both workers, and the alate container write the shared home as one user
   (`/root`). Thus file modes cannot keep a turn out of a layer that the provisioner builds.
   A symlink that alate follows resolves in the mount namespace of the alate container.
-- Mitigation: each layer-mode write (`writeFileInside` in `lib/data.mjs`) creates its
-  missing dirs without a symlink, repeats `checkDestination` immediately before the open,
-  and opens with `O_NOFOLLOW`. The layer record opens with `O_EXCL`. `sync.mjs` writes its
-  rules and its record the same way.
-- Limit: Node has no `openat`. A turn that swaps a dir component for a symlink between the
-  last check and the open can still redirect one write. The plugins install (`bun`) and the
-  SkillSpector scan also use paths in the layer without these checks.
+- Mitigation: each layer-mode write (`writeFileInside` in `lib/data.mjs`) checks the
+  recorded identity of the layer dir, creates its missing dirs without a symlink below the
+  home, repeats `checkDestination` from the home immediately before the open, and opens
+  with `O_NOFOLLOW`. The layer record opens with `O_EXCL`. `sync.mjs` writes its rules and
+  its record the same way, with the home as root and the rules dir identity as pin.
+- Limit: Node has no `openat`. A turn that swaps a dir component between the last check
+  and the open can still redirect one write. The plugins install (`bun`) and the
+  SkillSpector scan check the layer identity before they start, but not during their run.
 - Alternatives considered: build the layer in a `mkdtemp` dir and rename it into `layers/`.
   Rejected: the shared home has no dir that only the provisioner can write, and a dir
   outside the volume cannot be renamed into it. The exclusive create already refuses

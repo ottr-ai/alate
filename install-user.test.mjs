@@ -3,14 +3,15 @@
 // Offline by design: every invocation uses --skip-plugins.
 // The examples/data install workflow also skips plugins; neither proves Bun installation.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import fs, { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs, { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir, homedir, availableParallelism } from 'node:os';
 import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { CAPTURE_ROOTS, fingerprint, forAll, forTarget, keepTemp, makeDirInside, nextLayerCounter, readMachineFile, remapHomePaths, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, writeFileInside } from './lib/data.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
+import { CAPTURE_ROOTS, dirIdentity, fingerprint, forAll, forTarget, keepTemp, makeDirInside, nextLayerCounter, readMachineFile, remapHomePaths, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, writeFileInside } from './lib/data.mjs';
 import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-install-'));
@@ -2529,6 +2530,47 @@ exit 0
     assert.match(r.stderr, /is a symbolic link below the chosen root/);
     assert.deepEqual(readdirSync(plantOut), [], 'a symlinked layers dir never receives the layer');
     assert.equal(lstatSync(join(plantHome2, '.alate', 'current'), { throwIfNoEntry: false }), undefined, 'current never switches');
+    // A layer swapped after its creation never receives a write. The test gate holds the
+    // nested sync after install-user created the layer and its rules dir; the layer is then
+    // renamed away and replaced by a symlink to it or by a fresh directory. The sync refuses,
+    // current never switches, nothing lands in either dir, and the replacement stays.
+    const runLGated = (h, extra, gate) => new Promise(done => {
+      const child = spawn(process.execPath, [join(scriptDir, 'install-user.mjs'), '--home', h, '--data', ldata, ...extra], {
+        env: sandbox({ ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), SKILLSPECTOR_BIN: '', ALATE_TEST_SCRIPT_GATE: gate }),
+      });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', d => { stdout += d; });
+      child.stderr.on('data', d => { stderr += d; });
+      child.on('close', status => done({ status, stdout, stderr }));
+    });
+    for (const [kind, replace, refusal] of [
+      ['symlink', (layer, moved) => symlinkSync(moved, layer), /is a symbolic link below the chosen root/],
+      ['directory', layer => mkdirSync(join(layer, '.omp', 'agent', 'rules'), { recursive: true }), /was replaced during the install/],
+    ]) {
+      const swapHome = join(tmpReal, `layer-home-swap-${kind}`);
+      const swapLayer = join(swapHome, '.alate', 'layers', 'nogit-1');
+      const moved = join(tmpReal, `layer-swap-moved-${kind}`);
+      const gate = join(tmpReal, `layer-swap-gate-${kind}`);
+      writeFileSync(gate, '');
+      const pending = runLGated(swapHome, ['--skip-plugins', '--layer'], gate);
+      const deadline = Date.now() + 60_000;
+      while (!existsSync(join(swapLayer, '.omp', 'agent', 'rules'))) {
+        assert.ok(Date.now() < deadline, `the ${kind} swap run never created its rules dir`);
+        await delay(20);
+      }
+      await delay(500); // the parent pins the rules dir and blocks in spawnSync on the gated sync
+      renameSync(swapLayer, moved);
+      replace(swapLayer, moved);
+      rmSync(gate);
+      r = await pending;
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(r.stderr, new RegExp(`rules install failed:[\\s\\S]*${refusal.source}`), `the gated sync refuses the ${kind} swap`);
+      assert.match(r.stderr, /left in place: .*no longer the layer this run created/);
+      assert.deepEqual(readdirSync(join(moved, '.omp', 'agent', 'rules')), [], `no rule lands in the renamed layer (${kind})`);
+      assert.deepEqual(readdirSync(join(swapLayer, '.omp', 'agent', 'rules')), [], `no rule lands in the replacement (${kind})`);
+      assert.equal(lstatSync(swapLayer).isSymbolicLink(), kind === 'symlink', `the ${kind} replacement stays in place`);
+      assert.equal(lstatSync(join(swapHome, '.alate', 'current'), { throwIfNoEntry: false }), undefined, `current never switches (${kind})`);
+    }
     // The write helpers never adopt a planted path below their root: an existing exclusive
     // leaf (dangling links included), a symlink or file at a directory component, or a
     // symlink at the file leaf throws, and nothing lands outside the root.
@@ -2550,6 +2592,15 @@ exit 0
     assert.equal(readFileSync(join(wroot, 'taken', 'a', 'b', 'f'), 'utf8'), 'zz', 'a plain write creates missing dirs and replaces the file');
     assert.throws(() => writeFileInside(wroot, join(wroot, 'taken', 'a', 'b', 'f'), 'w', true), /EEXIST/);
     assert.deepEqual(readdirSync(plantOut), [], 'no helper wrote through a planted link');
+    // A pinned write refuses a directory that was renamed away and replaced after its pin.
+    const pinDir = join(wroot, 'pinned');
+    mkdirSync(pinDir);
+    const dirPin = { dir: pinDir, id: dirIdentity(pinDir) };
+    writeFileInside(wroot, join(pinDir, 'f'), 'ok', false, dirPin);
+    renameSync(pinDir, join(wroot, 'pinned-moved'));
+    mkdirSync(pinDir);
+    assert.throws(() => writeFileInside(wroot, join(pinDir, 'f'), 'no', false, dirPin), /was replaced during the install/);
+    assert.deepEqual(readdirSync(pinDir), [], 'the replacement receives no write');
 
     // The layer helpers are pure: the counter never collides with the names it read, stays
     // exact past 2^53, and the home remap is reversible and inert without a boundary occurrence.

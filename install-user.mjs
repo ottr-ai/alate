@@ -45,7 +45,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, makeDirInside, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeFileInside, writeProvisionResults, yamlProblems } from './lib/data.mjs';
+import { assertDirIdentity, assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, dirIdentity, fingerprint, forTarget, makeDirInside, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeFileInside, writeProvisionResults, yamlProblems } from './lib/data.mjs';
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
@@ -1309,6 +1309,11 @@ try {
   // untouched; the switch itself is one atomic rename.
   let switched = false;
   let layerCreated = false;
+  /** @type {{ dir: string, id: string } | null} */
+  let layerPin = null;
+  // A turn can rename the fresh layer away and put a symlink or its own directory at the
+  // path while the build runs; every later write and the switch check the pinned identity.
+  const assertLayer = () => { if (layerPin) assertDirIdentity(layerPin.dir, layerPin.id); };
   let tmpLink = null;
   try {
     if (layerMode) {
@@ -1318,9 +1323,14 @@ try {
       // the run, where a recursive mkdir adopted it and every write landed at the link target.
       makeDirInside(layerHome, /** @type {string} */ (newLayerDir), true);
       layerCreated = true;
-      // The nested sync treats its target as a chosen root and creates it recursively, so
-      // the rules dir is created here first, inside the layer and through no link.
-      makeDirInside(/** @type {string} */ (newLayerDir), join(/** @type {string} */ (newLayerDir), '.omp', 'agent', 'rules'));
+      layerPin = { dir: /** @type {string} */ (newLayerDir), id: dirIdentity(/** @type {string} */ (newLayerDir)) };
+      // The rules dir is created here, through no link, and the nested sync gets its identity
+      // plus the home as the root of its path checks: a layer swapped while sync runs refuses.
+      const rulesDir = join(/** @type {string} */ (newLayerDir), '.omp', 'agent', 'rules');
+      makeDirInside(layerHome, rulesDir);
+      // Pin first, then check the layer: a swap before the pin fails the layer check.
+      const rulesPin = dirIdentity(rulesDir);
+      assertLayer();
       // The data-root rules install straight into the layer, through the same sync.mjs and its
       // per-item gates the server-side provision uses. When the server asked for per-item
       // results, sync.mjs writes its own file beside ours: its fatal refusal aborts the layer,
@@ -1338,7 +1348,7 @@ try {
       // refuse when it leaves the live layer, before sync reads anything.
       const compareRules = readRoot === newLayerDir ? null : join(readRoot, '.omp', 'agent', 'rules');
       if (compareRules && lstatSync(compareRules, { throwIfNoEntry: false })) assertSourceInside(readRoot, compareRules);
-      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), join(/** @type {string} */ (newLayerDir), '.omp', 'agent', 'rules'), '--data', data.dir, ...(compareRules ? ['--compare', compareRules] : [])], { encoding: 'utf8', env: rulesEnv });
+      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), rulesDir, '--data', data.dir, '--within', layerHome, '--pin', rulesPin, ...(compareRules ? ['--compare', compareRules] : [])], { encoding: 'utf8', env: rulesEnv });
       let nested = null;
       if (resultsPath) {
         try { nested = JSON.parse(readFileSync(resultsPath, 'utf8')); } catch { nested = null; }
@@ -1359,7 +1369,7 @@ try {
     const labels = { added: 0, updated: 0, unchanged: 0 };
     for (const [kind, dest, bytes, , label] of plan) {
       if (!layerMode && kind === 'unchanged') { unchanged++; continue; }
-      writeFileInside(writeRoot, dest, /** @type {Buffer} */ (bytes));
+      writeFileInside(layerHome, dest, /** @type {Buffer} */ (bytes), false, layerPin);
       installed++;
       // A layer-mode plan entry always carries a label string; null is the in-place shape.
       if (layerMode) labels[/** @type {'added' | 'updated' | 'unchanged'} */ (label)]++;
@@ -1376,12 +1386,16 @@ try {
     for (const note of notes) console.log(note);
 
     if (layerMode) {
+      assertLayer();
       const layerSkillDirs = collectSkillDirs(/** @type {string} */ (newLayerDir));
       if (layerSkillDirs.length) {
         const scan = await runScan(layerSkillDirs);
         for (const [dir, info] of scan.rejected) {
           // The manifest must never name a file the layer lacks: the rejected skill dir is
           // removed from the fresh layer, and its rels from the record, before the switch.
+          // Never delete through a swapped layer or a symlink planted on the skill's path.
+          assertLayer();
+          makeDirInside(layerHome, dir);
           rmSync(dir, { recursive: true, force: true });
           addScanRejection(skillKey(/** @type {string} */ (newLayerDir), dir), info);
           // The layer mirrors the home in dot-dirs (.omp); the record keys use the snapshot
@@ -1398,7 +1412,7 @@ try {
     // copy is freshly installed, and a changed copy wins as a plain conflict. In layer mode
     // the write sits after the layer scan, so a scan-rejected skill never enters the record.
     // A fresh layer never holds its record yet: O_EXCL refuses one planted there.
-    writeFileInside(writeRoot, manifest, `${JSON.stringify(current, null, 2)}\n`, layerMode);
+    writeFileInside(layerHome, manifest, `${JSON.stringify(current, null, 2)}\n`, layerMode, layerPin);
 
     let pluginsStatus = /** @type {'installed' | 'unchanged' | null} */ (null);
     const pluginsInSnapshot = existsSync(join(userRoot, 'omp', 'plugins', 'package.json'));
@@ -1412,6 +1426,7 @@ try {
       // itself, so relative file: deps and workspace build output keep their real paths. An
       // existing entry at the barrier path moves aside (rename never follows a link) and
       // comes back after the install; the exclusive write refuses a path replanted meanwhile.
+      assertLayer();
       const barrier = join(writeRoot, '.omp', 'package.json');
       const aside = lstatSync(barrier, { throwIfNoEntry: false }) ? `${barrier}.alate-aside-${process.pid}` : null;
       if (aside) renameSync(barrier, aside);
@@ -1464,7 +1479,8 @@ try {
         const target = join(layerHome, rel);
         mkdirSync(dirname(target), { recursive: true });
         if (dirLinks.includes(rel)) mkdirSync(target, { recursive: true });
-        makeDirInside(/** @type {string} */ (newLayerDir), dirname(join(/** @type {string} */ (newLayerDir), rel)));
+        assertLayer();
+        makeDirInside(layerHome, dirname(join(/** @type {string} */ (newLayerDir), rel)));
         symlinkSync(target, join(/** @type {string} */ (newLayerDir), rel));
       }
       // A reader of current sees the old or the new target, never a gap: rename() over the
@@ -1472,6 +1488,8 @@ try {
       let previousTarget = null;
       try { previousTarget = realpathSync(currentLink); } catch { /* first layer: nothing before it */ }
       tmpLink = join(base, `.current-${process.pid}-${Date.now()}.tmp`);
+      // The switch makes the layer path live: it must still name the directory this run built.
+      assertLayer();
       symlinkSync(/** @type {string} */ (newLayerDir), tmpLink);
       renameSync(tmpLink, currentLink);
       switched = true;
@@ -1549,8 +1567,13 @@ try {
     if (failed.length || nestedFailed) process.exitCode = 1;
   } catch (err) {
     // A layer that never went live must not survive its own failed install; a path this run
-    // did not create (a refused planted entry) stays untouched.
-    if (layerMode && !switched && layerCreated) rmSync(/** @type {string} */ (newLayerDir), { recursive: true, force: true });
+    // did not create (a refused planted entry, or a layer a turn replaced) stays untouched.
+    if (layerMode && !switched && layerCreated) {
+      let ours = true;
+      try { assertLayer(); } catch { ours = false; }
+      if (ours) rmSync(/** @type {string} */ (newLayerDir), { recursive: true, force: true });
+      else console.error(`left in place: ${newLayerDir} is no longer the layer this run created`);
+    }
     if (tmpLink) rmSync(tmpLink, { force: true });
     throw err;
   }

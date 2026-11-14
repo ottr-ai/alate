@@ -11,19 +11,25 @@
 //     a layer install) instead of the fresh target; the compare dir is read-only, a rule
 //     the data repo drops counts as deleted there whether or not its live copy changed,
 //     and the fresh target still receives every rule byte.
+//   --within <dir> --pin <dev:ino>: the layer build passes both. Every write refuses a
+//     symlink on its whole path below <dir> (the target is no longer a trusted root), and
+//     refuses when the target dir no longer has the pinned identity.
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { assertSourceInside, checkDestination, cleanupData, describeProblem, die, fingerprint, NOT_RULES, originGate, parseArgs, PROVISION_ENV, resolveDataDir, ruleProblems, writeFileInside, writeProvisionResults } from './lib/data.mjs';
+import { assertDirIdentity, assertSourceInside, checkDestination, cleanupData, describeProblem, die, fingerprint, NOT_RULES, originGate, parseArgs, PROVISION_ENV, resolveDataDir, ruleProblems, writeFileInside, writeProvisionResults } from './lib/data.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
 /** @typedef {{ item: string, status: 'installed' | 'unchanged' | 'added' | 'updated' | 'rejected' | 'no-origin', rule: string | null, at: string | null, report?: string }} ProvisionItem */
 
-const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--data', '--repo', '--compare'], [], true));
+const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--data', '--repo', '--compare', '--within', '--pin'], [], true));
 if (args.positional.length > 1) die('Usage: node sync.mjs [targetDir] [--data <dir>|--repo <owner/name[@ref]>]');
+if ((args.values['--within'] === undefined) !== (args.values['--pin'] === undefined)) die('Usage error: --within and --pin go together');
 const data = resolveDataDir(args, { allowClone: true });
 const target = args.positional[0] ?? join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.omp', 'agent'), 'rules');
+const writeRoot = args.values['--within'] ?? target;
+const targetPin = args.values['--pin'] === undefined ? null : { dir: target, id: args.values['--pin'] };
 let fatal = false;
 let error = null;
 /** @type {ProvisionItem[]} */
@@ -114,7 +120,9 @@ try {
   for (const name of rules.keys()) checkDestination(target, join(target, name));
   for (const name of Object.keys(recorded)) if (!rules.has(name)) checkDestination(compareBase, join(compareBase, name));
 
-  mkdirSync(target, { recursive: true });
+  // A pinned target was created by the caller; it must still be that directory.
+  if (targetPin) assertDirIdentity(targetPin.dir, targetPin.id);
+  else mkdirSync(target, { recursive: true });
   /** @type {Map<string, Buffer | null>} */
   const old = new Map();
   for (const [name] of rules) {
@@ -129,7 +137,7 @@ try {
     const same = oldBytes?.equals(bytes) ?? false;
     // Compare mode writes every rule: the fresh target needs the bytes even when the
     // compare dir already holds them.
-    if (compareMode || !same) writeFileInside(target, join(target, name), bytes);
+    if (compareMode || !same) writeFileInside(writeRoot, join(target, name), bytes, false, targetPin);
     if (same) {
       unchanged++;
       failItem(name, 'unchanged');
@@ -170,7 +178,7 @@ try {
   // a kept-but-changed copy loses its record when the manifest is rewritten below.
   const stale = readdirSync(target).filter(name => isMd(name) && !rules.has(name) && !gone.has(name));
   if (stale.length) console.log(`Not from the data repo, left in place: ${stale.join(', ')}`);
-  writeFileInside(target, manifestFile, `${JSON.stringify(Object.fromEntries([...rules.keys()].map(name => [name, fingerprint(name, /** @type {Buffer} */ (rules.get(name)))])), null, 2)}\n`);
+  writeFileInside(writeRoot, manifestFile, `${JSON.stringify(Object.fromEntries([...rules.keys()].map(name => [name, fingerprint(name, /** @type {Buffer} */ (rules.get(name)))])), null, 2)}\n`, false, targetPin);
   items.sort((a, b) => (a.item < b.item ? -1 : a.item > b.item ? 1 : 0));
   const failed = items.filter(it => it.status === 'rejected' || it.status === 'no-origin');
   if (failed.length) {
