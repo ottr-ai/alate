@@ -623,6 +623,25 @@ try {
     assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'rotated key persisted to config file');
     res = await rawReq('/api/state', { host: `localhost:${Number(boundPort) + 1}` });
     assert.equal(res.status, 421, 'Host port mismatch is refused');
+    // 2f. A same-host reverse proxy can rewrite Host to a loopback name (nginx's default
+    // $proxy_host), so the Host gate passes for remote clients. A forwarding header marks
+    // such a request, and the key-free shortcut then answers 401 like a non-loopback bind.
+    const proxyHost = `127.0.0.1:${boundPort}`;
+    for (const fwd of [{ 'x-forwarded-for': '203.0.113.7' }, { forwarded: 'for=203.0.113.7' }, { 'x-real-ip': '203.0.113.7' }]) {
+      const name = Object.keys(fwd)[0];
+      res = await rawReq('/api/state', { host: proxyHost, ...fwd });
+      assert.equal(res.status, 401, `a loopback request with ${name} needs the key`);
+      assert.equal(JSON.parse(res.body).error, 'unauthorized', `${name} gets the auth challenge body`);
+      res = await rawReq('/api/key', { host: proxyHost, origin: `http://${proxyHost}`, ...fwd }, 'POST');
+      assert.equal(res.status, 401, `a same-origin write with ${name} needs the key`);
+    }
+    assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'key unchanged after proxied writes');
+    res = await rawReq('/api/state', { host: proxyHost, 'x-forwarded-for': '203.0.113.7', authorization: `Bearer ${apiKey}` });
+    assert.equal(res.status, 200, 'the key opens the dashboard through the proxy');
+    res = await rawReq('/', { host: proxyHost, 'x-forwarded-for': '203.0.113.7' });
+    assert.equal(res.status, 200, 'the login shell stays open through the proxy');
+    res = await rawReq('/api/state', { host: proxyHost });
+    assert.equal(res.status, 200, 'a plain loopback request without proxy headers stays key-free');
     // No Host header at all: node's HTTP parser refuses an HTTP/1.1 request without
     // Host (400) before the app sees it; either refusal is fail-closed.
     const rawNoHost = (headers) => new Promise((resolve, reject) => {

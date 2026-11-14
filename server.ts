@@ -310,6 +310,11 @@ function cookieAuthed(req: FastifyRequest): boolean {
 async function dashGuard(req: FastifyRequest, reply: FastifyReply): Promise<void | FastifyReply> {
   if (authorized(req) || cookieAuthed(req)) return
   if (!loopbackBind) return reply.code(401).send({ error: 'unauthorized' })
+  // A reverse proxy on the same host reaches a loopback bind from loopback and can send a
+  // loopback Host (nginx's default proxy_set_header Host $proxy_host), so the Host gate
+  // passes for remote clients. A forwarding header marks such a request: it needs the key.
+  const h = req.headers
+  if (h['x-forwarded-for'] !== undefined || h.forwarded !== undefined || h['x-real-ip'] !== undefined) return reply.code(401).send({ error: 'unauthorized' })
   // The loopback bind is key-free, but a browser write carries no key: without the
   // sameOrigin check, any web page could ride this shortcut with a bodyless no-cors
   // POST (no preflight; POST /api/key reads no body) and rotate the provisioning key.
@@ -336,8 +341,8 @@ app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body:
 })
 
 // Auth model: the provisioning API (/config, /provision, /api/updates) always needs
-// the key. Dashboard routes use dashGuard: key-free on a loopback bind, Bearer token
-// or login cookie on any other bind. The static shell and /theme.js stay public so a
+// the key. Dashboard routes use dashGuard: key-free on a loopback bind without proxy
+// headers, Bearer token or login cookie otherwise. The static shell and /theme.js stay public so a
 // browser can load the page and then ask for the key once (web/app.js).
 app.setErrorHandler((err: FastifyError, _req, reply) => {
   if (typeof err.code === 'string' && err.code.startsWith('FST_ERR_CTP')) {
