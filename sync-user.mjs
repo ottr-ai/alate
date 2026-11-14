@@ -15,8 +15,9 @@ import { SHIPPED_SKILLS_DIR, shippedSkills } from './lib/shipped.mjs';
 /** @typedef {[string, Buffer, string]} CapturedFile */
 
 // --repo is a valued option so resolveDataDir can refuse cloning with the capture-specific
-// message; capture takes no flags and no positional arguments.
-const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--home', '--data', '--repo']));
+// message; capture takes the --first flag and no positional arguments.
+const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--home', '--data', '--repo'], ['--first']));
+const firstCapture = args.flags.has('--first'); // the starter-template escape hatch: see specs/capture-baseline.md
 const data = resolveDataDir(args, { allowClone: false });
 const home = args.values['--home'] ?? homedir();
 // Hand-edited config: a secret-named key here must reference an env var, never hold the value, because an MCP
@@ -459,12 +460,13 @@ try {
       conflicts.push({ rel, to });
       continue;
     }
-    if (old && base === null) {
+    if (!firstCapture && old && base === null) {
       // First sight of a committed snapshot that differs, with no baseline: a capture
       // cannot tell a machine edit from a stale machine copy that never provisioned,
       // and the stale case overwrites a newer committed file (OTTR-944, 2026-11-14).
       // Refuse this file; a provision writes the snapshot to the home and the next
-      // capture sees the file unchanged.
+      // capture sees the file unchanged. --first adopts the machine copy instead:
+      // the onboarding path for a fresh data repo from examples/data.
       noBaseStale.push({ rel, to, fpMachine, fpSnap: /** @type {string} */ (fpSnap) });
       continue;
     }
@@ -487,6 +489,7 @@ try {
     console.error('Nothing synced for these files. Provision first or resolve by hand, then rerun:');
     for (const m of noBaseStale)
       console.error(`no baseline: the snapshot ${m.to} and the machine file ${join(home, `.${m.rel}`)} differ and no capture baseline exists; wrote nothing for it (machine sha256 ${m.fpMachine}, snapshot sha256 ${m.fpSnap})`);
+    console.error('tip: for the first capture of a fresh data repo copied from examples/data, rerun with --first');
   }
   for (const note of keptNotes) console.log(note);
   for (const [rel, to, bytes, old] of staged) {

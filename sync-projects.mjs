@@ -11,7 +11,8 @@ import { parseArgs, resolveDataDir, checkDestination, assertSourceInside, safeRe
 /** @typedef {{ contextFiles: string[], projects: Record<string, string[]> }} ProjectsManifest */
 /** @typedef {{ key: string, from: string, to: string, bytes: Buffer, old: Buffer | null }} CopyPlan */
 
-const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--root', '--data', '--repo']));
+const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--root', '--data', '--repo'], ['--first']));
+const firstCapture = args.flags.has('--first'); // the starter-template escape hatch: see specs/capture-baseline.md
 const data = resolveDataDir(args, { allowClone: false });
 // Projects live beside the data repo in the workspace, so its parent is the natural default root.
 const root = resolve(args.values['--root'] ?? dirname(data.dir));
@@ -132,12 +133,13 @@ for (const entry of plan) {
     conflicts.push({ key, from });
     continue;
   }
-  if (old && base === null) {
+  if (!firstCapture && old && base === null) {
     // First sight of a committed snapshot that differs, with no baseline: a capture
     // cannot tell a machine edit from a stale checkout copy that never provisioned,
     // and the stale case overwrites a newer committed file (OTTR-944, 2026-11-14).
     // Refuse this file; a provision writes the snapshot and seeds the baseline, so
-    // the next capture sees the file unchanged.
+    // the next capture sees the file unchanged. --first adopts the machine copy
+    // instead: the onboarding path for a fresh data repo from examples/data.
     noBaseStale.push({ key, from, to, fpMachine, fpSnap: /** @type {string} */ (fpSnap) });
     continue;
   }
@@ -175,6 +177,7 @@ if (noBaseStale.length) {
   console.error('Nothing synced for these files. Provision first or resolve by hand, then rerun:');
   for (const m of noBaseStale)
     console.error(`no baseline: the snapshot ${m.to} and the machine file ${m.from} differ and no capture baseline exists; wrote nothing for it (machine sha256 ${m.fpMachine}, snapshot sha256 ${m.fpSnap})`);
+  console.error('tip: for the first capture of a fresh data repo copied from examples/data, rerun with --first');
 }
 for (const key of noBase) console.log(`note: projects/${key} has no capture baseline; captured the machine copy`);
 notes.forEach(n => console.log(`note: ${n}`));

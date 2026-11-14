@@ -21,7 +21,11 @@ project checkouts never saw a provision (`install-projects.mjs` had no `--root`
 there), so no baseline record existed. The `B` missing fallback captured the stale
 checkout copies over newer committed files and reverted a committed fix
 (agent-data commit `80cc2a4`, AGEN-68). A first sight of a committed snapshot that
-differs now refuses the file, per the `B` missing rules below.
+differs now refuses the file, per the `B` missing rules below. The one escape hatch is
+`--first`: a fresh data repo copied from `examples/data` starts with placeholder
+snapshots that the first capture must replace (the template's `config.yml` says so),
+and the flag adopts the machine copies for files with no baseline. Established data
+repos never pass it.
 
 ## The baseline record
 
@@ -60,8 +64,15 @@ and `B` the baseline fingerprint. `fp()` is `fingerprint()` from `lib/data.mjs`.
 
   `sync-user.mjs` prints the same line with the snapshot path under `<data>/user/`
   and the machine path under the home. A refused file gets no baseline entry. A
+  tip line after the per-file lines names `--first` for the fresh-template case. A
   provision ends the refusal: the install script writes the snapshot bytes to the
   machine copy, and the next capture sees the file unchanged and seeds `B`.
+- `--first`: the capture scripts accept one boolean flag. With it, a file with no
+  baseline follows the `S` missing rule above (capture, seed `B`) even when `S` is
+  present, and the run prints the existing no-baseline notes. This is the onboarding
+  path for a fresh data repo copied from `examples/data`: the template's placeholder
+  snapshots exist to be replaced by the first capture. Without the flag, the refusal
+  above applies; established repos never pass `--first`.
 - `fp(M) != B` and `fp(S) == B`: a local machine edit. Capture as today. Set `B := fp(M)`.
 - `fp(M) == B` and `fp(S) != B`: the snapshot changed elsewhere (another machine or the
   board). See "Refresh and keep".
@@ -138,6 +149,9 @@ h. No record exists: a machine copy that equals its committed snapshot seeds `B`
    the run exits 0; a machine copy that differs writes nothing, stderr names both
    paths and both sha256 values, and the run exits 1; a file with no committed
    snapshot still captures, with the aggregate note.
+i. `--first`: a first capture against placeholder snapshots adopts the machine
+   copies, seeds their baselines, and exits 0; the same run without `--first`
+   refuses with exit 1.
 
 ## Alternatives considered
 
@@ -162,5 +176,6 @@ h. No record exists: a machine copy that equals its committed snapshot seeds `B`
 
 - No seeding of the `sync-user.mjs` baselines from the `installed.json` record of
   `install-user.mjs`: a different schema, owned by `install-user.mjs`.
-- No new CLI flags.
+- No capture flags beyond `--first`, which exists only for the first capture of a
+  fresh data repo copied from `examples/data`.
 - The agent-data pre-push hook flow itself is out of scope.

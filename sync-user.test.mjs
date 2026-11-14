@@ -1100,6 +1100,35 @@ try {
     });
   }
 
+  // Onboarding (OTTR-944 follow-up): a fresh data repo copied from examples/data holds
+  // placeholder snapshots the first capture must replace (the template's config.yml says
+  // so). Without a baseline record, that first capture refuses; --first adopts the
+  // machine copies and seeds the baselines.
+  {
+    const onHome = join(tmp, 'home-onboarding');
+    const onData = join(tmp, 'data-onboarding');
+    cpSync(fileURLToPath(new URL('./examples/data', import.meta.url)), onData, { recursive: true });
+    mkdirSync(join(onHome, '.omp/agent'), { recursive: true });
+    const realConfig = 'modelRoles:\n  default: zai/glm\n';
+    writeFileSync(join(onHome, '.omp/agent/config.yml'), realConfig);
+    const onRun = (...extra) => spawnSync(process.execPath,
+      [join(repo, 'sync-user.mjs'), '--home', onHome, '--data', onData, ...extra], { encoding: 'utf8' });
+    const onSnap = rel => readFileSync(join(onData, 'user', rel), 'utf8');
+    const placeholder = readFileSync(fileURLToPath(new URL('./examples/data/user/omp/agent/config.yml', import.meta.url)), 'utf8');
+    let r4 = onRun();
+    assert.equal(r4.status, 1);
+    assert.match(r4.stderr, /no baseline: the snapshot .+user.omp.agent.config.yml and the machine file .+.omp.agent.config.yml differ/);
+    assert.equal(onSnap('omp/agent/config.yml'), placeholder, 'the refusal leaves the template placeholder alone');
+    r4 = onRun('--first');
+    assert.equal(r4.status, 0, r4.stderr);
+    assert.equal(onSnap('omp/agent/config.yml'), realConfig, 'the first capture replaces the template placeholder');
+    assert.equal(JSON.parse(readFileSync(join(onHome, '.alate/captured-user.json'), 'utf8'))['omp/agent/config.yml'],
+      fingerprint('omp/agent/config.yml', Buffer.from(realConfig)), '--first seeds the baseline');
+    r4 = onRun();
+    assert.equal(r4.status, 0, r4.stderr);
+    assert.match(r4.stdout, /0 added, 0 updated, 1 unchanged/);
+  }
+
   // --- capture baseline (ALAT-154): the capture keeps a newer committed snapshot ---
   // The state file records, per machine and per file, the snapshot bytes the last capture
   // wrote; a one-sided snapshot change keeps the committed snapshot (the capture never

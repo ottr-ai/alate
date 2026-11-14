@@ -109,7 +109,7 @@ try {
     mkdirSync(join(data3, 'projects'), { recursive: true });
     mkdirSync(join(ws3, 'delta'), { recursive: true });
     writeFileSync(join(data3, 'projects/projects.json'), JSON.stringify({ contextFiles: ['AGENTS.md'], projects: { delta: [] } }, null, 2) + '\n');
-    const run3 = () => spawnSync(process.execPath, [join(repo, 'sync-projects.mjs'), '--root', ws3, '--data', data3], { encoding: 'utf8' });
+    const run3 = (...extra) => spawnSync(process.execPath, [join(repo, 'sync-projects.mjs'), '--root', ws3, '--data', data3, ...extra], { encoding: 'utf8' });
     const state3 = join(ws3, '.alate', 'captured-projects.json');
     const machine3 = join(ws3, 'delta', 'AGENTS.md');
     const snap3 = join(data3, 'projects', 'delta', 'AGENTS.md');
@@ -154,10 +154,21 @@ try {
     assert.equal(readFileSync(snap3, 'utf8'), '# delta v4 board\n', 'a conflict leaves the snapshot alone');
     assert.equal(state()['delta/AGENTS.md'], base3('# delta v3 board\n'), 'a conflict leaves the baseline alone');
 
+    // (d0) --first: the starter-template escape hatch. The first capture of a fresh
+    // data repo adopts the machine copies and seeds the baselines (specs/capture-baseline.md).
+    rmSync(state3);
+    writeFileSync(snap3, '# delta v4 board\n');
+    r3 = run3('--first');
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.match(r3.stdout, /projects\/delta\/AGENTS\.md has no capture baseline; captured the machine copy/);
+    assert.equal(readFileSync(snap3, 'utf8'), '# delta v5 local\n', '--first adopts the machine copy');
+    assert.equal(state()['delta/AGENTS.md'], base3('# delta v5 local\n'), '--first seeds the baseline');
+
     // (d) no record, machine copy differs from the snapshot -> refuse this file:
     // a capture cannot tell a machine edit from a stale checkout copy that never
     // provisioned, and the stale case would overwrite a newer committed file.
     rmSync(state3);
+    writeFileSync(snap3, '# delta v4 board\n');
     r3 = run3();
     assert.equal(r3.status, 1);
     assert.match(r3.stderr, /no baseline: the snapshot .+projects.delta.AGENTS\.md and the machine file .+delta.AGENTS\.md differ and no capture baseline exists; wrote nothing for it \(machine sha256 [0-9a-f]{64}, snapshot sha256 [0-9a-f]{64}\)/);

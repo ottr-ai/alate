@@ -39,9 +39,9 @@ Call this checkout path ALATE below.
 ## 3. Copy the starter and capture
 
 1. Copy the whole `<ALATE>/examples/data` tree into FOLDER.
-2. Run `node <ALATE>/sync-user.mjs --data <FOLDER>`.
+2. Run `node <ALATE>/sync-user.mjs --first --data <FOLDER>`. The `--first` flag replaces the starter's placeholder snapshots with this machine's data.
 3. A failure stops this skill. Show the error.
-4. Ask the user. When they agree, run `node <ALATE>/sync-projects.mjs --data <FOLDER>`. Skip it when they say no.
+4. Ask the user. When they agree, run `node <ALATE>/sync-projects.mjs --first --data <FOLDER>`. Skip it when they say no.
 
 ## 4. Scan for secrets
 

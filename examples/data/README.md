@@ -18,6 +18,6 @@ Alate installs every skill folder under Ottr's `.agents/skills` at the pinned co
 ## First run
 
 1. Copy this folder into a new private GitHub repo and push it.
-2. Fill it from a machine with a working omp setup: `node sync-user.mjs --data <repo>` (and `node sync-projects.mjs`).
+2. Fill it from a machine with a working omp setup: `node sync-user.mjs --first --data <repo>` (and `node sync-projects.mjs --first`). The `--first` flag replaces the placeholder snapshots of this template with the machine's real data.
 3. Start the server: `docker compose up -d`.
 4. Open http://127.0.0.1:4570, import `owner/name` with a GitHub token, provision.
