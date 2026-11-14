@@ -26,7 +26,8 @@
 // same root omp's plugin manager installs into. The install runs with --ignore-scripts unless the data
 // repo opts in with a plugins-allow-scripts marker at its root, and with an allowlisted environment, so
 // server secrets never reach bun or a lifecycle script. Packages install with bun's copyfile
-// backend, so the provisioner never creates a hard link into the snapshot tree. In layer mode a
+// backend, so the provisioner never creates a hard link into the snapshot tree, and from a fresh
+// private package cache, so a turn-written ~/.bun cache entry never lands in the plugins. In layer mode a
 // machine change to the plugins install files (package.json, bun.lock, patches/) never rides into
 // the new layer: the snapshot wins.
 // Also installs the per-project worker additions Ottr's turns read: workers/<project>/apt.txt
@@ -1316,11 +1317,21 @@ try {
       const bunArgs = allowPluginScripts
         ? ['install', '--frozen-lockfile', '--backend', 'copyfile']
         : ['install', '--frozen-lockfile', '--backend', 'copyfile', '--ignore-scripts'];
-      const bun = spawnSync('bun', bunArgs, {
-        cwd: pluginsDir,
-        stdio: 'inherit',
-        env: Object.fromEntries(BUN_ENV_KEYS.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]])),
-      });
+      // A fresh, provisioner-private package cache per install: bun copies cached package
+      // bytes without checking them against bun.lock's integrity (measured on 1.4.4), and the
+      // shared ~/.bun cache is turn-writable (each layer links .bun back to the home). The
+      // env var wins over any bunfig.toml cache dir, so a planted bunfig cannot redirect it.
+      const bunCache = mkdtempSync(join(tmpdir(), 'alate-bun-cache-'));
+      let bun;
+      try {
+        bun = spawnSync('bun', bunArgs, {
+          cwd: pluginsDir,
+          stdio: 'inherit',
+          env: { ...Object.fromEntries(BUN_ENV_KEYS.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]])), BUN_INSTALL_CACHE_DIR: bunCache },
+        });
+      } finally {
+        rmSync(bunCache, { recursive: true, force: true });
+      }
       if (bun.error || bun.status !== 0) {
         throw new Error(/** @type {NodeJS.ErrnoException} */ (bun.error)?.code === 'ENOENT' ? 'bun not found; cannot install plugins.' : `bun install failed in ${pluginsDir}`);
       }

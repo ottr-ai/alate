@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir, availableParallelism } from 'node:os';
-import { delimiter, dirname, join, sep } from 'node:path';
+import { delimiter, dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CAPTURE_ROOTS, fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, remapHomePaths, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
 import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
@@ -1940,9 +1940,12 @@ exit 0
     const shimDir = join(tmp, 'bun-stub');
     const bunCalls = join(shimDir, 'calls.json');
     mkdirSync(shimDir, { recursive: true });
-    writeFileSync(join(shimDir, 'bun'), `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(bunCalls)}, JSON.stringify({ argv: process.argv.slice(2), env: Object.keys(process.env) }));\n`);
+    writeFileSync(join(shimDir, 'bun'), `#!/usr/bin/env node\nconst fs = require('node:fs'); const c = process.env.BUN_INSTALL_CACHE_DIR;\nfs.writeFileSync(${JSON.stringify(bunCalls)}, JSON.stringify({ argv: process.argv.slice(2), env: Object.keys(process.env), cache: c, cacheEntries: c && fs.existsSync(c) ? fs.readdirSync(c) : null }));\n`);
     chmodSync(join(shimDir, 'bun'), 0o755);
-    const shimEnv = { ...process.env, PATH: `${stubDir}${delimiter}${shimDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ALATE_API_KEY: 'dummy-key', GITHUB_TOKEN: 'dummy-token' };
+    // A caller-set BUN_INSTALL_CACHE_DIR pointing at the shared, turn-writable cache must not
+    // reach bun: bun copies cached package bytes without an integrity check against bun.lock.
+    const sharedCache = join(tmp, 'shared-bun-cache');
+    const shimEnv = { ...process.env, PATH: `${stubDir}${delimiter}${shimDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ALATE_API_KEY: 'dummy-key', GITHUB_TOKEN: 'dummy-token', BUN_INSTALL_CACHE_DIR: sharedCache };
     const shimHome = join(tmp, 'shim-home');
     let rs = runP(shimHome, [], shimEnv);
     assert.equal(rs.status, 0, rs.stderr);
@@ -1950,11 +1953,17 @@ exit 0
     assert.deepEqual(call.argv, ['install', '--frozen-lockfile', '--backend', 'copyfile', '--ignore-scripts']);
     assert.ok(!call.env.includes('ALATE_API_KEY') && !call.env.includes('GITHUB_TOKEN'), 'server secrets never reach bun');
     assert.ok(call.env.includes('PATH') && call.env.includes('HOME'));
+    assert.ok(typeof call.cache === 'string' && call.cache !== sharedCache, 'bun gets its own cache dir, never the caller one');
+    assert.ok(relative(shimHome, call.cache).startsWith('..'), 'the cache sits outside the home and its shared .bun');
+    assert.deepEqual(call.cacheEntries, [], 'bun starts from an existing, empty cache dir');
+    assert.ok(!existsSync(call.cache), 'the private cache is removed after the install');
+    const firstCache = call.cache;
     writeFileSync(join(plugData, 'plugins-allow-scripts'), '\n');
     rs = runP(shimHome, [], shimEnv);
     assert.equal(rs.status, 0, rs.stderr);
     call = JSON.parse(readFileSync(bunCalls, 'utf8'));
     assert.deepEqual(call.argv, ['install', '--frozen-lockfile', '--backend', 'copyfile'], 'the data-repo marker opts in');
+    assert.ok(call.cache !== firstCache && !existsSync(call.cache), 'each install gets a fresh cache dir, removed afterward');
     assert.ok(!call.env.includes('ALATE_API_KEY') && !call.env.includes('GITHUB_TOKEN'), 'the allowlist holds even when scripts are on');
 
     // Migration with the bytes an older alate wrote (a memory backend entry over the recorded
