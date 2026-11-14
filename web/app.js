@@ -579,20 +579,25 @@ function settingsView() {
 
   // App key for Ottr and other callers.
   const out = h('div', { role: 'status' });
+  const currentKey = h('input', { type: 'password', id: 'current-key', autocomplete: 'current-password', spellcheck: 'false' });
   const keyBtn = h('button', { type: 'button', class: 'btn quiet', text: 'Create a new app key' });
   keyBtn.addEventListener('click', async () => {
+    if (!currentKey.value) { out.textContent = 'Enter the current app key.'; return; }
     if (!confirm('Create a new app key? The current key stops working immediately.')) return;
     keyBtn.disabled = true;
     try {
-      const { key } = await api('POST', '/api/key');
+      const { key } = await api('POST', '/api/key', { key: currentKey.value });
+      currentKey.value = '';
       out.textContent = '';
       out.append(h('code', { class: 'key-value', text: key }),
         h('button', { type: 'button', class: 'btn quiet', onclick: () => navigator.clipboard.writeText(key), text: 'Copy key' }),
         h('p', { class: 'note', text: 'alate shows this key once. Store it in the caller now.' }));
-    } catch (e) { out.textContent = e.message; } finally { keyBtn.disabled = false; }
+    } catch (e) { out.textContent = e.status === 403 ? 'The current app key is wrong.' : e.message; } finally { keyBtn.disabled = false; }
   });
   sheet.append(part('App key', null,
     h('p', { class: 'note', text: 'Callers such as Ottr send this key as "Authorization: Bearer <key>" to POST /config and POST /provision.' }),
+    h('p', { class: 'note', text: 'To create a new key, enter the current key first. The new key also ends every dashboard session.' }),
+    h('div', { class: 'field' }, h('label', { for: 'current-key', text: 'Current app key' }), currentKey),
     keyBtn, out));
   return sheet;
 }

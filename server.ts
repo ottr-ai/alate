@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -285,9 +285,31 @@ function clientError(reply: FastifyReply, err: unknown): FastifyReply {
   return reply.code(e.status ?? 500).send({ error: e.message })
 }
 
-// Dashboard session cookie: a hash of the provisioning key, so the key never
-// reaches the browser and a rotation (POST /api/key) ends every session at once.
-const sessionToken = (): string => createHash('sha256').update(`alate-session:${config.apiKey ?? ''}`).digest('hex')
+// Dashboard sessions: random ids held only in memory, so a cookie carries nothing
+// derived from the key, a restart ends every session, and a rotation (POST /api/key)
+// clears the store. Browsers do not isolate cookies by port: another service on the
+// same host name can receive this cookie, so key rotation also asks for the current key.
+const SESSION_MAX_AGE_S = 30 * 24 * 60 * 60
+const sessions = new Map<string, number>() // session id -> expiry (ms since epoch)
+
+function newSession(): string {
+  const now = Date.now()
+  for (const [id, exp] of sessions) if (exp <= now) sessions.delete(id)
+  const id = randomBytes(32).toString('hex')
+  sessions.set(id, now + SESSION_MAX_AGE_S * 1000)
+  return id
+}
+
+// A sibling service can set its own alate_session cookie on this host name, so every
+// value in the header is checked, not only the first one.
+function sessionValid(header: string): boolean {
+  const now = Date.now()
+  for (const m of header.matchAll(/(?:^|;\s*)alate_session=([a-f0-9]{64})(?=;|$)/g)) {
+    const exp = sessions.get(m[1])
+    if (exp !== undefined && exp > now) return true
+  }
+  return false
+}
 
 function sameOrigin(req: FastifyRequest): boolean {
   const raw = req.headers.origin ?? req.headers.referer
@@ -296,12 +318,12 @@ function sameOrigin(req: FastifyRequest): boolean {
 }
 
 function cookieAuthed(req: FastifyRequest): boolean {
-  const m = /(?:^|;\s*)alate_session=([a-f0-9]{64})/.exec(req.headers.cookie ?? '')
-  if (!m) return false
+  const header = req.headers.cookie ?? ''
+  if (!header.includes('alate_session=')) return false
   // CSRF: a browser attaches the cookie to cross-site POSTs too, so a cookie write must
   // carry a same-origin Origin header (browsers send it on every non-GET request).
   if (req.method !== 'GET' && req.method !== 'HEAD' && !sameOrigin(req)) return false
-  return keyMatch(m[1], sessionToken())
+  return sessionValid(header)
 }
 
 // Non-loopback binds (--host 0.0.0.0, Docker, NAS) expose the dashboard to the network:
@@ -316,8 +338,8 @@ async function dashGuard(req: FastifyRequest, reply: FastifyReply): Promise<void
   const h = req.headers
   if (h['x-forwarded-for'] !== undefined || h.forwarded !== undefined || h['x-real-ip'] !== undefined) return reply.code(401).send({ error: 'unauthorized' })
   // The loopback bind is key-free, but a browser write carries no key: without the
-  // sameOrigin check, any web page could ride this shortcut with a bodyless no-cors
-  // POST (no preflight; POST /api/key reads no body) and rotate the provisioning key.
+  // sameOrigin check, any web page could ride this shortcut with a no-cors POST
+  // (no preflight) and change dashboard state.
   // Browsers send Origin on every non-GET request, and the dashboard's own requests
   // are same-origin; scripts keep using the Bearer path above. DNS rebinding makes a
   // hostile page's Origin equal its Host, so that check alone passes; the loopback
@@ -694,21 +716,30 @@ app.post('/api/updates/check', {
 
 // Dashboard login: exchange the provisioning key for a session cookie, because phone
 // browsers cannot set an Authorization header. The key never returns in a response
-// body and never rides the cookie in plaintext. No Secure flag: a non-loopback
-// bind serves plain HTTP; SameSite=Strict plus the Origin check in cookieAuthed cover CSRF.
+// body and never rides the cookie: the cookie holds a random session id. No Secure flag
+// (so no __Host- prefix): a non-loopback bind serves plain HTTP. Path=/api keeps the
+// cookie off every other path; SameSite=Strict plus the Origin check in cookieAuthed cover CSRF.
 app.post<{ Body: { key?: unknown } | undefined }>('/api/login', { bodyLimit: 64 * 1024 }, async (req, reply) => {
   const key = (req.body ?? {}).key
   if (typeof key !== 'string' || !keyMatch(key, config.apiKey ?? '')) return reply.code(401).send({ error: 'unauthorized' })
-  reply.header('set-cookie', `alate_session=${sessionToken()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 24 * 60 * 60}`)
+  reply.header('set-cookie', `alate_session=${newSession()}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=${SESSION_MAX_AGE_S}`)
   return { ok: true }
 })
 
 // Issue a fresh API key for callers such as Ottr. Returned once, like the boot-time
-// generation; the previous key stops working immediately. No read endpoint: GET would
-// hand the provision credential to every local process for as long as the server runs.
-app.post('/api/key', { preHandler: dashGuard }, async () => {
+// generation; the previous key and every dashboard session stop working immediately.
+// No read endpoint: GET would hand the provision credential to every local process for
+// as long as the server runs. A session alone cannot rotate: a cookie replayed from a
+// sibling port must not mint a key, so the caller proves the current key (Bearer or
+// body). 403, not 401: a wrong re-entered key must not send the dashboard to its login view.
+app.post<{ Body: { key?: unknown } | undefined }>('/api/key', { bodyLimit: 64 * 1024, preHandler: dashGuard }, async (req, reply) => {
+  const current = (req.body ?? {}).key
+  if (!authorized(req) && (typeof current !== 'string' || !keyMatch(current, config.apiKey ?? ''))) {
+    return reply.code(403).send({ error: 'current key required' })
+  }
   config.apiKey = randomBytes(32).toString('base64url')
   saveConfig(config)
+  sessions.clear()
   return { key: config.apiKey }
 })
 

@@ -559,8 +559,21 @@ try {
   // An empty Origin is a present header, not a missing one: it must not fall through to Referer.
   r = await post('/api/settings', JSON.stringify({ autoUpdate: false }), { 'Content-Type': 'application/json', origin: '', referer: base });
   assert.equal(r.status, 401, 'an empty Origin must not fall through to Referer');
+  // Same-origin passes dashGuard, but the route itself still asks for the current key:
+  // the key-free loopback shortcut alone must not mint a new key.
   r = await post('/api/key', undefined, { origin: base });
-  assert.equal(r.status, 200, 'same-origin write rotates the key like the dashboard UI');
+  assert.equal(r.status, 403, 'a same-origin write without the current key cannot rotate');
+  assert.deepEqual(await r.json(), { error: 'current key required' }, 'the 403 names the missing proof');
+  assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'key unchanged without the current key');
+  r = await post('/api/key', JSON.stringify({ key: 'wrong-key' }), { 'Content-Type': 'application/json', origin: base });
+  assert.equal(r.status, 403, 'a wrong current key cannot rotate');
+  assert.deepEqual(await r.json(), { error: 'current key required' }, 'a wrong key gets the same 403 body');
+  assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'key unchanged after a wrong current key');
+  r = await post('/api/key', JSON.stringify({ key: 42 }), { 'Content-Type': 'application/json', origin: base });
+  assert.equal(r.status, 403, 'a non-string current key cannot rotate');
+  assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'key unchanged after a non-string current key');
+  r = await post('/api/key', JSON.stringify({ key: apiKey }), { 'Content-Type': 'application/json', origin: base });
+  assert.equal(r.status, 200, 'same-origin write with the current key rotates the key like the dashboard UI');
   apiKey = (await r.json()).key;
   assert.equal(typeof apiKey, 'string');
   assert.equal(JSON.parse(readFileSync(config, 'utf8')).apiKey, apiKey, 'rotated key persisted to config file');
@@ -572,7 +585,7 @@ try {
   // request Host and the same-origin gate above passes. The loopback bind therefore
   // refuses any Host header that does not name this server.
   const boundPort = new URL(base).port;
-  const rawReq = (path, headers = {}, method = 'GET') => new Promise((resolve, reject) => {
+  const rawReq = (path, headers = {}, method = 'GET', body) => new Promise((resolve, reject) => {
     const u = new URL(path, base);
     const rq = request({ host: u.hostname, port: u.port, path: u.pathname + u.search, method, headers }, res => {
       let b = '';
@@ -580,7 +593,7 @@ try {
       res.on('end', () => resolve({ status: res.statusCode, body: b }));
     });
     rq.on('error', reject);
-    rq.end();
+    rq.end(body);
   });
   {
     const evil = { host: `evil.test:${boundPort}`, origin: `http://evil.test:${boundPort}` };
@@ -616,7 +629,7 @@ try {
     assert.equal(res.status, 421, 'a non-digit inside an octet is not a loopback name');
     res = await rawReq('/api/state', { host: `127.259.0.1:${boundPort}` });
     assert.equal(res.status, 421, 'an octet of 259 is not a loopback name');
-    res = await rawReq('/api/key', { host: `localhost:${boundPort}`, origin: `http://localhost:${boundPort}` }, 'POST');
+    res = await rawReq('/api/key', { host: `localhost:${boundPort}`, origin: `http://localhost:${boundPort}`, 'content-type': 'application/json' }, 'POST', JSON.stringify({ key: apiKey }));
     assert.equal(res.status, 200, 'allowed-host same-origin write rotates the key');
     apiKey = JSON.parse(res.body).key;
     assert.equal(typeof apiKey, 'string');
@@ -3056,12 +3069,23 @@ try {
       assert.deepEqual(loginBody, { ok: true });
       assert.ok(!JSON.stringify(loginBody).includes(lanKey), 'login never sends the key back');
       const setCookie = r2.headers.get('set-cookie') ?? '';
-      assert.match(setCookie, /alate_session=[a-f0-9]{64}/);
-      assert.match(setCookie, /HttpOnly/);
-      assert.match(setCookie, /SameSite=Strict/);
-      assert.match(setCookie, /Path=\//);
+      assert.match(setCookie, /alate_session=[a-f0-9]{64}/, 'the cookie carries a 64-hex session id');
+      assert.match(setCookie, /HttpOnly/, 'the session cookie is HttpOnly');
+      assert.match(setCookie, /SameSite=Strict/, 'the session cookie is SameSite=Strict');
+      assert.match(setCookie, /(?:^|;\s*)Path=\/api(?:;|$)/, 'the session cookie is scoped to /api');
       assert.ok(setCookie.includes('Max-Age=2592000'), 'thirty-day session');
       const cookie = setCookie.split(';')[0];
+      // Session ids are random: a second login gets a new id, and no id derives from the key.
+      r2 = await lanPost('/api/login', JSON.stringify({ key: lanKey }), { 'Content-Type': 'application/json' });
+      assert.equal(r2.status, 200, 'a second login with the right key passes');
+      const cookie2 = (r2.headers.get('set-cookie') ?? '').split(';')[0];
+      const sessionId = c => /^alate_session=([a-f0-9]{64})$/.exec(c)?.[1];
+      assert.ok(sessionId(cookie) && sessionId(cookie2), 'both logins set a 64-hex session id');
+      assert.notEqual(sessionId(cookie2), sessionId(cookie), 'two logins get two different session ids');
+      const keyDerived = createHash('sha256').update(`alate-session:${lanKey}`).digest('hex');
+      assert.ok(![sessionId(cookie), sessionId(cookie2)].includes(keyDerived), 'no session id derives from the key');
+      r2 = await lanGet('/api/state', { cookie: cookie2 });
+      assert.equal(r2.status, 200, 'the second session reads state');
 
       r2 = await lanGet('/api/state', { cookie });
       assert.equal(r2.status, 200, 'the session cookie reads state');
@@ -3086,17 +3110,59 @@ try {
       assert.equal(r2.status, 200, 'the session is found behind another cookie');
       r2 = await lanPost('/api/settings', JSON.stringify({ autoUpdate: true }), { 'Content-Type': 'application/json', cookie: `other=1; ${cookie}`, origin: lanOrigin });
       assert.equal(r2.status, 200, 'a cookie write behind another cookie passes');
+      // A sibling service on the same host name can set its own alate_session cookie: an id
+      // this server never issued must not block a valid one behind it, and alone it opens nothing.
+      const unissued = `alate_session=${'0'.repeat(64)}`;
+      r2 = await lanGet('/api/state', { cookie: `${unissued}; ${cookie}` });
+      assert.equal(r2.status, 200, 'an unissued session id before the valid one does not block it');
+      r2 = await lanGet('/api/state', { cookie: unissued });
+      assert.equal(r2.status, 401, 'an unissued session id alone is refused');
       // Bearer works for scripts on the network bind.
       r2 = await lanGet('/api/state', { authorization: `Bearer ${lanKey}` });
-      assert.equal(r2.status, 200);
+      assert.equal(r2.status, 200, 'the Bearer key reads state off loopback');
       r2 = await lanPost(importPath, JSON.stringify({ source: origin }), { 'Content-Type': 'application/json', authorization: `Bearer ${lanKey}` });
       assert.equal(r2.status, 200, JSON.stringify(await r2.json()));
-      // Rotating the key ends the cookie session, because the token derives from the key.
-      r2 = await lanPost('/api/key', undefined, { authorization: `Bearer ${lanKey}` });
-      assert.equal(r2.status, 200);
-      lanKey = (await r2.json()).key;
+      // Replay: a cookie leaks to a sibling port on the same host, and a non-browser client
+      // sets a same-origin Origin itself. A session alone must not rotate the key.
+      r2 = await lanPost('/api/key', undefined, { cookie, origin: lanOrigin });
+      assert.equal(r2.status, 403, 'a replayed session without the current key cannot rotate');
+      assert.deepEqual(await r2.json(), { error: 'current key required' }, 'the 403 names the missing proof');
+      assert.equal(JSON.parse(readFileSync(lanConfig, 'utf8')).apiKey, lanKey, 'the key file is unchanged after the replay');
+      r2 = await lanGet('/api/state', { authorization: `Bearer ${lanKey}` });
+      assert.equal(r2.status, 200, 'the old key still works after the replay');
       r2 = await lanGet('/api/state', { cookie });
-      assert.equal(r2.status, 401, 'the old cookie dies with the key');
+      assert.equal(r2.status, 200, 'the session still reads state after the refused replay');
+      const lanUrl = new URL(lanBase);
+      const siblingOrigin = `http://${lanUrl.hostname}:${Number(lanUrl.port) + 1}`;
+      r2 = await lanPost('/api/key', undefined, { cookie, origin: siblingOrigin });
+      assert.equal(r2.status, 401, 'a replay with a sibling-port Origin is refused by the guard');
+      assert.equal(JSON.parse(readFileSync(lanConfig, 'utf8')).apiKey, lanKey, 'the key file is unchanged after the sibling-port replay');
+      // The current key in the body proves the caller, so the dashboard rotates with a session.
+      // Rotation clears the session store: every session ends, not only the rotating one.
+      const preRotationKey = lanKey;
+      r2 = await lanPost('/api/key', JSON.stringify({ key: lanKey }), { 'Content-Type': 'application/json', cookie, origin: lanOrigin });
+      assert.equal(r2.status, 200, 'a session plus the current key in the body rotates the key');
+      lanKey = (await r2.json()).key;
+      assert.equal(typeof lanKey, 'string', 'the rotation returns the new key');
+      assert.notEqual(lanKey, preRotationKey, 'the rotation issues a different key');
+      assert.equal(JSON.parse(readFileSync(lanConfig, 'utf8')).apiKey, lanKey, 'the new key is persisted');
+      r2 = await lanGet('/api/state', { cookie });
+      assert.equal(r2.status, 401, 'the rotating session ends with the rotation');
+      r2 = await lanGet('/api/state', { cookie: cookie2 });
+      assert.equal(r2.status, 401, 'the second session ends too: rotation clears the session store');
+      r2 = await lanGet('/api/state', { authorization: `Bearer ${preRotationKey}` });
+      assert.equal(r2.status, 401, 'the old key stops working after the rotation');
+      // A Bearer rotation needs no body. It also clears the session store, so every cookie session ends.
+      r2 = await lanPost('/api/login', JSON.stringify({ key: lanKey }), { 'Content-Type': 'application/json' });
+      assert.equal(r2.status, 200, 'the new key logs in');
+      const cookie3 = (r2.headers.get('set-cookie') ?? '').split(';')[0];
+      r2 = await lanGet('/api/state', { cookie: cookie3 });
+      assert.equal(r2.status, 200, 'the fresh session reads state');
+      r2 = await lanPost('/api/key', undefined, { authorization: `Bearer ${lanKey}` });
+      assert.equal(r2.status, 200, 'the Bearer key rotates without a body');
+      lanKey = (await r2.json()).key;
+      r2 = await lanGet('/api/state', { cookie: cookie3 });
+      assert.equal(r2.status, 401, 'the session ends with the Bearer rotation');
       r2 = await lanGet('/api/state', { authorization: `Bearer ${lanKey}` });
       assert.equal(r2.status, 200, 'the new key works');
       r2 = await lanGet('/api/files', { authorization: `Bearer ${lanKey}` });
