@@ -1710,43 +1710,83 @@ exit 0
   }
 
   // The plugins block: with omp/plugins/package.json in the snapshot and no --skip-plugins,
-  // the script runs `bun install --frozen-lockfile --backend copyfile` (plus --ignore-scripts
-  // unless the data repo allows plugin scripts) with cwd <home>/.omp/plugins through a stub
-  // bun that records argv and cwd; a missing bun and a failing bun fail with distinct
-  // messages, and --skip-plugins never spawns bun at all.
+  // the script runs `bun install --frozen-lockfile --backend copyfile --linker hoisted` (plus --ignore-scripts
+  // unless the data repo allows plugin scripts) through a stub bun that records argv, cwd,
+  // and the ../package.json it sees. bun runs in <home>/.omp/plugins, and a barrier
+  // <home>/.omp/package.json declaring no workspaces is present only while bun runs; an
+  // existing entry at that path moves aside and comes back, also when bun fails. A missing
+  // bun and a failing bun fail with distinct messages, and --skip-plugins never spawns bun.
   if (scanned) {
     const bunLog = join(stubDir, 'bun-calls.log');
+    const barrierLog = join(stubDir, 'bun-barrier.log');
     const bunDir = join(tmp, 'bun-stub');
     mkdirSync(bunDir, { recursive: true });
+    const bunCall = () => {
+      const [cwd, ...argv] = readFileSync(bunLog, 'utf8').trimEnd().split('\n');
+      return { cwd, argv, barrier: readFileSync(barrierLog, 'utf8') };
+    };
     const writeBun = exit => {
       rmSync(bunLog, { force: true });
-      writeFileSync(join(bunDir, 'bun'), `#!/bin/sh\n{ pwd; printf '%s\\n' "$@"; } >> '${bunLog}'\nexit ${exit}\n`);
+      rmSync(barrierLog, { force: true });
+      writeFileSync(join(bunDir, 'bun'), `#!/bin/sh\n{ pwd; printf '%s\\n' "$@"; } >> '${bunLog}'\ncat ../package.json > '${barrierLog}' 2>/dev/null || echo NO-BARRIER > '${barrierLog}'\nexit ${exit}\n`);
       chmodSync(join(bunDir, 'bun'), 0o755);
     };
     const bunEnv = { ...process.env, PATH: `${stubDir}${delimiter}${bunDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv') };
     const plugHome = join(tmp, 'plug-home');
+    const pluginsDir = join(plugHome, '.omp', 'plugins');
+    const barrierPath = join(plugHome, '.omp', 'package.json');
+    const sentinel = '{"name":"machine"}\n';
+    const assertBarrierRun = label => {
+      const call = bunCall();
+      assert.ok([pluginsDir, realpathSync(pluginsDir)].includes(call.cwd), `${label}: bun runs in <home>/.omp/plugins: ${call.cwd}`);
+      assert.notEqual(call.barrier, 'NO-BARRIER\n', `${label}: bun sees a package.json in <home>/.omp`);
+      assert.deepEqual(JSON.parse(call.barrier), { private: true, workspaces: [] }, `${label}: bun sees the barrier that declares no workspaces`);
+      return call;
+    };
+    const asides = () => readdirSync(join(plugHome, '.omp')).filter(name => name.startsWith('package.json.alate-aside-'));
+    const assertRestored = label => {
+      assert.equal(readFileSync(barrierPath, 'utf8'), sentinel, `${label}: the existing <home>/.omp/package.json comes back with its bytes`);
+      assert.deepEqual(asides(), [], `${label}: no aside copy remains in <home>/.omp`);
+    };
     writeBun(0);
     let r = run(['--data', data], plugHome, bunEnv);
     assert.equal(r.status, 0, r.stderr);
     assert.doesNotMatch(r.stdout, /plugins skipped/, 'a real plugin install is never reported as skipped');
-    assert.equal(readFileSync(bunLog, 'utf8'),
-      `${join(plugHome, '.omp', 'plugins')}\ninstall\n--frozen-lockfile\n--backend\ncopyfile\n--ignore-scripts\n`,
-      'bun runs install --frozen-lockfile --backend copyfile --ignore-scripts inside <home>/.omp/plugins');
+    const call = assertBarrierRun('a passing bun');
+    assert.deepEqual(call.argv, ['install', '--frozen-lockfile', '--backend', 'copyfile', '--linker', 'hoisted', '--ignore-scripts'],
+      'bun runs install --frozen-lockfile --backend copyfile --linker hoisted --ignore-scripts');
+    assert.ok(!existsSync(barrierPath), 'a passing bun: the barrier is removed after the run');
     // --skip-plugins never spawns bun even though the snapshot ships plugins/package.json.
     rmSync(bunLog, { force: true });
     r = run(['--data', data, '--skip-plugins'], plugHome, bunEnv);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /plugins skipped/);
     assert.ok(!existsSync(bunLog), 'a skipped install never invokes bun');
+    // An existing entry at the barrier path: bun still sees the barrier, never the entry.
+    writeFileSync(barrierPath, sentinel);
+    writeBun(0);
+    r = run(['--data', data], plugHome, bunEnv);
+    assert.equal(r.status, 0, r.stderr);
+    assertBarrierRun('a passing bun over an existing entry');
+    assertRestored('a passing bun over an existing entry');
     // A bun that fails is an error naming the plugins directory.
     writeBun(1);
     r = run(['--data', data], plugHome, bunEnv);
     assert.equal(r.status, 1);
-    assert.ok(r.stderr.includes(`bun install failed in ${join(plugHome, '.omp', 'plugins')}`), r.stderr);
+    assert.ok(r.stderr.includes(`bun install failed in ${pluginsDir}`), r.stderr);
+    assertBarrierRun('a failing bun over an existing entry');
+    assertRestored('a failing bun over an existing entry');
+    rmSync(barrierPath, { force: true });
+    writeBun(1);
+    r = run(['--data', data], plugHome, bunEnv);
+    assert.equal(r.status, 1);
+    assertBarrierRun('a failing bun');
+    assert.ok(!existsSync(barrierPath), 'a failing bun: the barrier is removed after the run');
     // A missing bun is a distinct, clearer error.
     r = run(['--data', data], plugHome, { ...process.env, PATH: stubDir, SKILLSPECTOR_VENV: join(tmp, 'no-venv') });
     assert.equal(r.status, 1);
     assert.match(r.stderr, /bun not found; cannot install plugins\./);
+    assert.ok(!existsSync(barrierPath), 'a missing bun: the barrier is removed after the run');
   } else {
     console.log('win32: the bun-stub checks need extensionless stubs; skipped');
   }
@@ -2076,6 +2116,83 @@ exit 0
       assert.ok(!existsSync(pwned), 'the planted postinstall never ran');
       assert.ok(!existsSync(join(p2, '.omp/plugins/pwned')), 'no marker lands in the plugins dir either');
     }
+    // bun install adopts an ancestor package.json whose workspaces glob matches the install
+    // dir as its workspace root and runs that root's lifecycle scripts, and every ancestor of
+    // the plugins dir sits in the turn-writable home. So even with plugin scripts on, a
+    // planted root never runs: only the snapshot's own postinstall does. bun keeps running
+    // in the real plugins dir, so a relative file: dep outside it (../agent/extensions/dep2)
+    // and a workspace member's postinstall build output (wdep/dist.js) keep working.
+    if (hasBun) {
+      const wsData = join(tmp, 'data-plugins-ws');
+      const putW = (rel, text) => { mkdirSync(dirname(join(wsData, 'user', rel)), { recursive: true }); writeFileSync(join(wsData, 'user', rel), text); };
+      const wsPkg = okFile => `${JSON.stringify({ name: 'plugins', private: true, workspaces: ['wdep'], dependencies: { dep: 'file:./dep', dep2: 'file:../agent/extensions/dep2', wdep: 'workspace:*' }, scripts: { postinstall: `echo OK > ${okFile}` } }, null, 2)}\n`;
+      const evilPkg = (workspaces, mark) => `${JSON.stringify({ name: 'evil', workspaces, scripts: { postinstall: `echo pwned > ${mark}` } }, null, 2)}\n`;
+      const okMark = join(tmp, 'ws-ok');
+      // The plugins tree under omp/, written to the snapshot and to a scratch .omp dir.
+      const wsTree = {
+        'plugins/package.json': wsPkg(okMark),
+        'plugins/dep/package.json': '{\n  "name": "dep",\n  "version": "1.0.0"\n}\n',
+        'plugins/wdep/package.json': `${JSON.stringify({ name: 'wdep', version: '1.0.0', main: 'dist.js', scripts: { postinstall: 'node -e "require(\'fs\').writeFileSync(\'dist.js\',\'module.exports = 43;\')"' } })}\n`,
+        'agent/extensions/dep2/package.json': '{"name":"dep2","version":"1.0.0","main":"index.js"}\n',
+        'agent/extensions/dep2/index.js': 'module.exports = 42;\n',
+      };
+      putW('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+      putW('layer-rule.md', '---\ndescription: layer plugin rule\n---\n\nBody\n');
+      for (const [rel, text] of Object.entries(wsTree)) putW(`omp/${rel}`, text);
+      // --frozen-lockfile needs a bun.lock that matches the manifest exactly, so the test
+      // lets bun write it from the same tree (scripts off: no postinstall runs here).
+      const lockScratch = join(tmp, 'ws-lock');
+      for (const [rel, text] of Object.entries(wsTree)) {
+        mkdirSync(dirname(join(lockScratch, '.omp', rel)), { recursive: true });
+        writeFileSync(join(lockScratch, '.omp', rel), text);
+      }
+      const lockRun = spawnSync('bun', ['install', '--ignore-scripts', '--backend', 'copyfile'],
+        { cwd: join(lockScratch, '.omp/plugins'), env: { PATH: process.env.PATH, HOME: join(tmp, 'ws-lock-home') }, encoding: 'utf8' });
+      assert.equal(lockRun.status, 0, `bun writes the fixture bun.lock: ${lockRun.stderr}`);
+      putW('omp/plugins/bun.lock', readFileSync(join(lockScratch, '.omp/plugins/bun.lock'), 'utf8'));
+      writeFileSync(join(wsData, 'plugins-allow-scripts'), '\n');
+      const assertInstalled = (root, label) => {
+        const plugins = join(root, '.omp/plugins');
+        // require takes a variable, so the zero-deps import scan (keyword + quote) never matches.
+        const imported = spawnSync(process.execPath, ['-e', 'const load = n => String(require(n)); process.stdout.write(load("dep2") + " " + load("wdep"))'], { cwd: plugins, encoding: 'utf8' });
+        assert.equal(imported.stdout, '42 43', `${label}: the file: dep outside the plugins dir and the built workspace member import: ${imported.stderr}`);
+        assert.ok(existsSync(join(plugins, 'wdep/dist.js')), `${label}: the workspace member postinstall builds dist.js in the plugins dir`);
+        assert.ok(!existsSync(join(root, '.omp/package.json')), `${label}: the barrier is removed after the run`);
+      };
+      // In place: the home itself claims .omp/plugins as a workspace.
+      const wsHome = join(tmp, 'ws-home');
+      const wsPwned = join(tmp, 'ws-pwned');
+      mkdirSync(wsHome, { recursive: true });
+      writeFileSync(join(wsHome, 'package.json'), evilPkg(['.omp/plugins'], wsPwned));
+      let rw = run(['--data', wsData], wsHome);
+      assert.equal(rw.status, 0, rw.stderr);
+      assert.ok(existsSync(okMark), 'the opted-in snapshot postinstall still runs in the plugins dir');
+      assert.ok(!existsSync(wsPwned), 'the planted home workspace root never runs its postinstall');
+      assert.ok(existsSync(join(wsHome, '.omp/plugins/node_modules/dep/package.json')), 'the dependency lands in <home>/.omp/plugins/node_modules');
+      assert.ok(!existsSync(join(wsHome, 'node_modules')), 'bun never installs into the planted workspace root');
+      assert.equal(statSync(join(wsHome, '.omp/plugins/dep/package.json')).nlink, 1, 'the install leaves the snapshot source with one link');
+      assertInstalled(wsHome, 'the first in-place run');
+      rw = run(['--data', wsData], wsHome);
+      assert.equal(rw.status, 0, rw.stderr);
+      assert.ok(existsSync(join(wsHome, '.omp/plugins/node_modules/dep/package.json')), 'a second run replaces node_modules and keeps the dependency');
+      assert.ok(!existsSync(wsPwned), 'the planted root stays inert on a second run');
+      assertInstalled(wsHome, 'the second in-place run');
+      // Layer mode: the home and .alate both claim the layer's plugins dir as a workspace.
+      const wsLayerHome = join(tmp, 'ws-layer-home');
+      const wsLayerPwned = join(tmp, 'ws-layer-pwned');
+      const okMark2 = join(tmp, 'ws-ok2');
+      putW('omp/plugins/package.json', wsPkg(okMark2));
+      mkdirSync(join(wsLayerHome, '.alate'), { recursive: true });
+      writeFileSync(join(wsLayerHome, 'package.json'), evilPkg(['.omp/plugins', '.alate/layers/*/.omp/plugins'], wsLayerPwned));
+      writeFileSync(join(wsLayerHome, '.alate', 'package.json'), evilPkg(['layers/*/.omp/plugins'], wsLayerPwned));
+      rw = run(['--data', wsData, '--layer'], wsLayerHome);
+      assert.equal(rw.status, 0, rw.stderr);
+      assert.ok(!existsSync(wsLayerPwned), 'no planted ancestor of the layer runs its postinstall');
+      const wsLayer = realpathSync(join(wsLayerHome, '.alate', 'current'));
+      assert.ok(existsSync(join(wsLayer, '.omp/plugins/node_modules/dep/package.json')), 'the dependency lands in the new layer');
+      assert.ok(existsSync(okMark2), 'the opted-in snapshot postinstall runs for a layer too');
+      assertInstalled(wsLayer, 'the layer run');
+    }
     const shimDir = join(tmp, 'bun-stub');
     const bunCalls = join(shimDir, 'calls.json');
     mkdirSync(shimDir, { recursive: true });
@@ -2089,7 +2206,7 @@ exit 0
     let rs = runP(shimHome, [], shimEnv);
     assert.equal(rs.status, 0, rs.stderr);
     let call = JSON.parse(readFileSync(bunCalls, 'utf8'));
-    assert.deepEqual(call.argv, ['install', '--frozen-lockfile', '--backend', 'copyfile', '--ignore-scripts']);
+    assert.deepEqual(call.argv, ['install', '--frozen-lockfile', '--backend', 'copyfile', '--linker', 'hoisted', '--ignore-scripts']);
     assert.ok(!call.env.includes('ALATE_API_KEY') && !call.env.includes('GITHUB_TOKEN'), 'server secrets never reach bun');
     assert.ok(call.env.includes('PATH') && call.env.includes('HOME'));
     assert.ok(typeof call.cache === 'string' && call.cache !== sharedCache, 'bun gets its own cache dir, never the caller one');
@@ -2101,7 +2218,7 @@ exit 0
     rs = runP(shimHome, [], shimEnv);
     assert.equal(rs.status, 0, rs.stderr);
     call = JSON.parse(readFileSync(bunCalls, 'utf8'));
-    assert.deepEqual(call.argv, ['install', '--frozen-lockfile', '--backend', 'copyfile'], 'the data-repo marker opts in');
+    assert.deepEqual(call.argv, ['install', '--frozen-lockfile', '--backend', 'copyfile', '--linker', 'hoisted'], 'the data-repo marker opts in');
     assert.ok(call.cache !== firstCache && !existsSync(call.cache), 'each install gets a fresh cache dir, removed afterward');
     assert.ok(!call.env.includes('ALATE_API_KEY') && !call.env.includes('GITHUB_TOKEN'), 'the allowlist holds even when scripts are on');
 

@@ -80,12 +80,17 @@ Rules for the links:
 6. SkillSpector scan of the skills inside the installed layer, same pin, same flags
    (`--no-llm --fail-on-findings --use-shipped-baseline`). A failed scan deletes the layer
    folder and leaves `current` unchanged.
-7. Plugins: `bun install --frozen-lockfile --backend copyfile` with cwd `<layer>/.omp/plugins`,
-   so `node_modules` of a running turn never change (unless `--skip-plugins`). The install
+7. Plugins: `bun install --frozen-lockfile --backend copyfile --linker hoisted` with cwd `<layer>/.omp/plugins`,
+   so `node_modules` of a running turn never change (unless `--skip-plugins`). While bun
+   runs, `<layer>/.omp/package.json` holds a barrier with empty `workspaces`: bun ends its
+   workspace-root search there, so a `package.json` that a turn plants higher in the home is
+   never adopted as the root, and its scripts never run. An entry that already sits at the
+   barrier path moves aside and comes back after the install. The install
    runs with `--ignore-scripts` unless the data repo ships a `plugins-allow-scripts` marker
    at its root, and the spawn environment is an explicit allowlist, so server secrets never
-   reach bun or a lifecycle script. The copyfile backend keeps every snapshot file
-   single-linked, so the alias guards on machine reads never refuse a link the provisioner
+   reach bun or a lifecycle script. The copyfile backend and the hoisted linker keep every
+   snapshot file single-linked (bun's isolated linker, the default for a manifest with
+   workspaces, hardlinks `file:` deps whatever the backend), so the alias guards on machine reads never refuse a link the provisioner
    created itself. A failure deletes the layer folder and leaves `current` unchanged.
 8. Create the link set in the layer.
 9. Switch: create a temporary symlink in the base dir, then `rename()` it over `current`.

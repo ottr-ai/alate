@@ -24,13 +24,15 @@
 // JSON config is adapted to the target machine first (forTarget, lib/data.mjs): a Windows capture
 // on a non-Windows machine, a POSIX-absolute capture path on Windows.
 // Plugins install from the captured lockfile with `bun install --frozen-lockfile` in ~/.omp/plugins, the
-// same root omp's plugin manager installs into. The install runs with --ignore-scripts unless the data
-// repo opts in with a plugins-allow-scripts marker at its root, and with an allowlisted environment, so
-// server secrets never reach bun or a lifecycle script. Packages install with bun's copyfile
-// backend, so the provisioner never creates a hard link into the snapshot tree, and from a fresh
-// private package cache, so a turn-written ~/.bun cache entry never lands in the plugins. In layer mode a
-// machine change to the plugins install files (package.json, bun.lock, patches/) never rides into
-// the new layer: the snapshot wins.
+// same root omp's plugin manager installs into. While bun runs, a barrier ~/.omp/package.json with
+// empty workspaces stops bun's workspace-root search, so bun never adopts a turn-planted
+// package.json higher in the home as its workspace root. The install runs with --ignore-scripts
+// unless the data repo opts in with a plugins-allow-scripts marker at its root, and with an
+// allowlisted environment, so server secrets never reach bun or a lifecycle script. Packages
+// install with bun's copyfile backend and hoisted linker, so the provisioner never creates a
+// hard link into the snapshot tree, and from a fresh private package cache, so a turn-written
+// ~/.bun cache entry never lands in the plugins. In layer mode a machine change to the plugins
+// install files (package.json, bun.lock, patches/) never rides into the new layer: the snapshot wins.
 // Also installs the per-project worker additions Ottr's turns read: workers/<project>/apt.txt
 // (Debian packages), tools.json (declarative downloads), env.txt (env names, never values) and
 // requirements.txt (pinned, hashed Python packages)
@@ -1320,12 +1322,17 @@ try {
     const pluginsInSnapshot = existsSync(join(userRoot, 'omp', 'plugins', 'package.json'));
     if (!skipPlugins && pluginsInSnapshot) {
       const pluginsDir = join(writeRoot, '.omp', 'plugins');
-      // copyfile, never bun's hardlink default: a file: dep's snapshot source would end up
-      // with a second link, and the alias guards on machine reads and writes would refuse
-      // the next provision. Planted aliases still refuse; the provisioner creates none.
-      const bunArgs = allowPluginScripts
-        ? ['install', '--frozen-lockfile', '--backend', 'copyfile']
-        : ['install', '--frozen-lockfile', '--backend', 'copyfile', '--ignore-scripts'];
+      // bun install adopts an ancestor package.json whose workspaces glob matches the install
+      // dir as its workspace root and runs that root's lifecycle scripts, and the ancestors of
+      // pluginsDir sit in the turn-writable home. bun ends that search at the first parent
+      // that declares workspaces, matching or not (seen on Bun 1.4.2 and 1.4.4), so a barrier
+      // in pluginsDir's parent hides every ancestor above it. bun still runs in pluginsDir
+      // itself, so relative file: deps and workspace build output keep their real paths. An
+      // existing entry at the barrier path moves aside (rename never follows a link) and
+      // comes back after the install; the exclusive write refuses a path replanted meanwhile.
+      const barrier = join(writeRoot, '.omp', 'package.json');
+      const aside = lstatSync(barrier, { throwIfNoEntry: false }) ? `${barrier}.alate-aside-${process.pid}` : null;
+      if (aside) renameSync(barrier, aside);
       // A fresh, provisioner-private package cache per install: bun copies cached package
       // bytes without checking them against bun.lock's integrity (measured on 1.4.4), and the
       // shared ~/.bun cache is turn-writable (each layer links .bun back to the home). The
@@ -1333,6 +1340,14 @@ try {
       const bunCache = mkdtempSync(join(tmpdir(), 'alate-bun-cache-'));
       let bun;
       try {
+        writeFileSync(barrier, '{ "private": true, "workspaces": [] }\n', { flag: 'wx' });
+        // copyfile, never bun's hardlink default: a file: dep's snapshot source would end up
+        // with a second link, and the alias guards on machine reads and writes would refuse
+        // the next provision. Planted aliases still refuse; the provisioner creates none.
+        // The hoisted linker too: a manifest with workspaces defaults to bun's isolated
+        // linker, which hardlinks file: deps whatever the backend (Bun 1.4.2 and 1.4.4).
+        const bunArgs = ['install', '--frozen-lockfile', '--backend', 'copyfile', '--linker', 'hoisted'];
+        if (!allowPluginScripts) bunArgs.push('--ignore-scripts');
         bun = spawnSync('bun', bunArgs, {
           cwd: pluginsDir,
           stdio: 'inherit',
@@ -1340,6 +1355,8 @@ try {
         });
       } finally {
         rmSync(bunCache, { recursive: true, force: true });
+        rmSync(barrier, { force: true });
+        if (aside) renameSync(aside, barrier);
       }
       if (bun.error || bun.status !== 0) {
         throw new Error(/** @type {NodeJS.ErrnoException} */ (bun.error)?.code === 'ENOENT' ? 'bun not found; cannot install plugins.' : `bun install failed in ${pluginsDir}`);
