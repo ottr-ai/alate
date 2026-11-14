@@ -26,7 +26,9 @@ running turn reads: it installs into a new folder, then one atomic rename makes 
   imported commit of a repo source, and a value that is not 40 or 64 hex characters
   refuses the run before any write — else `git -C <data-dir> rev-parse HEAD`. A data dir
   without git, a path-source provision, and a CLI run without `--commit` use `nogit`. `<n>`
-  continues the highest counter already on disk for that commit, starting at 1.
+  continues the highest counter already on disk for that commit, starting at 1. The counter
+  is exact for each length of digits (BigInt), so a planted large counter cannot round the
+  next name back onto the planted name.
 - Switch link: `<home>/.alate/current`, a symlink with an absolute target. It exists only as
   absent or as a symlink; anything else refuses the run before any write.
 - In-use record: `<home>/.alate/in-use.json`, shape `{"layers": ["<id>", ...]}`. The turn
@@ -72,7 +74,11 @@ Rules for the links:
 1. Preflight: `current` must be absent or a symlink; otherwise refuse before any write.
 2. Plan from the snapshot. The content gates (Markdown rule gate, worker list validation)
    run before any write, exactly as today.
-3. Create `<home>/.alate/layers/<id>`.
+3. Create `<home>/.alate/layers/<id>`. The run creates each path component below the home
+   one at a time and never through a symlink. The layer dir itself must not exist yet, not
+   even as a dangling link. A planted entry at the layer path, or a symlink at `.alate` or
+   `.alate/layers`, refuses the run, and the run does not delete the planted entry. The run
+   creates `<layer>/.omp/agent/rules` the same way before step 4.
 4. Rules: spawn `node sync.mjs <layer>/.omp/agent/rules --data <dir>`. Its gates stay
    fail-closed; a failure surfaces its error text, deletes the layer folder, and exits
    non-zero with `current` unchanged.
@@ -236,6 +242,9 @@ them at turn end.
   target's bytes into the new layer. The same is true for a symlink that replaces the file
   after the check and before the read.
 - `current` as a real directory refuses the run before any write.
+- A symlink planted at `layers/nogit-9007199254740992` does not receive the layer: the run
+  switches to `layers/nogit-9007199254740993`. A symlinked `.alate/layers` refuses the run,
+  and the link target receives no file.
 - The non-layer suite (`install-user.test.mjs`) passes unchanged.
 
 ## Non-goals
@@ -245,3 +254,20 @@ them at turn end.
 - No migration of an existing real `current` directory.
 - The ottr side (idle-gate removal in `alateProvisionTick`, the board seed of
   `OTTR_BOARD_OMP_HOME`, the entry script, turn pinning) is owned by OTTR-451.
+
+## Risks
+
+- The ottr server, both workers, and the alate container write the shared home as one user
+  (`/root`). Thus file modes cannot keep a turn out of a layer that the provisioner builds.
+  A symlink that alate follows resolves in the mount namespace of the alate container.
+- Mitigation: each layer-mode write (`writeFileInside` in `lib/data.mjs`) creates its
+  missing dirs without a symlink, repeats `checkDestination` immediately before the open,
+  and opens with `O_NOFOLLOW`. The layer record opens with `O_EXCL`. `sync.mjs` writes its
+  rules and its record the same way.
+- Limit: Node has no `openat`. A turn that swaps a dir component for a symlink between the
+  last check and the open can still redirect one write. The plugins install (`bun`) and the
+  SkillSpector scan also use paths in the layer without these checks.
+- Alternatives considered: build the layer in a `mkdtemp` dir and rename it into `layers/`.
+  Rejected: the shared home has no dir that only the provisioner can write, and a dir
+  outside the volume cannot be renamed into it. The exclusive create already refuses
+  each planted layer path.

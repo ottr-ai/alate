@@ -11,11 +11,11 @@
 //     a layer install) instead of the fresh target; the compare dir is read-only, a rule
 //     the data repo drops counts as deleted there whether or not its live copy changed,
 //     and the fresh target still receives every rule byte.
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { assertSourceInside, checkDestination, cleanupData, describeProblem, die, fingerprint, NOT_RULES, originGate, parseArgs, PROVISION_ENV, resolveDataDir, ruleProblems, writeProvisionResults } from './lib/data.mjs';
+import { assertSourceInside, checkDestination, cleanupData, describeProblem, die, fingerprint, NOT_RULES, originGate, parseArgs, PROVISION_ENV, resolveDataDir, ruleProblems, writeFileInside, writeProvisionResults } from './lib/data.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
 /** @typedef {{ item: string, status: 'installed' | 'unchanged' | 'added' | 'updated' | 'rejected' | 'no-origin', rule: string | null, at: string | null, report?: string }} ProvisionItem */
@@ -129,7 +129,7 @@ try {
     const same = oldBytes?.equals(bytes) ?? false;
     // Compare mode writes every rule: the fresh target needs the bytes even when the
     // compare dir already holds them.
-    if (compareMode || !same) writeFileSync(join(target, name), bytes);
+    if (compareMode || !same) writeFileInside(target, join(target, name), bytes);
     if (same) {
       unchanged++;
       failItem(name, 'unchanged');
@@ -170,7 +170,7 @@ try {
   // a kept-but-changed copy loses its record when the manifest is rewritten below.
   const stale = readdirSync(target).filter(name => isMd(name) && !rules.has(name) && !gone.has(name));
   if (stale.length) console.log(`Not from the data repo, left in place: ${stale.join(', ')}`);
-  writeFileSync(manifestFile, `${JSON.stringify(Object.fromEntries([...rules.keys()].map(name => [name, fingerprint(name, /** @type {Buffer} */ (rules.get(name)))])), null, 2)}\n`);
+  writeFileInside(target, manifestFile, `${JSON.stringify(Object.fromEntries([...rules.keys()].map(name => [name, fingerprint(name, /** @type {Buffer} */ (rules.get(name)))])), null, 2)}\n`);
   items.sort((a, b) => (a.item < b.item ? -1 : a.item > b.item ? 1 : 0));
   const failed = items.filter(it => it.status === 'rejected' || it.status === 'no-origin');
   if (failed.length) {

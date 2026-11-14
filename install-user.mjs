@@ -45,7 +45,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeProvisionResults, yamlProblems } from './lib/data.mjs';
+import { assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, makeDirInside, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeFileInside, writeProvisionResults, yamlProblems } from './lib/data.mjs';
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
@@ -1308,11 +1308,19 @@ try {
   // rename deletes the fresh layer and leaves current — and with it every running turn —
   // untouched; the switch itself is one atomic rename.
   let switched = false;
+  let layerCreated = false;
   let tmpLink = null;
   try {
     if (layerMode) {
       // The layer dir exists only after every content gate passed (rule gate, worker validation).
-      mkdirSync(/** @type {string} */ (newLayerDir), { recursive: true });
+      // A turn can write the shared home, so the layer path is created exclusively and never
+      // through a link: a planted entry at the layer name or a symlinked .alate/layers refuses
+      // the run, where a recursive mkdir adopted it and every write landed at the link target.
+      makeDirInside(layerHome, /** @type {string} */ (newLayerDir), true);
+      layerCreated = true;
+      // The nested sync treats its target as a chosen root and creates it recursively, so
+      // the rules dir is created here first, inside the layer and through no link.
+      makeDirInside(/** @type {string} */ (newLayerDir), join(/** @type {string} */ (newLayerDir), '.omp', 'agent', 'rules'));
       // The data-root rules install straight into the layer, through the same sync.mjs and its
       // per-item gates the server-side provision uses. When the server asked for per-item
       // results, sync.mjs writes its own file beside ours: its fatal refusal aborts the layer,
@@ -1351,8 +1359,7 @@ try {
     const labels = { added: 0, updated: 0, unchanged: 0 };
     for (const [kind, dest, bytes, , label] of plan) {
       if (!layerMode && kind === 'unchanged') { unchanged++; continue; }
-      mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, /** @type {Buffer} */ (bytes));
+      writeFileInside(writeRoot, dest, /** @type {Buffer} */ (bytes));
       installed++;
       // A layer-mode plan entry always carries a label string; null is the in-place shape.
       if (layerMode) labels[/** @type {'added' | 'updated' | 'unchanged'} */ (label)]++;
@@ -1390,8 +1397,8 @@ try {
     // The record the snapshot dropped is written as gone: if the path returns, an untouched
     // copy is freshly installed, and a changed copy wins as a plain conflict. In layer mode
     // the write sits after the layer scan, so a scan-rejected skill never enters the record.
-    mkdirSync(dirname(manifest), { recursive: true });
-    writeFileSync(manifest, `${JSON.stringify(current, null, 2)}\n`);
+    // A fresh layer never holds its record yet: O_EXCL refuses one planted there.
+    writeFileInside(writeRoot, manifest, `${JSON.stringify(current, null, 2)}\n`, layerMode);
 
     let pluginsStatus = /** @type {'installed' | 'unchanged' | null} */ (null);
     const pluginsInSnapshot = existsSync(join(userRoot, 'omp', 'plugins', 'package.json'));
@@ -1457,7 +1464,7 @@ try {
         const target = join(layerHome, rel);
         mkdirSync(dirname(target), { recursive: true });
         if (dirLinks.includes(rel)) mkdirSync(target, { recursive: true });
-        mkdirSync(dirname(join(/** @type {string} */ (newLayerDir), rel)), { recursive: true });
+        makeDirInside(/** @type {string} */ (newLayerDir), dirname(join(/** @type {string} */ (newLayerDir), rel)));
         symlinkSync(target, join(/** @type {string} */ (newLayerDir), rel));
       }
       // A reader of current sees the old or the new target, never a gap: rename() over the
@@ -1541,8 +1548,9 @@ try {
     }
     if (failed.length || nestedFailed) process.exitCode = 1;
   } catch (err) {
-    // A layer that never went live must not survive its own failed install.
-    if (layerMode && !switched) rmSync(/** @type {string} */ (newLayerDir), { recursive: true, force: true });
+    // A layer that never went live must not survive its own failed install; a path this run
+    // did not create (a refused planted entry) stays untouched.
+    if (layerMode && !switched && layerCreated) rmSync(/** @type {string} */ (newLayerDir), { recursive: true, force: true });
     if (tmpLink) rmSync(tmpLink, { force: true });
     throw err;
   }

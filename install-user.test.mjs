@@ -10,7 +10,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir, homedir, availableParallelism } from 'node:os';
 import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { CAPTURE_ROOTS, fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, readMachineFile, remapHomePaths, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
+import { CAPTURE_ROOTS, fingerprint, forAll, forTarget, keepTemp, makeDirInside, nextLayerCounter, readMachineFile, remapHomePaths, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, writeFileInside } from './lib/data.mjs';
 import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-install-'));
@@ -2508,18 +2508,62 @@ exit 0
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(readdirSync(relLayers).sort(), ['nogit-1', 'nogit-2'], 'clean-up keeps the previous layer from a relative --home');
 
-    // The layer helpers are pure: the counter never collides with the names it read and the
-    // home remap is reversible and inert without a boundary occurrence.
+    // A planted path never redirects the layer build. The counter stays exact past 2^53 (a
+    // Number counter rounded 2^53 + 1 back onto the planted name, and the recursive mkdir
+    // adopted the planted symlink), and a symlinked layers dir refuses the run before any
+    // write instead of building the layer at the link target.
+    const plantOut = join(tmpReal, 'layer-plant-outside');
+    mkdirSync(plantOut);
+    const plantHome = join(tmpReal, 'layer-home-plant');
+    mkdirSync(join(plantHome, '.alate', 'layers'), { recursive: true });
+    symlinkSync(plantOut, join(plantHome, '.alate', 'layers', 'nogit-9007199254740992'));
+    r = runL(plantHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(realpathSync(join(plantHome, '.alate', 'current')), join(plantHome, '.alate', 'layers', 'nogit-9007199254740993'), 'the counter continues past 2^53 exactly');
+    assert.deepEqual(readdirSync(plantOut), [], 'nothing lands through the planted layer name');
+    const plantHome2 = join(tmpReal, 'layer-home-plant-2');
+    mkdirSync(join(plantHome2, '.alate'), { recursive: true });
+    symlinkSync(plantOut, join(plantHome2, '.alate', 'layers'));
+    r = runL(plantHome2, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /is a symbolic link below the chosen root/);
+    assert.deepEqual(readdirSync(plantOut), [], 'a symlinked layers dir never receives the layer');
+    assert.equal(lstatSync(join(plantHome2, '.alate', 'current'), { throwIfNoEntry: false }), undefined, 'current never switches');
+    // The write helpers never adopt a planted path below their root: an existing exclusive
+    // leaf (dangling links included), a symlink or file at a directory component, or a
+    // symlink at the file leaf throws, and nothing lands outside the root.
+    const wroot = join(tmpReal, 'write-inside');
+    mkdirSync(join(wroot, 'taken'), { recursive: true });
+    symlinkSync(plantOut, join(wroot, 'dirlink'));
+    symlinkSync(join(plantOut, 'f'), join(wroot, 'filelink'));
+    symlinkSync(join(tmpReal, 'nowhere'), join(wroot, 'dangling'));
+    writeFileSync(join(wroot, 'plain'), 'x');
+    assert.throws(() => makeDirInside(wroot, join(wroot, 'taken'), true), /already exists/);
+    assert.throws(() => makeDirInside(wroot, join(wroot, 'dangling'), true), /already exists/);
+    assert.throws(() => makeDirInside(wroot, join(wroot, 'dirlink', 'sub')), /symbolic link/);
+    assert.throws(() => makeDirInside(wroot, join(wroot, 'plain', 'sub')), /not a directory/);
+    assert.throws(() => makeDirInside(wroot, join(tmpReal, 'elsewhere')), /outside/);
+    assert.throws(() => writeFileInside(wroot, join(wroot, 'dirlink', 'f'), 'y'), /symbolic link/);
+    assert.throws(() => writeFileInside(wroot, join(wroot, 'filelink'), 'y'), /not a regular file/);
+    writeFileInside(wroot, join(wroot, 'taken', 'a', 'b', 'f'), 'z');
+    writeFileInside(wroot, join(wroot, 'taken', 'a', 'b', 'f'), 'zz');
+    assert.equal(readFileSync(join(wroot, 'taken', 'a', 'b', 'f'), 'utf8'), 'zz', 'a plain write creates missing dirs and replaces the file');
+    assert.throws(() => writeFileInside(wroot, join(wroot, 'taken', 'a', 'b', 'f'), 'w', true), /EEXIST/);
+    assert.deepEqual(readdirSync(plantOut), [], 'no helper wrote through a planted link');
+
+    // The layer helpers are pure: the counter never collides with the names it read, stays
+    // exact past 2^53, and the home remap is reversible and inert without a boundary occurrence.
     const hex = rand => Array.from({ length: 12 }, () => '0123456789abcdef'[Math.floor(rand() * 16)]).join('');
+    const digits = rand => Array.from({ length: 15 + Math.floor(rand() * 15) }, () => Math.floor(rand() * 10)).join('');
     forAll((rand, size) => {
       const commit = rand() < 0.2 ? 'nogit' : hex(rand);
-      const used = Array.from({ length: Math.floor(rand() * (size + 1) * 4) }, () => `${commit}-${1 + Math.floor(rand() * 50)}`);
+      const used = Array.from({ length: Math.floor(rand() * (size + 1) * 4) }, () => `${commit}-${rand() < 0.3 ? digits(rand) : 1 + Math.floor(rand() * 50)}`);
       return { commit, used };
     }, ({ commit, used }) => {
       const n = nextLayerCounter(used, commit);
-      assert.ok(Number.isInteger(n) && n >= 1, `the counter is a positive integer: ${n}`);
+      assert.ok(typeof n === 'bigint' && n >= 1n, `the counter is a positive integer: ${n}`);
       assert.ok(!used.includes(`${commit}-${n}`), `the counter never collides: ${commit}-${n}`);
-      const max = used.map(u => Number(u.slice(commit.length + 1))).reduce((a, b) => Math.max(a, b), 0);
+      const max = used.map(u => BigInt(u.slice(commit.length + 1))).reduce((a, b) => (a > b ? a : b), 0n);
       assert.ok(n > max, `the counter continues the highest: ${n} > ${max}`);
     });
     const txtChars = ['a', 'Z', '0', '-', '.', ':', ' ', '"', '\\', '/', '\n', 'x', 'y'];
