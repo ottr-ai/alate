@@ -136,11 +136,15 @@ non-zero. A failure after the switch changes nothing about the switch itself.
 - Machine-side reads in layer mode never follow an alias out of the live layer. An agent
   turn runs with `HOME=<live layer>` on the shared home volume, so it can replace a
   snapshot path, or the layer's own install record, with a symlink, hard link, or special
-  file whose target the layer must not read (`/state`, `/proc`). Before any machine-side
-  read, the same `checkDestination` guard the write side applies runs against the read
-  path, and a violation refuses the whole run before any write, exactly like an alias at
-  a destination. A first layer over an in-place home applies the same guard to the home's
-  `config.yml` before the migration reads it.
+  file whose target the layer must not read (`/state`, `/proc`). Each machine-side read
+  goes through `readMachineFile` (lib/data.mjs). It runs the same `checkDestination` guard
+  that the write side applies against the read path. Then it opens the file one time with
+  `O_NOFOLLOW`, checks the open fd with `fstat` (regular file, one link), and reads the
+  bytes from that fd. On Linux, the fd path must also be the checked path. All later
+  uses take these bytes, so a link that a turn swaps in after the check fails the open
+  with `ELOOP`. A violation refuses the whole run before any write, exactly like an
+  alias at a destination. A first layer over an in-place home applies the same guard to
+  the home's `config.yml` before the migration reads it.
 
 ## Captured absolute paths
 
@@ -219,7 +223,8 @@ them at turn end.
 - Captured paths: a `catalogPath` under the home prefix lands re-rooted into the new layer.
 - A symlink planted on a snapshot path, or on `<live>/.alate/installed.json`, in the live
   layer refuses the run before any write, keeps the old current, and never copies the
-  target's bytes into the new layer.
+  target's bytes into the new layer. The same is true for a symlink that replaces the file
+  after the check and before the read.
 - `current` as a real directory refuses the run before any write.
 - The non-layer suite (`install-user.test.mjs`) passes unchanged.
 

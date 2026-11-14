@@ -43,7 +43,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend, writeProvisionResults } from './lib/data.mjs';
+import { assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, fingerprint, forTarget, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutMemoryBackend, writeProvisionResults } from './lib/data.mjs';
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
@@ -779,17 +779,18 @@ try {
   // with HOME=<live layer> on the shared home volume, so a snapshot path or this record
   // can hold a symlink, hard link, or special file whose target only the alate container
   // can read. The same alias guard the write side gets applies to every machine-side
-  // read, and a violation refuses the run before any write instead of copying the
-  // target's bytes into the new layer. A first layer over an in-place home reads the
-  // home's own record instead of the layer's, guarded the same way against layerHome.
-  // In-place mode reads only paths it already guards as dest (or writes itself), so this
-  // is layer-only.
-  if (layerMode) checkDestination(migratingHome ? layerHome : readRoot, lastManifest);
+  // read, and the bytes come from one no-follow fd (readMachineFile), so a violation or a
+  // swap after the check refuses the run before any write instead of copying the target's
+  // bytes into the new layer. A first layer over an in-place home reads the home's own
+  // record instead of the layer's, guarded the same way against layerHome. In-place mode
+  // reads the manifest path it already guards as dest, so the guard there changes nothing.
+  // A guard violation throws here, outside the catch below: it refuses the run.
+  const lastBytes = readMachineFile(migratingHome ? layerHome : readRoot, lastManifest);
   /** @type {Record<string, string>} */
   let last = {};
-  if (existsSync(lastManifest)) {
+  if (lastBytes !== null) {
     try {
-      last = JSON.parse(readFileSync(lastManifest, 'utf8'));
+      last = JSON.parse(lastBytes.toString('utf8'));
     } catch (err) {
       console.error(`Ignoring unreadable ${lastManifest} (/** @type {Error} */ (err).message): every file that differs from the snapshot counts as changed here.`);
     }
@@ -800,13 +801,13 @@ try {
   // config.yml that differs from the snapshot or its record only by the entry is not a
   // machine change. In-place mode keeps the entry in the comparison, so a file that differs
   // by the entry still refuses and --force still rewrites the entry away.
-  /** @param {string} rel @param {string} dest @returns {string | null} */
-  const machineFingerprint = (rel, dest) => {
-    if (!existsSync(dest)) return null;
-    const machineYaml = rel === 'omp/agent/config.yml' ? readFileSync(dest).toString('utf8') : null;
+  /** @param {string} rel @param {Buffer | null} bytes @returns {string | null} */
+  const machineFingerprint = (rel, bytes) => {
+    if (bytes === null) return null;
+    const machineYaml = rel === 'omp/agent/config.yml' ? bytes.toString('utf8') : null;
     let base = machineYaml === null ? null : withoutDeploymentBlocks(machineYaml);
     if (base !== null && layerMode) base = withoutMemoryBackend(base);
-    return fingerprint(rel, base === null ? readFileSync(dest) : Buffer.from(base, 'utf8'));
+    return fingerprint(rel, base === null ? bytes : Buffer.from(base, 'utf8'));
   };
   // The live copy's fingerprint in the new layer's coordinate space, for the snapshot
   // comparison: paths the previous install re-rooted into the live layer re-root into the
@@ -814,15 +815,15 @@ try {
   // compares equal (the snapshot is remapped the same way). The plain machineFingerprint
   // stays the record and deletion comparison: the record describes the live layer in its
   // own coordinates.
-  /** @param {string} rel @param {string} dest @param {string} machineSrc @returns {string | null} */
-  const layerMachineFingerprint = (rel, dest, machineSrc) => {
+  /** @param {string} rel @param {Buffer | null} bytes @param {string} machineSrc @returns {string | null} */
+  const layerMachineFingerprint = (rel, bytes, machineSrc) => {
     if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) {
-      if (!existsSync(dest)) return null;
-      let text = readFileSync(dest).toString('utf8');
+      if (bytes === null) return null;
+      let text = bytes.toString('utf8');
       if (rel === 'omp/agent/config.yml') text = withoutMemoryBackend(withoutDeploymentBlocks(text));
       return fingerprint(rel, Buffer.from(remapHomePaths(text, machineSrc, /** @type {string} */ (newLayerDir)), 'utf8'));
     }
-    return machineFingerprint(rel, dest);
+    return machineFingerprint(rel, bytes);
   };
   // The record an alate older than the memory-backend strip wrote hashes the snapshot bytes it
   // installed, and those still carried the entry. Layer mode accepts that legacy record too: a
@@ -832,10 +833,10 @@ try {
   // legacy form equals the plain one, so later layers (whose records strip-era alate wrote)
   // compare identically. Only config.yml can carry the entry; other files and in-place mode
   // never use the legacy form.
-  /** @param {string} rel @param {string} dest @returns {string | null} */
-  const legacyFingerprint = (rel, dest) =>
-    rel === 'omp/agent/config.yml' && layerMode && existsSync(dest)
-      ? fingerprint(rel, Buffer.from(withoutDeploymentBlocks(readFileSync(dest).toString('utf8')), 'utf8'))
+  /** @param {string} rel @param {Buffer | null} bytes @returns {string | null} */
+  const legacyFingerprint = (rel, bytes) =>
+    rel === 'omp/agent/config.yml' && layerMode && bytes !== null
+      ? fingerprint(rel, Buffer.from(withoutDeploymentBlocks(bytes.toString('utf8')), 'utf8'))
       : null;
 
   // The report label against the live layer: added when it lacks the file, unchanged when
@@ -888,10 +889,10 @@ try {
     checkDestination(writeRoot, dest);
     const machineSrc = layerMode && rel === 'omp/agent/config.yml' ? machineRoot : readRoot;
     const readDest = join(machineSrc, '.' + rel);
-    // The machine copy is read three times below (config.yml's deployment blocks, the
-    // fingerprint, the kept bytes): never follow an alias out of the live layer, or out
+    // The machine copy feeds config.yml's deployment blocks, the fingerprints, and the kept
+    // bytes: one read through a no-follow fd, never an alias out of the live layer, or out
     // of an in-place home on a first layer. See the guard on lastManifest above.
-    if (layerMode) checkDestination(machineSrc, readDest);
+    const machineBytes = readMachineFile(machineSrc, readDest);
     // forTarget roots a captured absolute path at the real home; in layer mode the remap
     // below alone moves it into the layer — writeRoot here would put the layer prefix in twice.
     const target = forTarget(rel, readFileSync(srcPath), { home, platform: process.platform, roots });
@@ -912,8 +913,8 @@ try {
     // one has none yet. Compare deployment-free content, so a target that differs only in
     // those blocks is unchanged and a real conflict cannot hide behind them. `dropped` holds
     // credentials: never log it.
-    const machineYaml = rel === 'omp/agent/config.yml' && existsSync(readDest)
-      ? readFileSync(readDest).toString('utf8') : null;
+    const machineYaml = rel === 'omp/agent/config.yml' && machineBytes !== null
+      ? machineBytes.toString('utf8') : null;
     const deployed = machineYaml === null ? null : splitDeploymentBlocks(machineYaml);
     const want = fingerprint(rel, snapshot);
     let src = snapshot;
@@ -943,19 +944,19 @@ try {
     }
     // The machine text minus its deployment blocks (lib/data.mjs keeps the last kept line's
     // terminator). `dropped` holds credentials: never log it.
-    const have = machineFingerprint(rel, readDest);
+    const have = machineFingerprint(rel, machineBytes);
     // The snapshot comparison uses the layer-normalized form: a file whose only difference
     // from the snapshot is the layer prefix in re-rooted paths is unchanged.
-    const haveLayer = layerMachineFingerprint(rel, readDest, machineSrc);
+    const haveLayer = layerMachineFingerprint(rel, machineBytes, machineSrc);
     // The record-match: the plain form (strip-era records, and every non-config file) or the
     // legacy form above (records a pre-strip alate wrote, entry included). A matched file was
     // not changed on the machine since the install, so the snapshot may replace it.
-    const record = have !== null && (have === last[rel] || legacyFingerprint(rel, readDest) === last[rel]);
+    const record = have !== null && (have === last[rel] || legacyFingerprint(rel, machineBytes) === last[rel]);
     // The item key rides on every plan entry, so the per-item results can aggregate by key.
     const itemKey = `user/${rel}`;
     if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null]);
     else if (layerMode && haveLayer === want) plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);
-    else if (layerMode && have !== null && !record) {
+    else if (layerMode && machineBytes !== null && !record) {
       // A machine change beyond the deployment blocks is never a refusal in layer mode:
       // machine state wins and rides into the new layer, --force takes the snapshot instead.
       // have !== want is implied by the branch above; layer mode never reaches conflicts.
@@ -973,7 +974,7 @@ try {
         // A kept file can hold paths re-rooted into the live layer at its install, so they
         // re-root into the new layer and clean-up can delete the live one; paths into the
         // shared home stay shared.
-        let keptBytes = readFileSync(readDest);
+        let keptBytes = machineBytes;
         // The entry is a deployment choice: a kept config.yml loses it here, the same way the
         // snapshot does above, so the choice never rides along with the machine part.
         if (rel === 'omp/agent/config.yml') keptBytes = Buffer.from(withoutMemoryBackend(keptBytes.toString('utf8')), 'utf8');
@@ -1008,12 +1009,12 @@ try {
         // in-place mode skips a matching copy.
         const liveCopy = join(readRoot, '.ottr', 'workers', project, file);
         // The compare base is machine side (the live layer in layer mode): the same alias
-        // guard every machine-side read gets, so a planted link or special file refuses the
-        // run instead of being followed out of the layer.
-        if (layerMode) checkDestination(readRoot, liveCopy);
-        const haveWorker = existsSync(liveCopy) && sameContent('', readFileSync(liveCopy), src);
+        // guard and single no-follow read every machine-side read gets, so a planted link or
+        // special file refuses the run instead of being followed out of the layer.
+        const liveBytes = readMachineFile(readRoot, liveCopy);
+        const haveWorker = liveBytes !== null && sameContent('', liveBytes, src);
         plan.push(haveWorker && !layerMode ? ['unchanged', dest, null, `workers/${project}/${file}`, null]
-          : ['installed', dest, src, `workers/${project}/${file}`, layerMode ? (haveWorker ? 'unchanged' : existsSync(liveCopy) ? 'updated' : 'added') : null]);
+          : ['installed', dest, src, `workers/${project}/${file}`, layerMode ? (haveWorker ? 'unchanged' : liveBytes !== null ? 'updated' : 'added') : null]);
       }
     }
   }
@@ -1114,25 +1115,26 @@ try {
       const dest = join(writeRoot, '.' + rel);
       checkDestination(writeRoot, dest);
       const readDest = join(readRoot, '.' + rel);
-      if (layerMode) checkDestination(readRoot, readDest);
-      const want = fingerprint(rel, readFileSync(srcPath));
-      const have = existsSync(readDest) ? fingerprint(rel, readFileSync(readDest)) : null;
+      const machineBytes = readMachineFile(readRoot, readDest);
+      const srcBytes = readFileSync(srcPath);
+      const want = fingerprint(rel, srcBytes);
+      const have = machineBytes !== null ? fingerprint(rel, machineBytes) : null;
       const record = have !== null && have === last[rel];
       const itemKey = `user/${rel}`;
       if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null]);
-      else if (layerMode && have === want) plan.push(['installed', dest, readFileSync(srcPath), itemKey, layerLabel(rel, readFileSync(srcPath), have)]);
-      else if (layerMode && have !== null && !record) {
+      else if (layerMode && have === want) plan.push(['installed', dest, srcBytes, itemKey, layerLabel(rel, srcBytes, have)]);
+      else if (layerMode && machineBytes !== null && !record) {
         // Same machine-state rules as snapshot skills: layer mode keeps the machine copy,
         // --force takes the shipped bytes.
         if (force) {
-          plan.push(['installed', dest, readFileSync(srcPath), itemKey, layerLabel(rel, readFileSync(srcPath), have)]);
+          plan.push(['installed', dest, srcBytes, itemKey, layerLabel(rel, srcBytes, have)]);
           notes.push(`machine change overridden by --force: ${readDest}`);
         } else {
-          plan.push(['installed', dest, readFileSync(readDest), itemKey, layerLabel(rel, readFileSync(readDest), have)]);
+          plan.push(['installed', dest, machineBytes, itemKey, layerLabel(rel, machineBytes, have)]);
           notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
         }
       }
-      else if (have === null || record || force) plan.push(['installed', dest, readFileSync(srcPath), itemKey, layerLabel(rel, readFileSync(srcPath), have)]);
+      else if (have === null || record || force) plan.push(['installed', dest, srcBytes, itemKey, layerLabel(rel, srcBytes, have)]);
       else conflicts.push(dest);
       current[rel] = want;
     }
@@ -1198,7 +1200,7 @@ try {
       checkDestination(readRoot, dest);
       if (!existsSync(dest)) continue;
       layerDropped++;
-      if (machineFingerprint(rel, dest) !== fp) notes.push(`changed here, left out of the new layer: ${dest}`);
+      if (machineFingerprint(rel, readMachineFile(readRoot, dest)) !== fp) notes.push(`changed here, left out of the new layer: ${dest}`);
       continue;
     }
     const dest = join(home, '.' + rel);
@@ -1206,7 +1208,7 @@ try {
     // directory, and never outside the home; a violated guard refuses the whole run.
     checkDestination(home, dest);
     if (!existsSync(dest)) continue;
-    if (machineFingerprint(rel, dest) === fp) deletions.push([dest, join(home, '.' + rel.split('/')[0])]);
+    if (machineFingerprint(rel, readMachineFile(home, dest)) === fp) deletions.push([dest, join(home, '.' + rel.split('/')[0])]);
     else notes.push(`changed here, kept: ${dest}`);
   }
   // Worker lists come only from the data repo, so a list it no longer ships is deleted too.

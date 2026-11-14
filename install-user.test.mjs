@@ -5,11 +5,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs, { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir, homedir, availableParallelism } from 'node:os';
-import { delimiter, dirname, join, relative, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { CAPTURE_ROOTS, fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, remapHomePaths, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
+import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { CAPTURE_ROOTS, fingerprint, forAll, forTarget, keepTemp, nextLayerCounter, readMachineFile, remapHomePaths, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks } from './lib/data.mjs';
 import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-install-'));
@@ -1902,6 +1903,112 @@ exit 0
     assert.match(r.stderr, /is not a regular file/);
     assert.deepEqual(readdirSync(llayers).sort(), ['nogit-8', 'nogit-9'], 'the refused runs wrote no layer');
     assert.equal(realpathSync(lcurrent), join(llayers, 'nogit-9'), 'a refused run keeps the old current');
+
+    // readMachineFile reads a machine-side file once, through one fd opened with O_NOFOLLOW,
+    // so the bytes it returns are the bytes of the file its checks passed.
+    const mroot = join(tmpReal, 'machine-read');
+    mkdirSync(join(mroot, 'sub'), { recursive: true });
+    const mfile = join(mroot, 'sub', 'kept.json');
+    writeFileSync(mfile, '{"m":1}\n');
+    assert.deepEqual(readMachineFile(mroot, mfile), Buffer.from('{"m":1}\n'), 'a regular file returns its exact bytes');
+    assert.equal(readMachineFile(mroot, join(mroot, 'sub', 'missing.json')), null, 'a missing file reads as null');
+    const mOutside = join(tmpReal, 'machine-outside.json');
+    writeFileSync(mOutside, '{"apiKey":"UNIT-SECRET-789"}\n');
+    const mlink = join(mroot, 'sub', 'link.json');
+    symlinkSync(mOutside, mlink);
+    assert.throws(() => readMachineFile(mroot, mlink), /is not a regular file/, 'the lstat walk still refuses a link already in place');
+    // The race itself: the walk's lstat sees the regular file, then the file becomes a link
+    // before the open. Only the O_NOFOLLOW open can refuse it now.
+    let mSwapped = false;
+    const realLstat = fs.lstatSync;
+    fs.lstatSync = (p, ...rest) => {
+      const st = realLstat(p, ...rest);
+      if (!mSwapped && resolve(String(p)) === mfile) {
+        mSwapped = true;
+        rmSync(mfile);
+        symlinkSync(mOutside, mfile);
+      }
+      return st;
+    };
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => readMachineFile(mroot, mfile),
+        e => e.code === 'ELOOP' && String(e.message).includes(mfile) && !String(e.message).includes('UNIT-SECRET-789'),
+        'a link swapped in after the lstat check fails the open, and its target never reaches the error');
+    } finally {
+      fs.lstatSync = realLstat;
+      syncBuiltinESMExports();
+    }
+    assert.ok(mSwapped, 'the swap landed between the check and the open');
+
+    // A swap between the check and the read (security audit run-6, record 7): a turn renames
+    // a symlink over a machine file in the live layer right after the lstat walk passed it.
+    // A preload hook stands in for the turn: the first lstat of the chosen path swaps the
+    // file for a link to a file only the alate container can read, and every later lstat of
+    // that path still reports the regular file, so only the read itself (one O_NOFOLLOW
+    // open) can notice. The run must refuse, and none of the target's bytes may reach the
+    // output or a layer. The nested sync.mjs spawn inherits NODE_OPTIONS; its lstat calls
+    // never hit the chosen path.
+    const swapHook = join(tmpReal, 'swap-hook.mjs');
+    writeFileSync(swapHook, [
+      "import fs from 'node:fs';",
+      "import { syncBuiltinESMExports } from 'node:module';",
+      "import { resolve } from 'node:path';",
+      'const { ALATE_TEST_SWAP_PATH: swapPath, ALATE_TEST_SWAP_TARGET: target } = process.env;',
+      'if (swapPath && target) {',
+      '  const lstatSync = fs.lstatSync;',
+      '  let regular = null;',
+      '  fs.lstatSync = (p, ...rest) => {',
+      "    if (typeof p !== 'string' || resolve(p) !== swapPath) return lstatSync(p, ...rest);",
+      '    if (regular) return regular;',
+      '    regular = lstatSync(p, ...rest);',
+      '    fs.unlinkSync(p);',
+      '    fs.symlinkSync(target, p);',
+      '    return regular;',
+      '  };',
+      '  syncBuiltinESMExports();',
+      '}',
+      '',
+    ].join('\n'));
+    const swapHome = join(tmpReal, 'layer-home-swap');
+    r = runL(swapHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    const swapLayers = join(swapHome, '.alate', 'layers');
+    const swapCurrent = join(swapHome, '.alate', 'current');
+    const swapLive = realpathSync(swapCurrent);
+    // A machine edit that differs from the snapshot and the record: without the swap, the
+    // run takes the "machine change kept" path and copies these bytes into the new layer.
+    const swapPath = join(swapLive, '.omp/agent/marketplaces.json');
+    writeFileSync(swapPath, `${JSON.stringify({ marketplaces: [{ name: 'machine-edit' }] }, null, 2)}\n`);
+    const swapTarget = join(tmpReal, 'swap-secret.json');
+    writeFileSync(swapTarget, '{"apiKey":"SWAP-SECRET-456"}\n');
+    const swapLayersBefore = readdirSync(swapLayers).sort();
+    r = run(['--data', ldata, '--skip-plugins', '--layer'], swapHome, {
+      ...process.env,
+      PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`,
+      SKILLSPECTOR_VENV: join(tmp, 'no-venv'),
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(swapHook).href}`].filter(Boolean).join(' '),
+      ALATE_TEST_SWAP_PATH: swapPath,
+      ALATE_TEST_SWAP_TARGET: swapTarget,
+    });
+    assert.ok(lstatSync(swapPath).isSymbolicLink(), `the hook swapped the file, so the run met the race: ${r.stderr}`);
+    assert.equal(r.status, 1, `a link swapped in after the check refuses the run: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /symbolic link|ELOOP/);
+    assert.ok(!`${r.stdout}${r.stderr}`.includes('SWAP-SECRET-456'), 'the swapped-in target never reaches the output');
+    assert.deepEqual(readdirSync(swapLayers).sort(), swapLayersBefore, 'the refused run wrote no layer');
+    assert.equal(realpathSync(swapCurrent), swapLive, 'a refused run keeps the old current');
+    // Links are not followed: the swapped path itself (and the shared-state links) point
+    // out of the layer, every regular file under the home must be free of the marker.
+    const swapLeaks = [];
+    const findSwapLeaks = dir => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) findSwapLeaks(p);
+        else if (e.isFile() && readFileSync(p, 'utf8').includes('SWAP-SECRET-456')) swapLeaks.push(p);
+      }
+    };
+    findSwapLeaks(swapHome);
+    assert.deepEqual(swapLeaks, [], 'no kept bytes of the swapped-in target land in any layer');
 
     // Migration: the first layer over an existing in-place home reads the machine part of
     // config.yml from the home, so the deployment blocks and other machine edits survive the
