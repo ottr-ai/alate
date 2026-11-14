@@ -343,13 +343,15 @@ input[type="password"] {
   color: var(--ink);
   background: none;
   border: none;
-  border-bottom: 1px solid var(--hair);
+  border-bottom: 1px solid var(--ink-2);
   border-radius: 0;
   padding: 0.35rem 0.1rem;
   width: 100%;
 }
 
 input[type="password"]:hover { border-bottom-color: var(--ink); }
+/* This block comes after the generic input:focus-visible rule at equal specificity, so it restates the focus underline. */
+input[type="password"]:focus-visible { outline: none; border-bottom: 2px solid var(--blue); padding-bottom: calc(0.35rem - 1px); }
 
 input[type="password"]::placeholder { color: var(--ink-2); opacity: 1; }
 
