@@ -121,7 +121,7 @@ failure; `provisionedSha` still moves only on `ok`.
 2. skill structure gate per skill (`skillProblems`): a failing skill is `rejected`,
    excluded, and never scanned;
 3. hidden-character gate over each surviving skill folder: a failing `.md`/`.mdc`
-   file (the `SKILL.md` entrypoint belongs to step 2) fails that whole skill
+   file in any letter case (the `SKILL.md` entrypoint belongs to step 2) fails that whole skill
    under its skill key, before the walk; then walk and plan over the surviving
    files only; a Markdown item outside a skill folder whose content gate fails
    is `rejected` and excluded;

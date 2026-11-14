@@ -41,7 +41,7 @@ Per listed file `<name>/<rel>` (the snapshot-relative key format of
    a source that escapes the snapshot (`assertSourceInside`), a destination that
    escapes the checkout, a symlink component below the checkout root, a directory
    or multiply-linked file at the destination (`checkDestination`).
-4. Content gate for `.md`/`.mdc` snapshot items (per item, like the sibling
+4. Content gate for `.md`/`.mdc` snapshot items, in any letter case (per item, like the sibling
    scripts): `ruleProblems(key, text, { frontmatter: false })` — project context is
    never a rule, so the frontmatter requirement stays off. A file with problems is
    rejected: it never installs, its item result is `rejected` with the first finding

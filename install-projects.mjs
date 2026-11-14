@@ -96,13 +96,14 @@ function install(root, manifestPath) {
       const base = baselines ? baselines[key] ?? null : null;
       const fpMachine = machine ? fingerprint(key, machine) : null;
       // omp loads agent-context Markdown in project checkouts as always-on instructions too
-      // (AGENTS.md and friends), so .md/.mdc snapshot items get the sibling hidden-character
+      // (AGENTS.md and friends), so .md/.mdc snapshot items (any case: a case-insensitive
+      // filesystem opens AGENTS.MD where omp reads AGENTS.md) get the sibling hidden-character
       // gate: a laced file stays out per item — frontmatter: false, project context is never
       // a rule — while every item that passes still installs, and the run exits 1. A checkout
       // copy this install path wrote or adopted itself (it matches the snapshot or the capture
       // baseline) is removed with the same deletion rule the sibling contracts use; a copy the
       // machine changed is not ours to delete and stays with a note.
-      if (/\.mdc?$/.test(rel)) {
+      if (/\.mdc?$/i.test(rel)) {
         const problems = ruleProblems(key, snapBytes.toString('utf8'), { frontmatter: false });
         if (problems.length) {
           const first = describeProblem(problems[0]);

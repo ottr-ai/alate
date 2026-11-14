@@ -171,6 +171,19 @@ try {
   assert.equal(readFileSync(machineOf('gamma/laced2.md'), 'utf8'), '# laced \u202E machine edition\n');
   assert.match(r.stdout, /kept projects\/gamma\/laced2\.md at .+ \(the machine copy changed since the last capture; it is not ours to delete\)/, r.stdout);
 
+  // An uppercase extension is Markdown too: a case-insensitive filesystem (Windows, macOS)
+  // opens AGENTS.MD where omp reads AGENTS.md, so the hidden-character gate must not skip it.
+  manifest({ contextFiles: ['AGENTS.MD'], projects: { delta: ['notes.Mdc'] } });
+  mkdirSync(join(ws, 'delta'), { recursive: true });
+  put(data, 'projects/delta/AGENTS.MD', '# delta \u202E rules\n');
+  put(data, 'projects/delta/notes.Mdc', '# notes \u202E mdc\n');
+  r = run(withRoot);
+  assert.equal(r.status, 1, `a laced uppercase-extension md must fail the run: ${r.stdout}`);
+  assert.ok(!existsSync(machineOf('delta/AGENTS.MD')), 'a rejected AGENTS.MD must not install');
+  assert.ok(!existsSync(machineOf('delta/notes.Mdc')), 'a rejected notes.Mdc must not install');
+  assert.match(r.stdout, /projects\/delta\/AGENTS\.MD — rejected: hidden character U\+202E at .+/, r.stdout);
+  assert.match(r.stdout, /projects\/delta\/notes\.Mdc — rejected: hidden character U\+202E at .+/, r.stdout);
+
   // (j) No --root: the exact note on both streams, exit 0.
   r = run(['--data', data]);
   assert.equal(r.status, 0, r.stderr);

@@ -743,7 +743,7 @@ try {
     /** @type {string[]} */
     const problems = [];
     for (const file of walk(dir)) {
-      if (!/\.(md|mdc)$/.test(file) || file === 'SKILL.md') continue;
+      if (!/\.(md|mdc)$/i.test(file) || file === 'SKILL.md') continue;
       const label = `${key}/${file}`;
       const srcPath = join(dir, file);
       try {
@@ -995,9 +995,11 @@ try {
     // description. omp loads agent-context Markdown elsewhere in the snapshot as always-on
     // instructions too (AGENTS.md, RULES.md, SYSTEM.md, CLAUDE.md), so every .md/.mdc gets the
     // hidden-character scan; only the snapshot's own rules dir is a rule and needs the frontmatter.
+    // The extension matches without case: on a case-insensitive filesystem (Windows, macOS)
+    // omp's fixed-path read of RULES.md opens a RULES.MD too.
     // A file with problems is rejected per item: no plan entry, no manifest record, no conflict.
     // Files inside a skill folder are judged by the whole-skill gate above, never per file.
-    if (/\.(md|mdc)$/.test(rel) && !skillEntrypoints.has(srcPath)
+    if (/\.(md|mdc)$/i.test(rel) && !skillEntrypoints.has(srcPath)
         && !skillRelPrefixes.some(p => rel === p || rel.startsWith(`${p}/`))) {
       const problems = ruleProblems(`user/${rel}`, src.toString('utf8'), { frontmatter: /^omp\/agent\/rules\/[^/]+\.mdc?$/.test(rel) });
       if (problems.length) {
@@ -1161,7 +1163,7 @@ try {
     /** @type {string[]} */
     const hidden = [];
     for (const file of walk(vendored)) {
-      if (!/\.(md|mdc)$/.test(file) || file === 'SKILL.md') continue;
+      if (!/\.(md|mdc)$/i.test(file) || file === 'SKILL.md') continue;
       const label = `user/agents/skills/${name}/${file}`;
       const srcPath = join(vendored, file);
       try {

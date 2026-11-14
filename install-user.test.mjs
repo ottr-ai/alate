@@ -2611,13 +2611,26 @@ exit 0
   assert.ok(r.stdout.includes('user/omp/agent/rules/backdoor.mdc — rejected: hidden character U+202E at user/omp/agent/rules/backdoor.mdc:5:5'), r.stdout);
   assert.equal(gotRule('.omp/agent/rules/clean.md'), '---\ndescription: clean rule\n---\n\nClean body\n', 'the clean rule installs beside the rejected .mdc');
   assert.ok(!existsSync(join(backdoorHome, '.omp/agent/rules/backdoor.mdc')), 'the rejected .mdc never lands');
+  // Extensions match without case: on a case-insensitive filesystem (Windows, macOS) omp's
+  // fixed-path read of <agentDir>/RULES.md opens RULES.MD, so an uppercase extension must
+  // not skip the hidden-character scan.
+  rmSync(join(backdoorData, 'user/omp/agent/rules/backdoor.mdc'));
+  putRule('omp/agent/RULES.MD', 'Rule\u202Eoverride\n');
+  putRule('notes/upper.Mdc', 'notes\u202Efile\n');
+  r = runBackdoor(['--skip-plugins']);
+  assert.equal(r.status, 1, 'a hidden character in an uppercase-extension snapshot file is rejected per item');
+  assert.ok(r.stdout.includes('user/omp/agent/RULES.MD — rejected: hidden character U+202E at user/omp/agent/RULES.MD:1:5'), r.stdout);
+  assert.ok(r.stdout.includes('user/notes/upper.Mdc — rejected: hidden character U+202E at user/notes/upper.Mdc:1:6'), r.stdout);
+  assert.ok(!existsSync(join(backdoorHome, '.omp/agent/RULES.MD')), 'the rejected RULES.MD never lands');
+  assert.ok(!existsSync(join(backdoorHome, '.notes/upper.Mdc')), 'the rejected upper.Mdc never lands');
+  rmSync(join(backdoorData, 'user/omp/agent/RULES.MD'));
+  rmSync(join(backdoorData, 'user/notes/upper.Mdc'));
 
   // A hidden character in a non-entrypoint Markdown file inside a skill folder fails the
   // whole skill under its skill key (specs/provision-item-by-item.md): the scan verdict
   // covered the full source folder, so a per-file rejection would leave a half-installed
   // skill. The clean skill beside it installs, and the record-matching copy of the
   // rejected skill is deleted like any snapshot-dropped path.
-  rmSync(join(backdoorData, 'user/omp/agent/rules/backdoor.mdc'));
   putRule('omp/agent/skills/hidsnap/SKILL.md', skillText('hidsnap'));
   putRule('omp/agent/skills/cleanone/SKILL.md', skillText('cleanone'));
   r = runBackdoor(['--skip-plugins']);
@@ -2634,6 +2647,15 @@ exit 0
   r = runBackdoor(['--skip-plugins']);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(gotRule('.omp/agent/skills/hidsnap/SKILL.md'), skillText('hidsnap'), 'the repaired skill installs again');
+  // The skill-folder gate matches extensions without case too.
+  putRule('omp/agent/skills/hidsnap/NOTES.MD', 'notes\u202Efile\n');
+  r = runBackdoor(['--skip-plugins']);
+  assert.equal(r.status, 1, 'a hidden character in an uppercase-extension skill file fails the whole skill');
+  assert.ok(r.stdout.includes('user/omp/agent/skills/hidsnap — rejected: hidden character U+202E at user/omp/agent/skills/hidsnap/NOTES.MD:1:6'), r.stdout);
+  assert.ok(!existsSync(join(backdoorHome, '.omp/agent/skills/hidsnap')), 'the rejected skill never half-installs');
+  rmSync(join(backdoorData, 'user/omp/agent/skills/hidsnap/NOTES.MD'));
+  r = runBackdoor(['--skip-plugins']);
+  assert.equal(r.status, 0, r.stderr);
 
   // The origin gate (upstreams.json) is judged per item: a skill with no recorded origin is
   // left out and reported, the covered items install, an uncovered MCP server is only a
