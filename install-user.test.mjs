@@ -11,7 +11,7 @@ import { tmpdir, homedir, availableParallelism } from 'node:os';
 import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { CAPTURE_ROOTS, dirIdentity, fingerprint, forAll, forTarget, keepTemp, makeDirInside, nextLayerCounter, readMachineFile, remapHomePaths, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, writeFileInside } from './lib/data.mjs';
+import { CAPTURE_ROOTS, dirIdentity, fingerprint, forAll, forTarget, keepTemp, makeDirInside, nextLayerCounter, readMachineFile, remapHomePaths, sameContent, skillProblems, skillRootAlias, splitDeploymentBlocks, withoutDeploymentBlocks, writeFileInside } from './lib/data.mjs';
 import { BREAK_UI_BASELINE, BREAK_UI_SKILL_MD } from './install-user.fixtures.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'alate-install-'));
@@ -289,6 +289,22 @@ try {
     const problems = skillProblems('hidden/SKILL.md', skillText('demo', `Before${String.fromCodePoint(cp)}after.\n`));
     assert.ok(problems.some(problem => problem.includes('hidden/SKILL.md') && /hidden character/.test(problem)), 'forbidden hidden characters refuse skill bodies');
   });
+  // A skill root name that a case-insensitive filesystem (NTFS upper case, APFS case
+  // folding) resolves to the root aliases it; the exact root and every other name do not.
+  forAll(rand => {
+    const root = choose(rand, ['skills', 'managed-skills']);
+    const flip = c => c === 's' && rand() < 0.2 ? '\u017F' : c === 'k' && rand() < 0.2 ? '\u212A' : rand() < 0.5 ? c.toUpperCase() : c;
+    const name = [...root].map(flip).join('');
+    const other = choose(rand, ['skill', 'skillz', 'xskills', 'skills-', 'managed', 'managedskills', 'skills.', ' skills', '']);
+    return { root, name, other: [...other].map(flip).join('') };
+  }, input => {
+    const { root, name, other } = /** @type {{ root: string, name: string, other: string }} */ (input);
+    assert.equal(skillRootAlias(name), name === root ? null : root, `${name} aliases ${root}`);
+    assert.equal(skillRootAlias(other), null, `${other} aliases no skill root`);
+  });
+  for (const [name, root] of [['Skills', 'skills'], ['\u017Fkills', 'skills'], ['MANAGED-SKILLS', 'managed-skills'], ['skills', null], ['managed-skills', null], ['Skill', null], ['SKILLS.', null]]) {
+    assert.equal(skillRootAlias(name), root, `${name} aliases ${root}`);
+  }
 
   put('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
   put('omp/agent/skills/mine/SKILL.md', skillText('mine'));
@@ -2800,6 +2816,36 @@ exit 0
     assert.equal(r.status, 1);
     assert.match(r.stderr, /unknown kind/);
     assert.ok(!existsSync(ogFatalHome), 'a structurally broken gate writes nothing');
+  }
+
+  // A case variant of a skill root (Skills/) is the skills/ root on Windows and macOS, so its
+  // skills would land there unchecked: the whole folder is a rejected item, never scanned or
+  // installed, and the real roots still install.
+  if (scanned) {
+    const cvData = join(tmp, 'data-case-variant');
+    const cvHome = join(tmp, 'home-case-variant');
+    const putC = (rel, text) => { mkdirSync(dirname(join(cvData, 'user', rel)), { recursive: true }); writeFileSync(join(cvData, 'user', rel), text); };
+    putC('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putC('omp/agent/skills/fine/SKILL.md', skillText('fine'));
+    putC('omp/agent/Skills/sneaky/SKILL.md', skillText('sneaky'));
+    putC('omp/agent/MANAGED-SKILLS/loud/SKILL.md', skillText('loud'));
+    putC('agents/\u017Fkills/longs/SKILL.md', skillText('longs'));
+    writeStub(0);
+    const cvCallsBefore = readFileSync(callsLog, 'utf8');
+    const cvResults = join(tmp, 'case-variant-results.json');
+    r = run(['--data', cvData, '--skip-plugins'], cvHome, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ALATE_PROVISION_RESULTS: cvResults });
+    assert.equal(r.status, 1, 'a case-variant skill root fails the run but not the install');
+    assert.ok(existsSync(join(cvHome, '.omp/agent/skills/fine/SKILL.md')), 'the exact skill root installs');
+    for (const rel of ['.omp/agent/Skills', '.omp/agent/MANAGED-SKILLS', '.agents/\u017Fkills']) assert.ok(!existsSync(join(cvHome, rel)), `${rel} never lands`);
+    const cvCalls = readFileSync(callsLog, 'utf8').slice(cvCallsBefore.length);
+    assert.ok(cvCalls.includes(join(cvData, 'user/omp/agent/skills/fine')), 'the exact root is scanned');
+    for (const name of ['sneaky', 'loud', 'longs']) assert.ok(!cvCalls.includes(name), `${name} is never scanned`);
+    assert.ok(r.stdout.includes('user/omp/agent/Skills — rejected: case variant of skill root "skills"'), r.stdout);
+    assert.ok(r.stdout.includes('user/omp/agent/MANAGED-SKILLS — rejected: case variant of skill root "managed-skills"'), r.stdout);
+    assert.ok(r.stdout.includes('user/agents/\u017Fkills — rejected: case variant of skill root "skills"'), r.stdout);
+    const cvItems = JSON.parse(readFileSync(cvResults, 'utf8'));
+    assert.equal(cvItems.fatal, false, 'a case variant is a per-item rejection, not a refusal');
+    assert.deepEqual(cvItems.items.find(i => i.item === 'user/omp/agent/Skills'), { item: 'user/omp/agent/Skills', status: 'rejected', rule: 'case variant of skill root "skills"', at: null, report: 'user/omp/agent/Skills: case variant of skill root "skills"; a case-insensitive filesystem installs it as skills/ unchecked by the skill gates. Rename the folder to skills/.' });
   }
 
   // The machine-readable results file: with ALATE_PROVISION_RESULTS set, every run writes

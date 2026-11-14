@@ -45,7 +45,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { assertDirIdentity, assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, dirIdentity, fingerprint, forTarget, makeDirInside, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, skillProblems, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeFileInside, writeProvisionResults, yamlProblems } from './lib/data.mjs';
+import { assertDirIdentity, assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, dirIdentity, fingerprint, forTarget, makeDirInside, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, SKILL_ROOT_NAMES, skillProblems, skillRootAlias, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeFileInside, writeProvisionResults, yamlProblems } from './lib/data.mjs';
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
@@ -127,7 +127,6 @@ const pluginInstallFile = rel =>
 // fingerprints bind to scanner_version, so a scanner that is not the pin would silently
 // suppress nothing.
 const SKILLSPECTOR_REF = 'v2.13.0';
-const SKILL_ROOT_NAMES = new Set(['skills', 'managed-skills']);
 
 // The config.yml that installs: no memory backend entry (a deployment choice) and no
 // skills.customDirectories entry. The skill gates judge only the SKILL_ROOT_NAMES folders,
@@ -225,9 +224,11 @@ const UNPACK = new Set(['zip', 'tar.gz', 'none']);
 const BIN_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
 // Every directory named skills/ or managed-skills/ anywhere under a root holds executable
-// agent content; each skill inside it goes to the scanner.
-/** @param {string} dir @returns {string[]} */
-const collectSkillDirs = dir => {
+// agent content; each skill inside it goes to the scanner. A directory whose name aliases a
+// skill root only without case (Skills/) is collected into `aliases`, never descended into:
+// the caller rejects it whole before any write.
+/** @param {string} dir @param {string[]} [aliases] @returns {string[]} */
+const collectSkillDirs = (dir, aliases = []) => {
   /** @type {string[]} */
   const found = [];
   /** @param {string} path */
@@ -239,7 +240,8 @@ const collectSkillDirs = dir => {
         for (const skill of readdirSync(child, { withFileTypes: true })) {
           if (skill.isDirectory() && !SKIP_DIRS.has(skill.name)) found.push(join(child, skill.name));
         }
-      } else visit(child);
+      } else if (skillRootAlias(entry.name)) aliases.push(child);
+      else visit(child);
     }
   };
   visit(dir);
@@ -668,7 +670,9 @@ try {
   const reserved = readdirSync(userRoot).find(name => name.toLowerCase() === 'alate');
   if (reserved !== undefined) throw new Error(`refusing: user/${reserved} would install into ~/.alate, alate's own state dir; remove it from the snapshot`);
   // Check source bytes on every install, before target reads, scanner calls, or layer creation.
-  const skillDirs = collectSkillDirs(userRoot);
+  /** @type {string[]} */
+  const rootAliases = [];
+  const skillDirs = collectSkillDirs(userRoot, rootAliases);
   // Origin gate (upstreams.json): fatal problems mean the gate itself is broken, so no origin
   // verdict is possible and the run refuses. An uncovered skill dir is excluded (failed item
   // `no origin`) before the walk; an uncovered MCP server is only reported — one uncovered
@@ -679,6 +683,14 @@ try {
   const dirByKey = new Map(skillDirs.map(dir => [`user/${relative(userRoot, dir).split(sep).join('/')}`, dir]));
   /** @type {Set<string>} */
   const rejectedSkills = new Set();
+  // A case variant of a skill root (Skills/) is the same folder as the root on Windows and
+  // macOS, but no skill gate ever saw its skills: the whole folder is rejected and excluded.
+  for (const dir of rootAliases) {
+    const key = `user/${relative(userRoot, dir).split(sep).join('/')}`;
+    const root = /** @type {string} */ (skillRootAlias(basename(dir)));
+    failItem(key, 'rejected', `case variant of skill root "${root}"`, null, `${key}: case variant of skill root "${root}"; a case-insensitive filesystem installs it as ${root}/ unchecked by the skill gates. Rename the folder to ${root}/.`);
+    rejectedSkills.add(dir);
+  }
   for (const key of gate.uncovered) {
     const dir = dirByKey.get(key);
     if (dir) {

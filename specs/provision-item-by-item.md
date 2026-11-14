@@ -16,6 +16,8 @@ server can merge results by key:
   snapshot-file item: it belongs to that skill's item.
 - skill: the `user/`-prefixed skill dir, for example `user/omp/agent/skills/demo`;
   `user/omp/agent/managed-skills/m1`; `user/agents/skills/locked`.
+- skill root case variant: the `user/`-prefixed folder, for example
+  `user/omp/agent/Skills`.
 - MCP server: `user/omp/agent/mcp.json "<name>"`.
 - worker list: `workers/<project>/<file>`.
 
@@ -116,6 +118,11 @@ failure; `provisionedSha` still moves only on `ok`.
 3. install, delete, record as before over the surviving rules only.
 
 `install-user.mjs`:
+0. skill root case variant: a folder whose name matches `skills` or `managed-skills`
+   only without case (`Skills`, `MANAGED-SKILLS`, `ſkills`) is `rejected` with rule
+   `case variant of skill root "<root>"` and excluded whole. Windows and macOS resolve
+   it as the real root, so omp loads its skills, but the skill gates check only the
+   exact names;
 1. origin gate: fatal problems refuse; uncovered skill dirs are `no origin` items,
    excluded before the walk; uncovered MCP servers are `no origin` reports;
 2. skill structure gate per skill (`skillProblems`): a failing skill is `rejected`,
@@ -182,6 +189,8 @@ h. A fatal refusal or a killed child stores the failing script and its output on
    `GET /api/state`.
 i. The overview renders the "Provision failed" line and per-script output
    disclosures for a failed run, and nothing for a clean run.
+j. A case variant of a skill root (`Skills/`) is reported `rejected`, is never
+   scanned or installed, and the exact skill roots still install; exit 1, `fatal: false`.
 
 ## Non-goals
 
