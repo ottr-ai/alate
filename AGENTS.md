@@ -75,6 +75,7 @@ works for a dry run).
   A failure there becomes a finding with the seed and the failing input; triage decides whether the code or the property is wrong.
 - A new test file joins `npm test`, the verified chain above, and `.github/workflows/sync.yml` in the commit that adds it. A test file that no chain entry runs is not verification.
 - Every mutant declared equivalent in a stryker config comment must cite its proof: a command with its output, or a pinned example input. Prose alone is not a proof.
+- When a change gates a credential by host, enumerate every route that sends it (clone auth header, API bearer, periodic checks, subagent jobs) and every host state it can meet (unset, configured GitHub host, foreign host, per-repo spec host, failed or refused import), and ship a fail-before test for each route and state in the first commit.
 
 ## Releases and versions
 
