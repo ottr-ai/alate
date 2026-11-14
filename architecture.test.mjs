@@ -464,6 +464,39 @@ test('projects: valid "..notes.md" child name syncs, no traversal overreach', ()
   absent(join(data, 'notes')); // nothing escaped the projects dir
 });
 
+// -- project install (install-projects.mjs) --
+
+test('install-projects: stray positional, typo flag, valueless --root and missing --data refuse', () => {
+  const c = freshCase('install-projects-args');
+  writeF(join(c.dir, 'ws', 'proj', 'a.txt'), 'alpha\n');
+  const data = projectsManifest(c, { contextFiles: ['a.txt'], projects: { proj: [] } });
+  writeF(join(data, 'projects', 'proj', 'a.txt'), 'alpha\n');
+  refused(runCli(c, 'install-projects.mjs', ['--data', data, '--root', join(c.dir, 'ws'), 'stray']),
+    'install-projects takes no positional');
+  refused(runCli(c, 'install-projects.mjs', ['--data', data, '--rot', join(c.dir, 'ws')]),
+    'typo --rot must be rejected, not read as a flag');
+  refused(runCli(c, 'install-projects.mjs', ['--data', data, '--root']),
+    'a valueless --root must refuse');
+  // Without --data the fallback is $ALATE_DATA or ../agent-data; point it at a missing dir so the
+  // refusal is the documented one, not a quiet fallthrough to the empty fixture dir.
+  refused(spawnSync(process.execPath, [join(TOOL, 'install-projects.mjs'), '--root', join(c.dir, 'ws')],
+    { cwd: c.dir, env: { ...cliEnv(c), ALATE_DATA: join(c.dir, 'no-such-data') }, encoding: 'utf8' }),
+    'missing --data must refuse');
+});
+
+test('install-projects: destination junction below the checkout root refuses', () => {
+  const c = freshCase('install-projects-dest-junction');
+  writeF(join(c.dir, 'ws', 'proj', 'a.txt'), 'alpha\n');
+  const data = projectsManifest(c, { contextFiles: ['a.txt'], projects: { proj: ['b.txt'] } });
+  writeF(join(data, 'projects', 'proj', 'b.txt'), 'snap\n');
+  const outside = join(c.out, 'projoutside');
+  mkdirSync(outside, { recursive: true });
+  linkDir(outside, join(c.dir, 'ws', 'proj', 'b.txt'));
+  refused(runCli(c, 'install-projects.mjs', ['--data', data, '--root', join(c.dir, 'ws')]),
+    'destination junction below the checkout root must refuse');
+  absent(join(outside, 'b.txt'));
+});
+
 test('restore: without --skip-plugins, a capture without plugin manifests installs without running bun', () => {
   const c = freshCase('restore-plugins-absent');
   const { args, data, cfg } = installFixture(c);

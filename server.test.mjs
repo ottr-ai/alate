@@ -653,7 +653,7 @@ try {
   assert.equal(r.status, 200);
   body = await r.json();
   assert.equal(body.ok, true);
-  assert.deepEqual(body.results.map(x => x.code), [0, 0]);
+  assert.deepEqual(body.results.map(x => x.code), [0, 0, 0]);
   assert.ok(body.results[0].output.includes(join(tmpHome, '.omp', 'agent', 'rules')), 'success reports the installation destination');
   // P3 (fix list 2026-11-10): a JSON request with no body must provision, not fail
   // the parse step; a malformed non-empty body keeps the pinned parse error.
@@ -671,6 +671,86 @@ try {
     assert.equal(Buffer.from(snapshot.prepare('SELECT content FROM files WHERE path = ?').get('demo-rule.md').content).toString().replaceAll('\r\n', '\n'), '---\ndescription: demo rule\n---\n\nBody\n');
     assert.equal(snapshot.prepare("SELECT COUNT(*) AS n FROM files WHERE path LIKE '.git/%'").get().n, 0);
   } finally { snapshot.close(); }
+
+  // 5b. install-projects.mjs through the server (specs/install-projects.md): a listed
+  // project file reaches the workspace checkout on a path source (root = dirname of the
+  // source), an explicit projectsRoot overrides it, null clears it, and a missing
+  // directory is refused before any state change.
+  {
+    const projData = join(tmp, 'proj-data');
+    mkdirSync(join(projData, 'projects', 'proj'), { recursive: true });
+    mkdirSync(join(projData, 'user', 'omp', 'agent'), { recursive: true });
+    writeFileSync(join(projData, 'demo-rule.md'), '---\ndescription: proj rule\n---\n\nBody\n');
+    // Same bytes the home already holds, so install-user.mjs stays green (exit 0) and the
+    // pipeline reaches install-projects.mjs.
+    writeFileSync(join(projData, 'user', 'omp', 'agent', 'config.yml'), 'model: test\n');
+    writeFileSync(join(projData, 'projects', 'projects.json'), JSON.stringify({ contextFiles: [], projects: { proj: ['release.mjs'] } }));
+    writeFileSync(join(projData, 'projects', 'proj', 'release.mjs'), 'new release bytes\n');
+    // Sibling checkout: a path source derives --root from dirname(source), so the
+    // checkout lives directly under tmp.
+    mkdirSync(join(tmp, 'proj'), { recursive: true });
+    writeFileSync(join(tmp, 'proj', 'release.mjs'), 'old release bytes\n');
+    r = await postJson('/config', { path: projData }, true);
+    assert.equal(r.status, 200);
+    r = await postJson('/provision', {}, true);
+    assert.equal(r.status, 200);
+    body = await r.json();
+    assert.equal(body.ok, true, 'the project fixture provisions green');
+    assert.deepEqual(body.results.map(x => x.code), [0, 0, 0]);
+    assert.equal(readFileSync(join(tmp, 'proj', 'release.mjs'), 'utf8'), 'new release bytes\n', 'the snapshot bytes replaced the checkout file');
+    body = await (await get('/api/state')).json();
+    const projItem = body.provision.items.find(i => i.item === 'projects/proj/release.mjs');
+    assert.ok(projItem, 'the installed project file appears as an item');
+    assert.equal(projItem.status, 'updated', 'a machine copy with no capture baseline is replaced');
+    // Second run: the snapshot bytes match, so the file is never rewritten and the item
+    // reports unchanged.
+    r = await postJson('/provision', {}, true);
+    assert.equal(r.status, 200);
+    body = await r.json();
+    assert.equal(body.ok, true, 'the second project provision stays green');
+    assert.equal(readFileSync(join(tmp, 'proj', 'release.mjs'), 'utf8'), 'new release bytes\n', 'the idempotent run rewrites nothing');
+    body = await (await get('/api/state')).json();
+    const unchangedItem = body.provision.items.find(i => i.item === 'projects/proj/release.mjs');
+    assert.ok(unchangedItem, 'the project file appears as an item on the second run');
+    assert.equal(unchangedItem.status, 'unchanged', 'the matching checkout reports unchanged');
+    // Explicit override: the configured root wins over the dirname fallback.
+    const otherWs = join(tmp, 'other-ws');
+    mkdirSync(join(otherWs, 'proj'), { recursive: true });
+    writeFileSync(join(otherWs, 'proj', 'release.mjs'), 'other checkout bytes\n');
+    r = await postJson('/config', { path: projData, projectsRoot: otherWs }, true);
+    assert.equal(r.status, 200);
+    body = await (await get('/config')).json();
+    assert.equal(body.projectsRoot, otherWs, 'GET /config reports the stored projectsRoot');
+    r = await postJson('/provision', {}, true);
+    assert.equal((await r.json()).ok, true);
+    assert.equal(readFileSync(join(otherWs, 'proj', 'release.mjs'), 'utf8'), 'new release bytes\n', 'the override root received the snapshot bytes');
+    assert.equal(readFileSync(join(tmp, 'proj', 'release.mjs'), 'utf8'), 'new release bytes\n', 'the fallback checkout is untouched under the override');
+    // null clears the stored root; GET /config reports the cleared value.
+    r = await postJson('/config', { path: projData, projectsRoot: null }, true);
+    assert.equal(r.status, 200);
+    assert.equal((await (await get('/config')).json()).projectsRoot, null, 'projectsRoot null clears the stored root');
+    // A lone projectsRoot changes only the root; the source stays.
+    r = await postJson('/config', { projectsRoot: otherWs }, true);
+    assert.equal(r.status, 200, 'a lone projectsRoot is accepted without a source change');
+    body = await (await get('/config')).json();
+    assert.equal(body.projectsRoot, otherWs, 'the lone projectsRoot persisted');
+    assert.equal(body.path, projData, 'the lone projectsRoot kept the source');
+    r = await postJson('/config', { projectsRoot: null }, true);
+    assert.equal(r.status, 200);
+    // A projectsRoot that is not an existing directory is refused before any change.
+    r = await postJson('/config', { path: projData, projectsRoot: join(tmp, 'no-such-dir') }, true);
+    assert.equal(r.status, 400);
+    assert.equal((await r.json()).error, 'invalid projectsRoot');
+    assert.equal((await (await get('/config')).json()).projectsRoot, null, 'a rejected projectsRoot leaves the stored root alone');
+    // Restore the section-5 state this block replaced: the repo source with its
+    // provisioned sha, so the update-loop assertions after the block hold.
+    r = await postJson('/config', { repo: origin }, true);
+    assert.equal(r.status, 200);
+    r = await postJson('/provision', {}, true);
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).ok, true);
+  }
+
   assert.equal((await postJson('/config', { repo: origin }, true)).status, 200, 're-import preserves the provisioned baseline');
   // Write flags (specs/source-write-flags.md): a repo source reports neither.
   body = await (await get('/health')).json();
@@ -793,13 +873,13 @@ try {
   r = await postJson('/provision', {}, true);
   assert.equal(r.status, 200);
   body = await r.json();
-  assert.deepEqual(body.results.map(x => x.code), [1, 0], 'the pipeline continues past the per-item failure');
+  assert.deepEqual(body.results.map(x => x.code), [1, 0, 0], 'the pipeline continues past the per-item failure');
   assert.equal(body.ok, false); // one failing item fails the provision
   assert.ok(body.results[0].output.includes('bad.md'), 'failure reports the rule that needs a fix');
   assert.equal(readFileSync(join(tmpHome, '.omp', 'agent', 'config.yml'), 'utf8'), 'model: test\n', 'the home keeps the installed bytes');
 
   // 4b2. GET /api/state carries the stored per-item provision results for the imported
-  // snapshot. A path source has no sha, so sha is null; the items merge from both scripts.
+  // snapshot. A path source has no sha, so sha is null; the items merge from all three scripts.
   body = await (await get('/api/state')).json();
   assert.ok(body.provision, 'state carries the provision results');
   assert.equal(body.provision.ok, false, 'the per-item failure keeps ok false');
@@ -942,7 +1022,7 @@ try {
     r = await postJson('/provision', {}, true);
     assert.equal(r.status, 200);
     body = await r.json();
-    assert.deepEqual(body.results.map(x => x.code), [1, 1], 'the uncovered skill fails per item in both scripts');
+    assert.deepEqual(body.results.map(x => x.code), [1, 1, 0], 'the uncovered skill fails per item in all three scripts');
     body = await (await get('/api/state')).json();
     const skItem = body.provision.items.find(i => i.item === 'user/omp/agent/skills/demo');
     assert.ok(skItem, 'the uncovered skill dir appears as one merged item');
@@ -969,7 +1049,7 @@ try {
     r = await postJson('/provision', {}, true);
     assert.equal(r.status, 200);
     body = await r.json();
-    assert.deepEqual(body.results.map(x => x.code), [1, 1]);
+    assert.deepEqual(body.results.map(x => x.code), [1, 1, 0]);
     body = await (await get('/api/state')).json();
     const bad = body.provision.items.find(i => i.item === 'user/omp/agent/skills/demo');
     assert.ok(bad, 'the broken skill appears as one merged item');
@@ -996,7 +1076,7 @@ try {
     r = await postJson('/provision', {}, true);
     assert.equal(r.status, 200);
     body = await r.json();
-    assert.deepEqual(body.results.map(x => x.code), [1, 1]);
+    assert.deepEqual(body.results.map(x => x.code), [1, 1, 0]);
     body = await (await get('/api/state')).json();
     const mcpItem = body.provision.items.find(i => i.item === 'user/omp/agent/mcp.json "slow"');
     assert.ok(mcpItem, 'the uncovered MCP server appears as one merged item');
@@ -1051,10 +1131,10 @@ try {
     assert.equal(r.status, 200);
   }
 
-  // No-results gate over a green source: with the gate file in place, both children run
-  // without the results-file env, so the clean run stores ok true with zero items; a child
-  // that still wrote a results file would surface its items here. A code-0 child with no
-  // results file must also never stop the pipeline.
+  // No-results gate over a green source: with the gate file in place, all three children
+  // run without the results-file env, so the clean run stores ok true with zero items; a
+  // child that still wrote a results file would surface its items here. A code-0 child
+  // with no results file must also never stop the pipeline.
   {
     const gateDir = join(tmp, 'gate-clean');
     mkdirSync(join(gateDir, 'user', 'omp', 'agent'), { recursive: true });
@@ -1069,7 +1149,7 @@ try {
       r = await postJson('/provision', {}, true);
       assert.equal(r.status, 200);
       body = await r.json();
-      assert.deepEqual(body.results.map(x => x.code), [0, 0], 'a code-0 child without a results file never stops the pipeline');
+      assert.deepEqual(body.results.map(x => x.code), [0, 0, 0], 'a code-0 child without a results file never stops the pipeline');
       assert.equal(body.ok, true);
       body = await (await get('/api/state')).json();
       assert.deepEqual(body.provision.items, [], 'a gated green run merges no per-item results');
@@ -1164,10 +1244,10 @@ try {
         assert.equal(r.status, 200);
         body = await r.json();
         assert.equal(body.ok, true, 'the order fixture provisions green');
-        assert.deepEqual(body.results.map(x => x.code), [0, 0]);
+        assert.deepEqual(body.results.map(x => x.code), [0, 0, 0]);
         body = await (await s2.get2('/api/state')).json();
         const names = body.provision.items.map(i => i.item);
-        assert.ok(names.length >= 2, 'the merged item list holds both scripts\' items');
+        assert.ok(names.length >= 2, 'the merged item list holds all three scripts\' items');
         assert.deepEqual(names, [...names].sort(), 'stored items are sorted lexically, not in merge order');
         const plain = body.provision.items.find(i => i.item === 'user/omp/agent/config.yml');
         assert.ok(plain, 'the user config appears as a plan item');
@@ -1210,7 +1290,7 @@ try {
         r = await s2.postJson2('/provision', {});
         assert.equal(r.status, 200);
         body = await r.json();
-        assert.deepEqual(body.results.map(x => x.code), [0, 0], `a malformed stored sha (${name}) reaches no child`);
+        assert.deepEqual(body.results.map(x => x.code), [0, 0, 0], `a malformed stored sha (${name}) reaches no child`);
         assert.equal(body.ok, true);
         assert.ok(!body.results[1].output.includes('refusing: --commit'), 'install-user never saw a --commit flag');
       } finally { await stopServer(s2.p); }
@@ -1649,7 +1729,7 @@ try {
     setTimeout(() => reject(new Error('cached server did not start')), 10_000).unref();
   });
   assert.equal((await (await get('/api/state')).json()).source.spec, data);
-  assert.deepEqual(await (await get('/config')).json(), { repo: null, path: data, tokenSet: true });
+  assert.deepEqual(await (await get('/config')).json(), { repo: null, path: data, tokenSet: true, projectsRoot: null });
   assert.deepEqual(readdirSync(serverTmp).filter(name => /^alate-(?:dashboard|snapshot)-/.test(name)), [], 'imports and provisions remove temporary repository bytes');
 
   // 78. Upstream update checker: fake GitHub and npm (no real network), contract
@@ -6048,7 +6128,7 @@ try {
       const B4 = mut10Spawn(['--port', '0', '--config', cfgB4, '--db', dbB4, '--interval', '100000']);
       const { base } = await B4.up;
       let [st, body] = await mut10Json(base, '/config');
-      assert.deepEqual(body, { repo: null, path: mixedDir, tokenSet: false }, 'a persisted path source restores config.path');
+      assert.deepEqual(body, { repo: null, path: mixedDir, tokenSet: false, projectsRoot: null }, 'a persisted path source restores config.path');
       assert.equal(JSON.parse(readFileSync(cfgB4, 'utf8')).path, mixedDir, 'the boot rewrites the config file from the stored path source');
       await mut10Kill(B4.p);
     }
@@ -6095,7 +6175,7 @@ try {
       writeFileSync(cfgH2, JSON.stringify({ apiKey: 'mut10-key-h', path: mixedDir }));
       const H2 = mut10Spawn(['--port', '0', '--config', cfgH2, '--db', join(tmp, 'state-mutH2.db'), '--interval', '100000']);
       [st, body] = await mut10Json((await H2.up).base, '/config');
-      assert.deepEqual(body, { repo: null, path: mixedDir, tokenSet: false }, 'a persisted path source boots as a path, not a repo');
+      assert.deepEqual(body, { repo: null, path: mixedDir, tokenSet: false, projectsRoot: null }, 'a persisted path source boots as a path, not a repo');
       await mut10Kill(H2.p);
     }
 

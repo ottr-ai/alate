@@ -24,7 +24,7 @@ await ensureEnvProxy()
 const repoRoot = import.meta.dirname
 const CONFIG_FILE = flagValue('--config') ?? join(repoRoot, 'server-config.json')
 const CAP = 200000
-const SCRIPTS = ['sync.mjs', 'install-user.mjs']
+const SCRIPTS = ['sync.mjs', 'install-user.mjs', 'install-projects.mjs']
 // Allowlisted child environment: keeps ALATE_API_KEY and every other secret inside the server
 // process. Children and their children never see it. NODE_USE_ENV_PROXY crosses so provision
 // children inherit the flag and their fetches honor the proxy too.
@@ -57,6 +57,10 @@ interface Config {
   tokenHost: string | null
   autoUpdate: boolean
   securityFastPath: boolean
+  // Workspace that holds the project checkouts install-projects.mjs writes into. Null
+  // derives it from the source dir for a path source; a repo source needs it set once,
+  // because the server's clone is temporary (specs/install-projects.md).
+  projectsRoot: string | null
   update: UpdateState
 }
 interface ProvisionResult { script: string; code: number | null; output: string; truncated: boolean }
@@ -75,10 +79,11 @@ function loadConfig(): Config {
     cfg.autoUpdate ??= false
     cfg.securityFastPath ??= true
     cfg.tokenHost ??= null
+    cfg.projectsRoot ??= null
     cfg.update ??= { lastChecked: null, remoteSha: '', provisionedSha: '' }
     return cfg
   } catch {
-    const cfg: Config = { apiKey: null, repo: null, path: null, token: null, tokenHost: null, autoUpdate: false, securityFastPath: true, update: { lastChecked: null, remoteSha: '', provisionedSha: '' } }
+    const cfg: Config = { apiKey: null, repo: null, path: null, token: null, tokenHost: null, autoUpdate: false, securityFastPath: true, projectsRoot: null, update: { lastChecked: null, remoteSha: '', provisionedSha: '' } }
     saveConfig(cfg)
     return cfg
   }
@@ -168,6 +173,10 @@ async function provision(): Promise<ProvisionResult[]> {
   }
   const tmp = mkdtempSync(join(tmpdir(), 'alate-provision-'))
   try {
+    // --root for install-projects.mjs: the operator-configured projects workspace, or the
+    // source's parent dir for a path source, because the snapshot copy is temporary and
+    // the real project checkouts live beside it (specs/install-projects.md).
+    const projectsRoot = config.projectsRoot ?? (dashState.source?.kind === 'path' && dashState.source.name ? dirname(dashState.source.name) : null)
     const results: ProvisionResult[] = []
     const merged = new Map<string, ProvisionItem>()
     for (const script of SCRIPTS) {
@@ -183,7 +192,7 @@ async function provision(): Promise<ProvisionResult[]> {
       // so the git probe in install-user.mjs keeps its nogit fallback.
       const importedSha = dashState.source?.kind === 'repo' ? dashState.source.importedSha ?? '' : ''
       const commitArg = script === 'install-user.mjs' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(importedSha) ? ['--commit', importedSha] : []
-      const child = spawn(process.execPath, [join(repoRoot, script), '--data', dir, ...commitArg], {
+      const child = spawn(process.execPath, [join(repoRoot, script), '--data', dir, ...commitArg, ...(script === 'install-projects.mjs' && projectsRoot ? ['--root', projectsRoot] : [])], {
         cwd: repoRoot,
         env,
       })
@@ -373,32 +382,44 @@ app.get('/health', async () => {
   }
 })
 
-app.get('/config', async () => ({ repo: config.repo, path: config.path, tokenSet: !!config.token }))
+app.get('/config', async () => ({ repo: config.repo, path: config.path, projectsRoot: config.projectsRoot, tokenSet: !!config.token }))
 
-interface ConfigBody { repo?: unknown; path?: unknown; token?: unknown }
+interface ConfigBody { repo?: unknown; path?: unknown; token?: unknown; projectsRoot?: unknown }
 
 app.post<{ Body: ConfigBody | undefined }>('/config', {
   preHandler: keyGuard,
 }, async (req, reply) => {
   const body = req.body ?? {}
   if (running) return reply.code(409).send({ error: 'provision already running' })
-  const { repo, path, token } = body
-  if ((repo != null) === (path != null)) return reply.code(400).send({ error: 'exactly one of repo or path required' })
+  const { repo, path, token, projectsRoot } = body
+  if (repo != null && path != null) return reply.code(400).send({ error: 'exactly one of repo or path required' })
+  if (repo == null && path == null && projectsRoot === undefined) return reply.code(400).send({ error: 'exactly one of repo or path required' })
   if (repo != null && (typeof repo !== 'string' || !repoValid(repo))) return reply.code(400).send({ error: 'invalid repo' })
   if (path != null && (typeof path !== 'string' || !isDir(path))) return reply.code(400).send({ error: 'invalid path' })
   if (token !== undefined && typeof token !== 'string') return reply.code(400).send({ error: 'invalid token' })
+  // undefined leaves the stored root alone, null clears it, a string must be an existing
+  // directory; a lone projectsRoot changes only the root and keeps the source.
+  if (projectsRoot !== undefined && projectsRoot !== null && (typeof projectsRoot !== 'string' || !isDir(projectsRoot))) return reply.code(400).send({ error: 'invalid projectsRoot' })
   const nextToken = token === undefined ? config.token : token || null
+  const nextProjectsRoot = projectsRoot === undefined ? config.projectsRoot : (projectsRoot as string | null)
   // selectSource queues the first update check for a fresh snapshot, and that check
   // reads the token from config: set the new token first, so the check authenticates
   // with it. selectSource persists config on every success path; a failed source
-  // switch restores the previous token and persists that.
+  // switch restores the previous token and projectsRoot and persists that.
   const prevToken = config.token
+  const prevProjectsRoot = config.projectsRoot
   config.token = nextToken
+  config.projectsRoot = nextProjectsRoot
   let queuedCheck = false
   try {
-    queuedCheck = await selectSource((repo ?? path) as string, repo != null ? 'repo' : 'path', nextToken ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN)
+    if (repo != null || path != null) {
+      queuedCheck = await selectSource((repo ?? path) as string, repo != null ? 'repo' : 'path', nextToken ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN)
+    } else {
+      saveConfig(config)
+    }
   } catch (err) {
     config.token = prevToken
+    config.projectsRoot = prevProjectsRoot
     saveConfig(config)
     return clientError(reply, err)
   }

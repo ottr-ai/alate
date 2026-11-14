@@ -2,7 +2,7 @@
 
 alate provisions an [omp](https://github.com/can1357/oh-my-pi) agent on any machine: global agent rules, the omp user layer, and per-project agent-context snapshots. alate ships no rules or user-layer content of its own, but it does ship the skills vendored from Ottr's `.agents/skills` at the pinned commit (below). All content lives in a private data repo of yours; `examples/data/` is the starter template. Two parts do the work:
 
-- **CLI scripts** run on a machine: `sync.mjs` and `install-user.mjs` install from the data repo; `sync-user.mjs` and `sync-projects.mjs` capture machine state into it.
+- **CLI scripts** run on a machine: `sync.mjs`, `install-user.mjs` and `install-projects.mjs` install from the data repo; `sync-user.mjs` and `sync-projects.mjs` capture machine state into it.
 - **A provisioning server** (`server.ts`, Fastify) stores a snapshot of the data repo in SQLite, runs the install scripts against it, and serves a web dashboard (`web/`) for import, edits, and update checks.
 
 Run the server with `docker compose up -d` (image `ghcr.io/ottr-ai/alate`) or `node server.ts` (Node type stripping, no build step). The default bind is `127.0.0.1:4570`.
@@ -15,6 +15,7 @@ flowchart LR
   lib["Shared plumbing (lib/data.mjs)"]
   sync["sync.mjs - rules install"]
   installU["install-user.mjs - user layer and workers"]
+  installP["install-projects.mjs - project files into the checkouts"]
   captureU["sync-user.mjs - capture user/"]
   captureP["sync-projects.mjs - capture projects/"]
   server["Provisioning server (server.ts, Fastify)"]
@@ -36,6 +37,7 @@ flowchart LR
   dataRepo -->|"user/ and plugin lockfiles and workers/"| installU
   server -->|"runs sync.mjs on the stored snapshot"| sync
   server -->|"runs install-user.mjs on the stored snapshot"| installU
+  server -->|"runs install-projects.mjs on the stored snapshot"| installP
   server -->|"state and files rows"| db
   dash -->|"calls /api/import, /api/file, /api/state"| server
   server -->|"daily checkUpdates()"| updates
@@ -51,6 +53,7 @@ flowchart LR
 - **install-user.mjs** — restores `user/` onto the home (`~/.alate/installed.json` manifest; refuses changed files without `--force`); applies sync.mjs's hidden-character gate to every `*.md`/`*.mdc` in the snapshot (agent context such as `AGENTS.md` loads as always-on instructions too) and the frontmatter-description rule gate to `omp/agent/rules/`; scans every skill snapshot with a pinned SkillSpector build (`SKILLSPECTOR_REF`, fail-closed); installs every skill folder vendored from the pinned `.agents/skills` tree in `lib/shipped.mjs` (`shipped/ottr/`; an accepted data repo skill of the same name wins, and the scan gate applies to them like snapshot skills); installs plugins with `bun install --frozen-lockfile`; provisions `workers/` additions to `~/.ottr/workers/<project>/`. With `ALATE_LAYER=1` or `--layer`, it installs into a fresh `.alate/layers/<commit>-<n>` folder and switches the `.alate/current` symlink by one atomic rename; a failure before the switch deletes the fresh layer and leaves current unchanged, and the first layer over an in-place home takes the machine part of `config.yml` from the home.
 - **sync-user.mjs** — captures an allowlist of home items into `user/`; a missing item is `not present`, never an error, and a home with nothing present captures nothing; refuses credential-shaped values and secret-named keys that hold literals; drops deployment blocks (`hindsight:`/`alate:`) from `config.yml`; stores every absolute path in a captured JSON file in one POSIX form under the snapshot home `/root` (see `specs/stored-json-path-form.md`), so a sync from Windows and a sync from Linux write equal bytes; leaves a child of every captured skill root (`.agents/skills`, `.omp/agent/skills`, `.omp/agent/managed-skills`, the bridge link `.omp/agent/skills -> .agents/skills` included) out of the capture only when its bytes equal the vendored shipped copy (an edited skill captures), and refuses the capture when the vendored tree is unreadable; its baseline at `<home>/.alate/captured-user.json` keeps the snapshot when only the snapshot changed elsewhere, and refuses the run when a file changed on both sides.
 - **sync-projects.mjs** — copies each project's context files (per `projects/projects.json`) into `projects/<name>/`; its baseline at `<workspace-root>/.alate/captured-projects.json` refreshes the machine copy when only the snapshot changed elsewhere, and refuses the run when a file changed on both sides.
+- **install-projects.mjs** — installs the files that `projects/projects.json` lists from `projects/<name>/` into the workspace checkouts (`--root`; the server derives it from a path source's parent folder, and the `projectsRoot` config value wins). The snapshot wins over a changed machine copy, and every write is logged; see `specs/install-projects.md`.
 - **License gate** — `license-gate.mjs`: fails when a `package-lock.json` entry has a missing or non-allowlisted `license` field (SPDX expressions split on AND/OR/WITH).
 - **Provisioning server** — `server.ts`: key-authenticated API, snapshot store, dashboard host. Tables `state` and `files` (created in `server.ts`); update tables from `lib/updates.mjs` (`initUpdates`). Config in `server-config.json`; first start prints the API key.
 - **Snapshot store** — `alate.db` (SQLite via `node:sqlite`): `files` holds every data-repo file; `state` holds dashboard state; `updates`, `update_seen`, `osv_cache` hold update-check state.
@@ -71,6 +74,8 @@ sequenceDiagram
   participant store as Snapshot store (web/dashboard.mjs, alate.db)
   participant sync as sync.mjs
   participant install as install-user.mjs
+  participant installP as install-projects.mjs
+  participant workspace as Project checkouts (/workspace/<project>)
   participant home as Container home (compose home volume)
 
   admin->>server: POST /api/login with the app key
@@ -87,13 +92,16 @@ sequenceDiagram
   install->>home: user/ and workers/ into a new .alate/layers/<commit>-<n>
   install->>home: atomically renames the .alate/current symlink to the new layer
   install-->>server: exit code and output with secrets redacted
+  server->>installP: node install-projects.mjs --data with the temp dir, --root from projectsRoot or the path source
+  installP->>workspace: the listed files that changed since the last provision
+  installP-->>server: exit code and output
   server-->>admin: ProvisionResult list, provisionedSha set to importedSha
 ```
 
 - **Admin browser** — `web/app.js` (`api()` helper, login view, source form); `POST /api/login` exchanges the key for a session cookie because phones cannot set headers.
 - **Server** — `server.ts`: `provision()` materializes the snapshot, spawns each script in `SCRIPTS` and stops at the first nonzero or null exit code, so the result list holds only the scripts that ran; caps and redacts output; auth: Bearer key always, dashboard routes key-free on a loopback bind only, and a loopback write also needs a same-origin `Origin` header or a same-host `Referer` (`dashGuard`). A loopback bind also refuses non-loopback `Host` headers (DNS rebinding).
 - **Snapshot store** — `web/dashboard.mjs`: `importSource`, `snapshotData`, `applyFileEdit`; SQLite tables in `server.ts` and `lib/updates.mjs`.
-- **sync.mjs / install-user.mjs** — the same CLI scripts a host runs by hand; the server passes `--data <temp snapshot dir>`.
+- **sync.mjs / install-user.mjs / install-projects.mjs** — the same CLI scripts a host runs by hand; the server passes `--data <temp snapshot dir>`, and to `install-projects.mjs` also `--root <workspace>` when it knows one.
 - **Container home** — `compose.yaml` volume `home` mounted at `/root`; `state` volume holds `server-config.json` and `alate.db`. A turn resolves `.alate/current` once at its start and keeps that layer for its whole life.
 
 ## Life cycle of the stored snapshot
