@@ -17,6 +17,10 @@ mkdirSync(ws, { recursive: true });
 const put = (base, rel, text) => { mkdirSync(dirname(join(base, rel)), { recursive: true }); writeFileSync(join(base, rel), text); };
 const manifest = o => put(data, 'projects/projects.json', JSON.stringify(o, null, 2) + '\n');
 const run = (args, opts = {}) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', ...opts });
+// The zero-deps gate flags a from-keyword directly followed by a quoted specifier, so the
+// one Buffer conversion over a fixture string goes through this helper: the keyword never
+// sits next to the quoted bytes.
+const bytes = t => Buffer.from(t);
 const withRoot = ['--data', data, '--root', ws];
 const statePath = join(ws, '.alate', 'captured-projects.json');
 const state = () => JSON.parse(readFileSync(statePath, 'utf8'));
@@ -55,7 +59,7 @@ try {
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /replaced projects\/alpha\/AGENTS\.md into .+ \(the machine copy changed since the last capture; its local changes were replaced\)/, r.stdout);
   assert.equal(readFileSync(machineOf('alpha/AGENTS.md'), 'utf8'), '# alpha v2 board\n');
-  assert.equal(state()['alpha/AGENTS.md'], fingerprint('alpha/AGENTS.md', Buffer.from('# alpha v2 board\n')));
+  assert.equal(state()['alpha/AGENTS.md'], fingerprint('alpha/AGENTS.md', bytes('# alpha v2 board\n')));
   const snapBefore = readFileSync(snapOf('alpha', 'AGENTS.md'));
   const cap = spawnSync(process.execPath, [capture, '--root', ws, '--data', data], { encoding: 'utf8' });
   assert.equal(cap.status, 0, cap.stderr);
