@@ -388,7 +388,7 @@ const stageScanCopy = (dir, root, index) => {
 
 // Severity cap on shipped baselines (specs/skillspector-reviewed-acceptances.md): the
 // baseline --use-shipped-baseline applies sits inside the scanned folder, from the skill's own
-// author, and the scanner caps nothing — one glob rule hides every finding. So a suppressed
+// author, and the scanner caps no severity — one glob rule hides every finding. So a suppressed
 // finding passes on the baseline alone only at LOW or MEDIUM; any other severity (HIGH,
 // CRITICAL, or one the gate does not know) needs a review entry from a file no skill folder
 // holds: the data repo root's skillspector-reviews.json (sync-user never captures it, the
@@ -492,19 +492,26 @@ const findingAt = f => `${oneLine(f.location?.file)}:${oneLine(f.location?.start
 const findingLines = f => [`${oneLine(f.severity)}: ${oneLine(f.id)} - ${oneLine(f.pattern ?? f.category)}`, `    Location: ${findingAt(f)}`];
 
 // A judged report is a JSON object whose issues and suppressed lists hold objects, with a
-// suppressed_count that agrees; anything else proves nothing and is a scan error.
-/** @param {string} stdout @returns {{ issues: ScanFinding[], suppressed: ScanFinding[] } | null} */
+// suppressed_count that agrees; anything else proves nothing and is a scan error. `truncated`
+// is true when the scanner's completeness ledger records an `output_limit` exception: the
+// pinned build stops one analyzer at 10,000 findings and skips the files after that point, so
+// a skill can flood an early file with LOW findings its own baseline accepts and push a HIGH
+// finding out of both lists. Other partial-coverage reasons (static_parse_limit,
+// reference_missing) are common in benign skills and drop no finding from the lists.
+/** @param {string} stdout @returns {{ issues: ScanFinding[], suppressed: ScanFinding[], truncated: boolean } | null} */
 const parseScanReport = stdout => {
   /** @type {unknown} */
   let doc;
   try { doc = JSON.parse(stdout); } catch { return null; }
   if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return null;
-  const { issues, suppressed, suppressed_count: count } = /** @type {Record<string, unknown>} */ (doc);
+  const { issues, suppressed, suppressed_count: count, analysis_completeness: completeness } = /** @type {Record<string, unknown>} */ (doc);
   if (!Array.isArray(issues) || !Array.isArray(suppressed) || count !== suppressed.length) return null;
   /** @param {unknown} f @returns {boolean} */
   const isFinding = f => f !== null && typeof f === 'object' && !Array.isArray(f);
   if (!issues.every(isFinding) || !suppressed.every(isFinding)) return null;
-  return { issues, suppressed };
+  const exceptions = isFinding(completeness) ? /** @type {Record<string, unknown>} */ (completeness).ledger_exceptions : undefined;
+  const truncated = Array.isArray(exceptions) && exceptions.some(e => isFinding(e) && /** @type {Record<string, unknown>} */ (e).reason_code === 'output_limit');
+  return { issues, suppressed, truncated };
 };
 
 // The pinned build's verdict for these exact bytes, printed as one text block so a tail of the
@@ -564,9 +571,11 @@ const scanOne = (scanner, dir, total, display, skill, entries) => new Promise((r
     if (stderr) lines.push(stderr);
     const report = lines.join('\n');
     console.log(`--- SkillSpector report: ${display}${report ? `\n${report}` : ''}`);
-    if (parsed && (code === 0 || code === 1)) resolve({ issues: parsed.issues, unreviewed, report });
+    if (parsed && !parsed.truncated && (code === 0 || code === 1)) resolve({ issues: parsed.issues, unreviewed, report });
     else {
-      const why = code === 0 || code === 1 ? `exit ${code}, stdout is not a SkillSpector JSON report` : `exit ${code ?? `signal ${signal}`}`;
+      const why = parsed?.truncated
+        ? 'the scanner reached its finding output limit, so findings past the limit are missing from the report'
+        : code === 0 || code === 1 ? `exit ${code}, stdout is not a SkillSpector JSON report` : `exit ${code ?? `signal ${signal}`}`;
       resolve({ report, scanError: `SkillSpector scan of ${display} failed (${why}).` });
     }
   });

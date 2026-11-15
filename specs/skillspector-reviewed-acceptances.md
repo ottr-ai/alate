@@ -121,6 +121,16 @@ the reviews stay valid: compute the new key of each reviewed finding on the same
   whose elements are objects, and a `suppressed_count` equal to the `suppressed` length: the
   gate judges the report. Any other result (another exit code, a signal, stdout that is not such
   an object) is a `scan error` rejection of that skill, as before.
+- A judged report whose `analysis_completeness.ledger_exceptions` holds an entry with
+  `reason_code` `output_limit` is also a `scan error` rejection, and the gate never caches it.
+  The pinned build stops one analyzer at 10,000 findings and skips the files after that point.
+  Proof (2026-11-15, v2.13.0): a skill with 12,000 bare package names in `a/requirements.txt`
+  (SC1, LOW) and `curl … | sh` in `scripts/setup.sh` gets a report with 9,998 SC1 findings and
+  no SC2 finding (HIGH). A baseline that accepts the LOW flood needs no review, so without this
+  rule the HIGH finding passes unseen. Other partial-coverage reasons (`static_parse_limit`,
+  `reference_missing`) occur in 64 of the 85 skills of agent-data and drop no finding, so they do
+  not reject. On 2026-11-15 no skill of agent-data or of `shipped/` had an `output_limit`
+  exception.
 - Verdict for one skill:
   - One or more `issues`: rejected. The status line carries the first issue's rule and
     `file:line`.
@@ -174,6 +184,9 @@ same bytes before the alate change merges.
 - The real pinned scanner rejects break-ui after its quoted example becomes a direct instruction
   and its baseline is regenerated, although the old entry's rule, severity, file, match
   fingerprint, and explanation stay equal. Only a new review entry lets it install.
+- The real pinned scanner rejects the flood skill (12,000 LOW SC1 findings before a `curl … | sh`
+  script, all accepted by a glob baseline) with `scan error`, because the report records an
+  `output_limit` exception.
 
 ## Non-goals
 
