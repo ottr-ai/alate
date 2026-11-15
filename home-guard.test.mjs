@@ -8,7 +8,8 @@
 // else under plugins/ stays checked), .omp/memories, the memory backend store
 // .omp/agent/memories, .omp/oauth, .omp/install-id,
 // .omp/marketplaces.json, .omp/natives, the .omp/autoqa.db database with its -wal and
-// -journal files, the two bookkeeping files under .alate, and the
+// -journal files, the alate rules install record .omp/agent/rules/.alate-installed.json,
+// the two bookkeeping files under .alate, and the
 // live worker's layer runtime (each layer's .omp tree under .alate/layers — the same
 // ignore set as .omp, plus its puppeteer browser-tooling install; the layer's own
 // manifest files stay checked))
@@ -34,7 +35,10 @@ const WATCHED = ['.alate', '.agents', '.omp'];
 // plugins/ stays checked), its memories (.omp/memories and the memory backend store
 // .omp/agent/memories), its oauth state, its native grammar files
 // (.omp/natives), the install-id and marketplaces.json bookkeeping files, and its
-// autoqa.db runtime database with its -wal and -journal files.
+// autoqa.db runtime database with its -wal and -journal files. A sibling session's
+// provisioning run (sync.mjs) rewrites the alate rules install record
+// agent/rules/.alate-installed.json mid-chain (ALAT-169 merge turn); the rule files beside
+// it stay checked, so a sync install into the home still fails on the rules themselves.
 // Everything else in the watched dirs — skills, rules, agent context, installed.json,
 // layers, current, the rest of a browser profile — is checked for presence and mtime.
 // Under .alate/layers only each layer's .omp runtime tree is live state (see layerOmpLive
@@ -57,6 +61,7 @@ const OMP_LIVE = rel => rel === 'logs' || rel.startsWith('logs/') || rel === 'ca
   || rel === 'marketplaces.json'
   || rel === 'natives' || rel.startsWith('natives/')
   || /^autoqa\.db(?:-wal|-journal)?$/.test(rel)
+  || rel === 'agent/rules/.alate-installed.json'
   || /^agent\/[A-Za-z0-9-]+\.db(?:\.|-|$)/.test(rel);
 // A live worker's layer .omp lives at .alate/layers/<id>/.omp and holds the same runtime
 // state as the flat .omp; its browser tooling also installs puppeteer there when a browser
@@ -332,6 +337,20 @@ const selfCheck = () => {
     assert.notEqual(realChange.status, 0, 'non-ignored file in a watched dir fails');
     assert.match(realChange.stderr, /^home-guard: added entry: agent\/agent\.txt$/m);
     assert.match(realChange.stderr, /^home-guard: mtime changed: agent$/m);
+    // ALAT-169 merge turn: a sibling session's sync.mjs run rewrote the alate rules
+    // install record in the real home mid-chain. The record alone churns: the check passes.
+    const rulesDir = join(agentDir, 'rules');
+    writeFileSync(join(rulesDir, '.alate-installed.json'), '{}\n');
+    assert.equal(run('record', fake, snap).status, 0, 'record with the rules install record passes');
+    writeFileSync(join(rulesDir, '.alate-installed.json'), '{"rules":[]}\n');
+    utimesSync(join(rulesDir, '.alate-installed.json'), new Date(), new Date(Date.now() + 9000));
+    assert.equal(run('check', fake, snap).status, 0, 'rules install record write passes');
+    // A rule file beside the record stays watched: a sync install into this home still fails.
+    writeFileSync(join(rulesDir, 'r.md'), 'changed\n');
+    utimesSync(join(rulesDir, 'r.md'), new Date(), new Date(Date.now() + 9000));
+    const ruleChange = run('check', fake, snap);
+    assert.notEqual(ruleChange.status, 0, 'watched rule file write fails');
+    assert.match(ruleChange.stderr, /^home-guard: mtime changed: agent\/rules\/r\.md$/m);
     console.log('home-guard ok');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
