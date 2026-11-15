@@ -142,6 +142,7 @@ The name must match `^[a-z0-9][a-z0-9-]*$`.
 An invalid skill stays out of the install, is reported with its problems, and is never scanned; every skill that passes still installs, and a previously installed, record-matching copy of the invalid skill is deleted.
 A whole-run refusal leaves the home, manifest, scanner cache, and layers unchanged.
 This check runs even when SkillSpector has a cached pass.
+A folder whose name matches `skills` or `managed-skills` only without case (for example `Skills/`) stays out of the install as one rejected item: Windows and macOS read it as the real skill root, but the skill gates check only the exact names.
 
 See the [skill snapshot structure gate specification](docs/specs/skill-structure-gate.md) for accepted scalar forms and boundaries.
 
