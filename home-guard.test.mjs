@@ -6,7 +6,8 @@
 // snapcompact — the cache and session stores of the browser profiles under
 // .omp/browser-profiles, the live worker's .omp/plugins/cache downloads (anything
 // else under plugins/ stays checked), .omp/memories, .omp/oauth, .omp/install-id,
-// .omp/marketplaces.json, .omp/natives, the two bookkeeping files under .alate, and the
+// .omp/marketplaces.json, .omp/natives, the .omp/autoqa.db database with its -wal and
+// -journal files, the two bookkeeping files under .alate, and the
 // live worker's layer runtime (each layer's .omp tree under .alate/layers — the same
 // ignore set as .omp, plus its puppeteer browser-tooling install; the layer's own
 // manifest files stay checked))
@@ -30,7 +31,8 @@ const WATCHED = ['.alate', '.agents', '.omp'];
 // their -wal and -journal files: a live browser rewrites those mid-chain. A live worker
 // also rewrites its plugin download cache (.omp/plugins/cache; anything else under
 // plugins/ stays checked), its memories, its oauth state, its native grammar files
-// (.omp/natives), and the install-id and marketplaces.json bookkeeping files.
+// (.omp/natives), the install-id and marketplaces.json bookkeeping files, and its
+// autoqa.db runtime database with its -wal and -journal files.
 // Everything else in the watched dirs — skills, rules, agent context, installed.json,
 // layers, current, the rest of a browser profile — is checked for presence and mtime.
 // Under .alate/layers only each layer's .omp runtime tree is live state (see layerOmpLive
@@ -51,6 +53,7 @@ const OMP_LIVE = rel => rel === 'logs' || rel.startsWith('logs/') || rel === 'ca
   || rel === 'install-id'
   || rel === 'marketplaces.json'
   || rel === 'natives' || rel.startsWith('natives/')
+  || /^autoqa\.db(?:-wal|-journal)?$/.test(rel)
   || /^agent\/[A-Za-z0-9-]+\.db(?:\.|-|$)/.test(rel);
 // A live worker's layer .omp lives at .alate/layers/<id>/.omp and holds the same runtime
 // state as the flat .omp; its browser tooling also installs puppeteer there when a browser
@@ -145,7 +148,8 @@ const selfCheck = () => {
     '.agents/skills/x/SKILL.md', '.omp/agent/rules/r.md', '.omp/agent/agent.db', '.omp/agent/agent.db-wal',
     '.omp/agent/skill-descriptions.db-shm', '.omp/agent/skill-descriptions.db-wal',
     '.omp/logs/omp.231.log', '.omp/context-mode/sessions/s.db-shm', '.omp/agent/custom-session-files/a',
-    '.omp/snapcompact-savings.jsonl', 'unwatched.txt',
+    '.omp/snapcompact-savings.jsonl', 'unwatched.txt', '.omp/autoqa.db', '.omp/autoqa.db-wal',
+    '.omp/autoqa.db-journal',
     '.omp/plugins/cache/marketplaces/idx.json', '.omp/plugins/installed/p/manifest.json',
     '.omp/memories/m.md', '.omp/oauth/tokens.json', '.omp/install-id',
     '.omp/marketplaces.json', '.omp/natives/grammars/en.wasm',
@@ -170,6 +174,10 @@ const selfCheck = () => {
     utimesSync(join(fake, '.omp/agent/agent.db-wal'), new Date(), new Date(Date.now() + 9000));
     utimesSync(join(fake, '.omp/agent/skill-descriptions.db-shm'), new Date(), new Date(Date.now() + 9000));
     writeFileSync(join(fake, '.omp/agent/skill-descriptions.db-wal'), 'more\n');
+    // The live worker's autoqa runtime database churns too (ALAT-140 chain run 1).
+    utimesSync(join(fake, '.omp/autoqa.db'), new Date(), new Date(Date.now() + 9000));
+    writeFileSync(join(fake, '.omp/autoqa.db-wal'), 'more\n');
+    writeFileSync(join(fake, '.omp/autoqa.db-journal'), 'more\n');
     writeFileSync(join(fake, '.omp/logs/omp.231.log'), 'more\n');
     writeFileSync(join(fake, '.alate/skillspector-pass.json'), '{}\n');
     // A live browser writes only cache and session stores: the ignored class.

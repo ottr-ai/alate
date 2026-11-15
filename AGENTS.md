@@ -33,7 +33,8 @@ with `--data`. `examples/data` is a neutral fixture used by tests and CI.
   each profile stays watched), the agent
   blob cache `agent/blobs`, the plugin download cache `plugins/cache` (anything
   else under `plugins/` stays checked), the live worker's `memories`, `oauth`,
-  `install-id`, `marketplaces.json` and `natives` files, the live worker's layer
+  `install-id`, `marketplaces.json` and `natives` files, the live worker's
+  `.omp/autoqa.db` runtime database with its `-wal` and `-journal` files, the live worker's layer
   runtime under `.alate/layers/<id>/.omp` (the same ignore set as `.omp`, plus the
   layer's `puppeteer` browser-tooling install; the layer's other files stay watched),
   and the two bookkeeping files under `.alate`): a live worker writes them during any chain.
