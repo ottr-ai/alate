@@ -224,9 +224,10 @@ const UNPACK = new Set(['zip', 'tar.gz', 'none']);
 const BIN_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
 // Every directory named skills/ or managed-skills/ anywhere under a root holds executable
-// agent content; each skill inside it goes to the scanner. A directory whose name aliases a
-// skill root only without case (Skills/) is collected into `aliases`, never descended into:
-// the caller rejects it whole before any write.
+// agent content; each skill inside it goes to the scanner. A directory whose name only
+// aliases a skill root (case variant `Skills/`, 8.3 short name `MANAGE~1/`,
+// ignorable-code-point variant `skil\u200Cls/`) is collected into `aliases`, never
+// descended into: the caller rejects it whole before any write.
 /** @param {string} dir @param {string[]} [aliases] @returns {string[]} */
 const collectSkillDirs = (dir, aliases = []) => {
   /** @type {string[]} */
@@ -683,12 +684,19 @@ try {
   const dirByKey = new Map(skillDirs.map(dir => [`user/${relative(userRoot, dir).split(sep).join('/')}`, dir]));
   /** @type {Set<string>} */
   const rejectedSkills = new Set();
-  // A case variant of a skill root (Skills/) is the same folder as the root on Windows and
-  // macOS, but no skill gate ever saw its skills: the whole folder is rejected and excluded.
+  // A folder whose name only aliases a skill root (case variant `Skills/`, 8.3 short name
+  // `MANAGE~1/`, ignorable-code-point variant `skil\u200Cls/`) is the root's folder as
+  // Windows and macOS resolve it, but no skill gate ever saw its skills: the whole folder
+  // is rejected and excluded.
   for (const dir of rootAliases) {
     const key = `user/${relative(userRoot, dir).split(sep).join('/')}`;
-    const root = /** @type {string} */ (skillRootAlias(basename(dir)));
-    failItem(key, 'rejected', `case variant of skill root "${root}"`, null, `${key}: case variant of skill root "${root}"; a case-insensitive filesystem installs it as ${root}/ unchecked by the skill gates. Rename the folder to ${root}/.`);
+    const alias = /** @type {{ root: string, reason: 'case variant' | '8.3 short name' | 'ignorable code point variant' }} */ (skillRootAlias(basename(dir)));
+    const why = alias.reason === 'case variant'
+      ? `a case-insensitive filesystem installs it as ${alias.root}/ unchecked by the skill gates`
+      : alias.reason === '8.3 short name'
+        ? `NTFS resolves the 8.3 short name to the long folder, so it installs as ${alias.root}/ unchecked by the skill gates`
+        : `HFS+ name comparison ignores these code points, so it installs as ${alias.root}/ unchecked by the skill gates`;
+    failItem(key, 'rejected', `${alias.reason} of skill root "${alias.root}"`, null, `${key}: ${alias.reason} of skill root "${alias.root}"; ${why}. Rename the folder to ${alias.root}/.`);
     rejectedSkills.add(dir);
   }
   for (const key of gate.uncovered) {

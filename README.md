@@ -143,6 +143,7 @@ An invalid skill stays out of the install, is reported with its problems, and is
 A whole-run refusal leaves the home, manifest, scanner cache, and layers unchanged.
 This check runs even when SkillSpector has a cached pass.
 A folder whose name matches `skills` or `managed-skills` only without case (for example `Skills/`) stays out of the install as one rejected item: Windows and macOS read it as the real skill root, but the skill gates check only the exact names.
+The same one-item rejection covers an 8.3 short name of a root (`MANAGE~1/` — NTFS resolves it into the long folder on the default Windows setup) and a name that matches a root once the Unicode default-ignorable code points are ignored (`skil\u200Cls/` — HFS+ name comparison ignores them).
 
 See the [skill snapshot structure gate specification](docs/specs/skill-structure-gate.md) for accepted scalar forms and boundaries.
 

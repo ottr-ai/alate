@@ -18,6 +18,10 @@ server can merge results by key:
   `user/omp/agent/managed-skills/m1`; `user/agents/skills/locked`.
 - skill root case variant: the `user/`-prefixed folder, for example
   `user/omp/agent/Skills`.
+- skill root 8.3 short name: the `user/`-prefixed folder, for example
+  `user/omp/agent/MANAGE~1`.
+- skill root ignorable code point variant: the `user/`-prefixed folder, for example
+  `user/omp/agent/skil\u200Cls`.
 - MCP server: `user/omp/agent/mcp.json "<name>"`.
 - worker list: `workers/<project>/<file>`.
 
@@ -118,11 +122,15 @@ failure; `provisionedSha` still moves only on `ok`.
 3. install, delete, record as before over the surviving rules only.
 
 `install-user.mjs`:
-0. skill root case variant: a folder whose name matches `skills` or `managed-skills`
-   only without case (`Skills`, `MANAGED-SKILLS`, `ſkills`) is `rejected` with rule
-   `case variant of skill root "<root>"` and excluded whole. Windows and macOS resolve
-   it as the real root, so omp loads its skills, but the skill gates check only the
-   exact names;
+0. skill root alias: a folder whose name matches `skills` or `managed-skills` only
+   after case folding (`Skills`, `MANAGED-SKILLS`, `ſkills`), only after removing
+   the Unicode default-ignorable code points (`skil\u200Cls`), or whose name is an
+   8.3 short-name shape (`MANAGE~1`) of one is `rejected` with rule
+   `<reason> of skill root "<root>"` and excluded whole. NTFS resolves 8.3 short
+   names into the long folder (creation is on by default on the Windows system
+   volume), case-insensitive filesystems resolve case variants, and case-insensitive
+   HFS+ name comparison ignores the default-ignorable code points — omp loads the
+   folder's skills either way, but the skill gates check only the exact names;
 1. origin gate: fatal problems refuse; uncovered skill dirs are `no origin` items,
    excluded before the walk; uncovered MCP servers are `no origin` reports;
 2. skill structure gate per skill (`skillProblems`): a failing skill is `rejected`,
@@ -189,8 +197,10 @@ h. A fatal refusal or a killed child stores the failing script and its output on
    `GET /api/state`.
 i. The overview renders the "Provision failed" line and per-script output
    disclosures for a failed run, and nothing for a clean run.
-j. A case variant of a skill root (`Skills/`) is reported `rejected`, is never
-   scanned or installed, and the exact skill roots still install; exit 1, `fatal: false`.
+j. A case variant (`Skills/`), an 8.3 short name (`MANAGE~1/`), and an
+   ignorable-code-point variant (`skil\u200Cls/`) of a skill root are each reported
+   `rejected`, are never scanned or installed, and the exact skill roots still
+   install; exit 1, `fatal: false`.
 
 ## Non-goals
 

@@ -271,6 +271,7 @@ try {
     assert.deepEqual(skillProblems('valid-escape/SKILL.md', `---\nname: ${name}\ndescription: ${description}\n---\n`), [], 'supported escaped metadata passes with decoded values');
   }
   const choose = (rand, values) => values[Math.floor(rand() * values.length)];
+  const flip = (rand, c) => c === 's' && rand() < 0.2 ? '\u017F' : c === 'k' && rand() < 0.2 ? '\u212A' : rand() < 0.5 ? c.toUpperCase() : c;
   forAll((rand, size) => {
     const first = choose(rand, 'abcdefghijklmnopqrstuvwxyz0123456789');
     return first + Array.from({ length: Math.floor(rand() * size) }, () => choose(rand, 'abcdefghijklmnopqrstuvwxyz0123456789-')).join('');
@@ -293,17 +294,53 @@ try {
   // folding) resolves to the root aliases it; the exact root and every other name do not.
   forAll(rand => {
     const root = choose(rand, ['skills', 'managed-skills']);
-    const flip = c => c === 's' && rand() < 0.2 ? '\u017F' : c === 'k' && rand() < 0.2 ? '\u212A' : rand() < 0.5 ? c.toUpperCase() : c;
-    const name = [...root].map(flip).join('');
+    const name = [...root].map(c => flip(rand, c)).join('');
     const other = choose(rand, ['skill', 'skillz', 'xskills', 'skills-', 'managed', 'managedskills', 'skills.', ' skills', '']);
-    return { root, name, other: [...other].map(flip).join('') };
+    return { root, name, other: [...other].map(c => flip(rand, c)).join('') };
   }, input => {
     const { root, name, other } = /** @type {{ root: string, name: string, other: string }} */ (input);
-    assert.equal(skillRootAlias(name), name === root ? null : root, `${name} aliases ${root}`);
-    assert.equal(skillRootAlias(other), null, `${other} aliases no skill root`);
+    const want = name === root ? null : { root, reason: 'case variant' };
+    assert.deepEqual(skillRootAlias(name), want, `${name} aliases ${root}`);
+    assert.deepEqual(skillRootAlias(other), null, `${other} aliases no skill root`);
   });
-  for (const [name, root] of [['Skills', 'skills'], ['\u017Fkills', 'skills'], ['MANAGED-SKILLS', 'managed-skills'], ['skills', null], ['managed-skills', null], ['Skill', null], ['SKILLS.', null]]) {
-    assert.equal(skillRootAlias(name), root, `${name} aliases ${root}`);
+  // HFS+ name comparison maps the Unicode default-ignorable code points to zero, so
+  // `skil\u200Cls` resolves to `skills` on a case-insensitive HFS+ home; APFS keeps them
+  // significant, so this is defense-in-depth there.
+  forAll(rand => {
+    const root = choose(rand, ['skills', 'managed-skills']);
+    const cps = [0xAD, 0x200B, 0x200C, 0x200D, 0x202A, 0x202E, 0x2060, 0x2066, 0xFE00, 0xFE0F, 0xFEFF, 0x3164, 0xE0100];
+    const poison = name => {
+      let out = name;
+      for (let n = 0; n < 1 + Math.floor(rand() * 3); n++) {
+        const at = Math.floor(rand() * (out.length + 1));
+        out = out.slice(0, at) + String.fromCodePoint(choose(rand, cps)) + out.slice(at);
+      }
+      return out;
+    };
+    const other = choose(rand, ['skill', 'skillz', 'xskills', 'skills-', 'managed', 'managedskills', 'skills.', ' skills', '']);
+    return { root, name: poison([...root].map(c => flip(rand, c)).join('')), other: poison(other) };
+  }, input => {
+    const { root, name, other } = /** @type {{ root: string, name: string, other: string }} */ (input);
+    assert.deepEqual(skillRootAlias(name), { root, reason: 'ignorable code point variant' }, `${JSON.stringify(name)} is an ignorable variant of ${root}`);
+    assert.deepEqual(skillRootAlias(other), null, `${JSON.stringify(other)} aliases no skill root`);
+  });
+  // NTFS on the system volume generates `MANAGE~N` for `managed-skills` when 8.3 name
+  // creation is on (the default), and a write through the short name lands in the long folder.
+  forAll(rand => {
+    const root = choose(rand, ['skills', 'managed-skills']);
+    const cut = 1 + Math.floor(rand() * 6);
+    const prefix = [...root.slice(0, cut)].map(c => flip(rand, c)).join('');
+    return { root, name: `${prefix}~${1 + Math.floor(rand() * 9)}${rand() < 0.3 ? '.txt' : ''}` };
+  }, input => {
+    const { root, name } = /** @type {{ root: string, name: string }} */ (input);
+    assert.deepEqual(skillRootAlias(name), { root, reason: '8.3 short name' }, `${name} is an 8.3 short name of ${root}`);
+  });
+  // 8.3-shaped names whose prefix is no prefix of any root stay unflagged.
+  forAll(rand => `${choose(rand, ['skillz', 'skillx', 'skilla', 'skill-', 'xskill', 'skilsl'])}~1${rand() < 0.3 ? '.txt' : ''}`, name => {
+    assert.deepEqual(skillRootAlias(name), null, `${name} is not an 8.3 alias of a skill root`);
+  });
+  for (const [name, root, reason] of [['Skills', 'skills', 'case variant'], ['\u017Fkills', 'skills', 'case variant'], ['MANAGED-SKILLS', 'managed-skills', 'case variant'], ['skills', null], ['managed-skills', null], ['Skill', null], ['SKILLS.', null], ['MANAGE~1', 'managed-skills', '8.3 short name'], ['manage~3.txt', 'managed-skills', '8.3 short name'], ['SKILL~2', 'skills', '8.3 short name'], ['skil\u200Cls', 'skills', 'ignorable code point variant'], ['MANAG\u200BED-SKILLS', 'managed-skills', 'ignorable code point variant'], ['skillz~1', null], ['skil\u200Clz', null], ['\u200Cskillz\u200C', null], ['~1', null]]) {
+    assert.deepEqual(skillRootAlias(name), root === null ? null : { root, reason }, `${name} aliases ${root}`);
   }
 
   put('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
@@ -2846,6 +2883,36 @@ exit 0
     const cvItems = JSON.parse(readFileSync(cvResults, 'utf8'));
     assert.equal(cvItems.fatal, false, 'a case variant is a per-item rejection, not a refusal');
     assert.deepEqual(cvItems.items.find(i => i.item === 'user/omp/agent/Skills'), { item: 'user/omp/agent/Skills', status: 'rejected', rule: 'case variant of skill root "skills"', at: null, report: 'user/omp/agent/Skills: case variant of skill root "skills"; a case-insensitive filesystem installs it as skills/ unchecked by the skill gates. Rename the folder to skills/.' });
+  }
+
+  // An 8.3 short name of a skill root (MANAGE~1/) resolves to the long folder on NTFS
+  // volumes with short-name creation (the default on the Windows system volume), and an
+  // ignorable-code-point variant (skil\u200Cls/) resolves on case-insensitive HFS+.
+  // Both are rejected whole, never scanned or installed; the real roots still install.
+  if (scanned) {
+    const alData = join(tmp, 'data-root-alias');
+    const alHome = join(tmp, 'home-root-alias');
+    const putA = (rel, text) => { mkdirSync(dirname(join(alData, 'user', rel)), { recursive: true }); writeFileSync(join(alData, 'user', rel), text); };
+    putA('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putA('omp/agent/skills/fine/SKILL.md', skillText('fine'));
+    putA('omp/agent/MANAGE~1/short/SKILL.md', skillText('short'));
+    putA('omp/agent/skil\u200Cls/tricky/SKILL.md', skillText('tricky'));
+    writeStub(0);
+    const alCallsBefore = readFileSync(callsLog, 'utf8');
+    const alResults = join(tmp, 'root-alias-results.json');
+    r = run(['--data', alData, '--skip-plugins'], alHome, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ALATE_PROVISION_RESULTS: alResults });
+    assert.equal(r.status, 1, 'an aliased skill root fails the run but not the install');
+    assert.ok(existsSync(join(alHome, '.omp/agent/skills/fine/SKILL.md')), 'the exact skill root installs');
+    for (const rel of ['.omp/agent/MANAGE~1', '.omp/agent/skil\u200Cls', '.omp/agent/managed-skills']) assert.ok(!existsSync(join(alHome, rel)), `${rel} never lands`);
+    const alCalls = readFileSync(callsLog, 'utf8').slice(alCallsBefore.length);
+    assert.ok(alCalls.includes(join(alData, 'user/omp/agent/skills/fine')), 'the exact root is scanned');
+    for (const name of ['short', 'tricky']) assert.ok(!alCalls.includes(name), `${name} is never scanned`);
+    assert.ok(r.stdout.includes('user/omp/agent/MANAGE~1 — rejected: 8.3 short name of skill root "managed-skills"'), r.stdout);
+    assert.ok(r.stdout.includes('user/omp/agent/skil\u200Cls — rejected: ignorable code point variant of skill root "skills"'), r.stdout);
+    const alItems = JSON.parse(readFileSync(alResults, 'utf8'));
+    assert.equal(alItems.fatal, false, 'an aliased skill root is a per-item rejection, not a refusal');
+    assert.deepEqual(alItems.items.find(i => i.item === 'user/omp/agent/MANAGE~1'), { item: 'user/omp/agent/MANAGE~1', status: 'rejected', rule: '8.3 short name of skill root "managed-skills"', at: null, report: 'user/omp/agent/MANAGE~1: 8.3 short name of skill root "managed-skills"; NTFS resolves the 8.3 short name to the long folder, so it installs as managed-skills/ unchecked by the skill gates. Rename the folder to managed-skills/.' });
+    assert.deepEqual(alItems.items.find(i => i.item === 'user/omp/agent/skil\u200Cls'), { item: 'user/omp/agent/skil\u200Cls', status: 'rejected', rule: 'ignorable code point variant of skill root "skills"', at: null, report: 'user/omp/agent/skil\u200Cls: ignorable code point variant of skill root "skills"; HFS+ name comparison ignores these code points, so it installs as skills/ unchecked by the skill gates. Rename the folder to skills/.' });
   }
 
   // The machine-readable results file: with ALATE_PROVISION_RESULTS set, every run writes
