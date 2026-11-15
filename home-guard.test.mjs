@@ -116,10 +116,12 @@ const run = (mode, home, snap) => spawnSync(process.execPath, [fileURLToPath(imp
 // Compare against the snapshot; returns an array of diff lines.
 // A file mtime diff always reports. A directory's mtime also moves when a live-ignored
 // child is created or removed inside it — the memory backend creating
-// .omp/agent/memories mid-chain moves the agent mtime without touching any checked
-// path. A real change to a checked child reports that child on its own, so a directory
-// that stayed a directory and has no direct-child diff of its own is ignored-child
-// churn and its mtime diff is dropped; a type flip (dir to file or back) still reports.
+// .omp/agent/memories mid-chain, or live workers creating and removing the SQLite -wal
+// and -shm files of agent.db, history.db and models.db (ALAT-133), moves the agent mtime
+// without touching any checked path. A real change to a checked child reports that
+// child on its own, so a directory that stayed a directory and has no direct-child diff
+// of its own is ignored-child churn and its mtime diff is dropped; a type flip (dir to
+// file or back) still reports.
 const diff = (snapPathArg) => {
   if (!existsSync(snapPathArg)) return [`snapshot missing: ${snapPathArg}`];
   const snap = JSON.parse(readFileSync(snapPathArg, 'utf8'));
@@ -308,6 +310,28 @@ const selfCheck = () => {
       'layers/w1/.omp/agent', 'layers/w1/.omp/agent/rules',
       'plugins', 'plugins/installed', 'plugins/installed/p',
       'skills', 'skills/x']);
+    // ALAT-133 shape: live workers create and remove the SQLite -wal and -shm files of
+    // agent.db, history.db and models.db directly in .omp/agent. No ignored file stays,
+    // but the agent dir mtime moves; no checked child changed, so the check passes.
+    assert.equal(run('record', fake, snap).status, 0, 're-record passes');
+    const agentDir = join(fake, '.omp/agent');
+    for (const db of ['agent.db', 'history.db', 'models.db']) {
+      for (const ext of ['-wal', '-shm']) {
+        writeFileSync(join(agentDir, db + ext), 'wal\n');
+        rmSync(join(agentDir, db + ext));
+      }
+    }
+    // Pin the moved dir mtime: a coarse file-system timestamp can hide the churn.
+    utimesSync(agentDir, new Date(), new Date(Date.now() + 9000));
+    assert.equal(run('check', fake, snap).status, 0, 'ignored-name churn in a watched dir passes');
+    // The same churn with a non-ignored name in that dir fails: the file reports as an
+    // added entry, and its direct-child diff keeps the agent dir mtime diff.
+    writeFileSync(join(agentDir, 'agent.txt'), 'x\n');
+    utimesSync(agentDir, new Date(), new Date(Date.now() + 18000));
+    const realChange = run('check', fake, snap);
+    assert.notEqual(realChange.status, 0, 'non-ignored file in a watched dir fails');
+    assert.match(realChange.stderr, /^home-guard: added entry: agent\/agent\.txt$/m);
+    assert.match(realChange.stderr, /^home-guard: mtime changed: agent$/m);
     console.log('home-guard ok');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
