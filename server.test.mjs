@@ -2177,14 +2177,25 @@ try {
     // any source host is stored, so the checker would otherwise keep riding the stored
     // PAT to github.com from the older github.com source, the boot check and the timer.
     {
+      // Stage the race that flaked under load: hold an update pass at the slow rel
+      // request so it is in flight when the failed import lands. That pass read the
+      // older github.com source before the import, so its remaining requests still
+      // ride the token after the import returns (the four stale Bearer entries of the
+      // ALAT-150 chain failure). The window below must exclude them.
+      slowRel = true;
+      const relHitCount = () => upHits.filter(p => p === '/gh/repos/fake/rel/releases').length;
+      const relBefore = relHitCount();
+      const held = postJson('/api/updates/check', {}, true);
+      await waitFor(() => relHitCount() > relBefore, 10_000);
       r = await postImport(JSON.stringify({ source: 'https://acme.ghe.com/demo/missing.git', kind: 'repo' }));
+      slowRel = false;
       assert.equal(r.status, 400);
       assert.equal(JSON.parse(readFileSync(upConfig, 'utf8')).tokenHost, 'acme.ghe.com', 'the attempted foreign host is persisted');
-      // Drain once: the one-second update timer or an earlier trigger can leave a pass
-      // that started before the failed import in flight, and that pass read the older
-      // github.com source, so its remaining requests still ride the token. The
-      // single-flight POST joins it and returns only after it ends, so the window
-      // below counts only passes that started after the failed import was persisted.
+      // Drain once: the held pass, the one-second update timer or an earlier trigger can
+      // leave a pass that started before the failed import in flight. The single-flight
+      // POST joins it and returns only after it ends, so the window below counts only
+      // passes that started after the failed import was persisted. Without this drain
+      // the window opens while the held pass still runs and its tail fails the check.
       r = await postJson('/api/updates/check', {}, true);
       assert.equal(r.status, 200);
       const before = authSeen.length;
@@ -2193,6 +2204,7 @@ try {
       const delta = authSeen.slice(before);
       assert.ok(delta.some(a => a.prefix === 'gh'), 'the check after a failed foreign import still reached the GitHub fake');
       assert.deepEqual(delta.filter(a => a.prefix === 'gh' && a.authorization), [], 'a failed foreign-host import silences the stored token');
+      assert.equal((await held).status, 200);
     }
 
     // The documented Enterprise import: a <host>/owner/name source with ALATE_GITHUB_HOST
