@@ -1791,6 +1791,8 @@ try {
   let slowRel = false; // stretch the rel-demo releases request: two overlapping POSTs join one run
   let holdNpm = false; // stall the running check at the context-mode npm request
   let releaseNpm = null; // set once the held request arrived; call it to let the check finish
+  let holdRel = false; // stall the running check at the rel-demo releases request
+  let releaseRel = null; // set once the held rel request arrived; call it to let the check go on
   let shippedHead = SHIPPED_PIN.commit; // fake ottr-ai/ottr head: moved to a new sha by the soak test
   let shippedDrop = ''; // set to a pin path: the fake HEAD tree loses that folder
   let child2 = null; // the trigger-check server, spawned and killed inside the try
@@ -1813,6 +1815,7 @@ try {
           { tag_name: 'v4.0.0-rel', draft: true, prerelease: false, published_at: T.rc1, html_url: 'https://github.com/fake/rel/releases/v4.0.0' },
         ];
         if (slowRel) return setTimeout(() => reply(200, rels), 400);
+        if (holdRel && releaseRel === null) { releaseRel = () => reply(200, rels); return; }
         return reply(200, rels);
       }
       if (url.pathname === '/gh/repos/demo/private/contents/Dockerfile.worker')
@@ -2177,20 +2180,20 @@ try {
     // any source host is stored, so the checker would otherwise keep riding the stored
     // PAT to github.com from the older github.com source, the boot check and the timer.
     {
-      // Stage the race that flaked under load: hold an update pass at the slow rel
-      // request so it is in flight when the failed import lands. That pass read the
-      // older github.com source before the import, so its remaining requests still
-      // ride the token after the import returns (the four stale Bearer entries of the
-      // ALAT-150 chain failure). The window below must exclude them.
-      slowRel = true;
-      const relHitCount = () => upHits.filter(p => p === '/gh/repos/fake/rel/releases').length;
-      const relBefore = relHitCount();
+      // Stage the race that flaked under load: hold an update pass at the rel request
+      // until the test releases it, so it is still pending when the failed import lands.
+      // That pass read the older github.com source before the import, so its remaining
+      // requests still ride the token after the release (the four stale Bearer entries
+      // of the ALAT-150 chain failure). The window below must exclude them.
+      holdRel = true;
       const held = postJson('/api/updates/check', {}, true);
-      await waitFor(() => relHitCount() > relBefore, 10_000);
+      await waitFor(() => releaseRel !== null, 10_000);
       r = await postImport(JSON.stringify({ source: 'https://acme.ghe.com/demo/missing.git', kind: 'repo' }));
-      slowRel = false;
       assert.equal(r.status, 400);
       assert.equal(JSON.parse(readFileSync(upConfig, 'utf8')).tokenHost, 'acme.ghe.com', 'the attempted foreign host is persisted');
+      holdRel = false;
+      releaseRel();
+      releaseRel = null;
       // Drain once: the held pass, the one-second update timer or an earlier trigger can
       // leave a pass that started before the failed import in flight. The single-flight
       // POST joins it and returns only after it ends, so the window below counts only
