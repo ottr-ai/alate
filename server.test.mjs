@@ -5291,13 +5291,19 @@ try {
     const fm = d => `---\ndescription: ${d}\n---\n`;
     const git10 = (args, opts = {}) => git(args, { ...opts, cwd: w10, encoding: 'utf8' });
     const scan10 = d => dash.scanInventory(join(w10, d));
-    // Temp-dir leak watcher: dashboard and snapshot temp dirs never outlive a call.
+    // Temp-dir leak watcher: dashboard and snapshot temp dirs never outlive a call, also
+    // when the call throws. The call's tmpdir() is a fresh root inside this run's own tmp,
+    // so the watcher sees only dirs this run created, never a concurrent run's dirs in the
+    // machine-shared temp root.
     const leak10 = fn => {
-      const before = new Set(readdirSync(tmpdir()).filter(n => /^alate-(dashboard|snapshot)-/.test(n)));
-      const out = fn();
-      const fresh = readdirSync(tmpdir()).filter(n => /^alate-(dashboard|snapshot)-/.test(n) && !before.has(n));
-      assert.deepEqual(fresh, [], 'dashboard temp dirs must not leak');
-      return out;
+      const root = mkdtempSync(join(tmp, 'leak10-'));
+      const saved = ['TMPDIR', 'TMP', 'TEMP'].map(k => [k, process.env[k]]);
+      for (const [k] of saved) process.env[k] = root;
+      try { return fn(); }
+      finally {
+        for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+        assert.deepEqual(readdirSync(root), [], 'dashboard temp dirs must not leak');
+      }
     };
     const err10 = fn => { try { fn(); } catch (e) { return e; } throw new Error('expected a throw'); };
 
