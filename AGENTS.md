@@ -83,6 +83,7 @@ works for a dry run).
 - Every mutant declared equivalent in a stryker config comment must cite its proof: a command with its output, or a pinned example input. Prose alone is not a proof.
 - When a change gates a credential by host, enumerate every route that sends it (clone auth header, API bearer, periodic checks, subagent jobs) and every host state it can meet (unset, configured GitHub host, foreign host, per-repo spec host, failed or refused import), and ship a fail-before test for each route and state in the first commit.
 - If a gate fails only sometimes on the same tree, suspect residue from sibling omp sessions on this machine (for example a `home-guard.test.mjs check` mtime line or a `/tmp` dir that the `server.test.mjs` leak watcher flags). Read the tracker grievance rows for the failure time. Check the owner of the flagged `/tmp` path. Run `file` on the flagged path. After you identify the writer, flag the finding as out of scope. Do not classify with repeated HEAD baseline runs.
+- A containment fix ships its attack-move tests in the first commit. List the moves that keep the pinned property: a move keeps the inode, a symlink swap keeps the path, a planted name keeps the path. Give each move a test that fails before the fix.
 
 ## Releases and versions
 
