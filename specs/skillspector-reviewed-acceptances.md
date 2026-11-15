@@ -74,29 +74,44 @@ error names the file path and the first broken rule.
 
 ## Finding key
 
-The key binds the rule, the severity, the file, and the matched text. It does not bind line
-numbers, so an edit elsewhere in the file keeps the entry. A change to the matched text, the
-severity, or the file name makes a new key, and the finding needs a new review.
+The key binds the rule, the severity, the file, the matched text, and the sha256 of the whole
+bytes of the flagged file in the scanned skill folder. A change to any byte of that file makes a
+new key, and the finding needs a new review.
 
-JavaScript (the gate):
+The file hash is necessary. The scanner computes `match_fingerprint` from the matched phrase
+only, and some rules give a fixed `explanation`. Without the file hash, an author can rewrite a
+quoted example (for example the break-ui phrase "ignore previous instructions", reviewed as test
+data) as a direct instruction, regenerate the baseline, and keep the old review. Line numbers are
+not in the key, because the file hash already covers them.
+
+When the flagged file is not a readable file inside the scanned skill folder (no `file`, a path
+that leaves the folder, a missing file), the finding has no key. No entry can cover it, so the
+skill is rejected.
+
+JavaScript (the gate; `dir` is the scanned skill folder):
 
 ```js
+const content = createHash('sha256').update(readFileSync(resolve(dir, f.location.file))).digest('hex');
 const key = `sha256:${createHash('sha256').update(JSON.stringify([
-  f.id ?? null, f.severity ?? null, f.location?.file ?? null, f.match_fingerprint ?? null, f.explanation ?? null,
+  f.id ?? null, f.severity ?? null, f.location.file, f.match_fingerprint ?? null, f.explanation ?? null, content,
 ])).digest('hex')}`;
 ```
 
-Python (for tools that write review files; the same bytes for all scanner output, checked on 303
-suppressed findings on 2026-11-15):
+Python (for tools that write review files; the same bytes as the gate):
 
 ```python
+content = hashlib.sha256(open(os.path.join(skill_dir, f['location']['file']), 'rb').read()).hexdigest()
 key = 'sha256:' + hashlib.sha256(json.dumps(
-    [f.get('id'), f.get('severity'), (f.get('location') or {}).get('file'), f.get('match_fingerprint'), f.get('explanation')],
+    [f.get('id'), f.get('severity'), f['location']['file'], f.get('match_fingerprint'), f.get('explanation'), content],
     ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest()
 ```
 
 `explanation` is part of the key because some findings carry no `match_fingerprint` (LP1 emits
 one finding per undeclared capability, and only `explanation` tells them apart).
+
+Every entry written with the version of the key before the file hash (no `content` element)
+stops matching, so each review file needs its keys computed again. The bytes did not change, so
+the reviews stay valid: compute the new key of each reviewed finding on the same bytes.
 
 ## Scan contract
 
@@ -141,6 +156,10 @@ of 72 baselined skills accepted 118 HIGH findings and no CRITICAL finding. The a
 only after the data repo carries its `skillspector-reviews.json`. Otherwise those 26 skills drop
 out of the next install.
 
+The file hash joined the key after the first triage (ALAT-142 review, 2026-11-15). The data repo
+file from that triage (agent-data `e8987c6`, 88 entries) needs its keys computed again on the
+same bytes before the alate change merges.
+
 ## Acceptance checks
 
 - A skill whose baseline suppresses a HIGH finding with no entry is rejected with rule
@@ -152,6 +171,9 @@ out of the next install.
 - An invalid review file refuses the run before any write, and names the file.
 - A cached pass rescans after its skill's entries change.
 - The real pinned scanner rejects the glob-baseline test skill, and passes it with entries.
+- The real pinned scanner rejects break-ui after its quoted example becomes a direct instruction
+  and its baseline is regenerated, although the old entry's rule, severity, file, match
+  fingerprint, and explanation stay equal. Only a new review entry lets it install.
 
 ## Non-goals
 
@@ -166,12 +188,17 @@ out of the next install.
   drops 26 skills until each finding is fixed.
 - Refuse glob rules only: rejected. One data repo baseline uses globs, and an author can write
   exact fingerprints for their own findings.
-- Key entries on the baseline's v2 fingerprint: rejected. The scanner JSON does not carry it, and
-  it binds the whole file content, so any edit forces a new review.
+- Key entries on the baseline's v2 fingerprint: rejected. The scanner JSON does not carry it.
+- Bind a window of lines around the match (`code_snippet`) instead of the whole file: rejected.
+  The window size is the scanner's choice, some findings have no snippet (LP1), and a change just
+  outside the window (for example a removed "attack example:" heading) can change what the
+  matched text means.
 
 ## Risks
 
 - A data repo commit can add an entry, the same as it can add a skill. Review of the data repo
   stays the control for that file.
-- An entry covers a finding with the same rule, file, and matched text anywhere in the skill.
-  Repeated benign text stays benign. New text makes a new key.
+- An entry covers each finding with the same rule, severity, matched text, and explanation in the
+  same unchanged file. A repeated phrase in a reviewed file stays covered.
+- Any edit to a file with an accepted finding above MEDIUM drops the skill until a person reviews
+  the finding again and updates the entry key. This is the cost of binding the context.

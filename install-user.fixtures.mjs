@@ -8,8 +8,10 @@ export const BREAK_UI_SKILL_MD = "---\nname: break-ui\ndescription: Try to break
 export const BREAK_UI_BASELINE = "# SkillSpector baseline — findings listed here are suppressed on future scans.\n# Edit 'reason' fields and add glob 'rules' as needed. See docs/SUPPRESSION.md.\nversion: 2\nscanner_version: 2.13.0\nrules: []\nfingerprints:\n- hash: sha256:bbfa1f7b21c9dac94f2006fc901db945eff884ed509a586509582808812d733f\n  rule_id: P1\n  file: SKILL.md\n  reason: Accepted finding (auto-generated baseline)\n";
 
 // The finding key (specs/skillspector-reviewed-acceptances.md) of the HIGH P1 at SKILL.md:36 that
-// BREAK_UI_BASELINE accepts, from the pinned v2.13.0 build. Regenerate when either export above
-// changes: write both to a folder, run `skillspector scan <dir> --no-llm --fail-on-findings
-// --use-shipped-baseline --show-suppressed --format json`, and apply the spec's key formula to
-// the P1 entry of `suppressed`.
-export const BREAK_UI_P1_KEY = 'sha256:91a2fc1b7d5c42c5f57e3e3d2b595ceb376eb6ff17c7d035f388716fbbc591db';
+// BREAK_UI_BASELINE accepts, from the pinned v2.13.0 build. The key formula includes the sha256 of
+// the whole BREAK_UI_SKILL_MD bytes, so any change to that export changes the key. Regenerate when
+// either export above changes: write both to a folder, run `skillspector scan <dir> --no-llm
+// --fail-on-findings --use-shipped-baseline --show-suppressed --format json`, and apply the
+// spec's key formula (rule, severity, file, match_fingerprint, explanation, and the sha256 of
+// <dir>/SKILL.md) to the P1 entry of `suppressed`.
+export const BREAK_UI_P1_KEY = 'sha256:132ffe9bcdedbe262fc9b798542697b09aabf7d9aa0ab60f6f4b2726776d47b9';

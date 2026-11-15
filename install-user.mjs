@@ -455,12 +455,30 @@ const loadReviews = path => {
   return entries;
 };
 
-// The finding key binds rule, severity, file, and matched text, never line numbers, so an edit
-// elsewhere in the file keeps its review entry. The spec carries the Python twin.
-/** @param {ScanFinding} f @returns {string} */
-const findingKey = f => `sha256:${createHash('sha256').update(JSON.stringify([
-  f.id ?? null, f.severity ?? null, f.location?.file ?? null, f.match_fingerprint ?? null, f.explanation ?? null,
-])).digest('hex')}`;
+// The finding key binds rule, severity, file, matched text, and the sha256 of the flagged file's
+// whole bytes. The scanner's match fingerprint and explanation see only the matched phrase, so
+// without the file bytes a review of quoted example text would still cover the same phrase
+// rewritten as a direct instruction. Any change to the flagged file therefore needs a new
+// review; line numbers stay out of the key because the file hash already covers them. The spec
+// carries the Python twin. Returns null when the flagged file cannot be read inside the scanned
+// folder: such a finding has no key, so no entry can cover it.
+/** @param {ScanFinding} f @param {string} dir @returns {string | null} */
+const findingKey = (f, dir) => {
+  const file = f.location?.file;
+  if (typeof file !== 'string' || file === '') return null;
+  const path = resolve(dir, file);
+  const rel = relative(dir, path);
+  if (rel === '' || isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) return null;
+  let content;
+  try {
+    content = createHash('sha256').update(readFileSync(path)).digest('hex');
+  } catch {
+    return null;
+  }
+  return `sha256:${createHash('sha256').update(JSON.stringify([
+    f.id ?? null, f.severity ?? null, file, f.match_fingerprint ?? null, f.explanation ?? null, content,
+  ])).digest('hex')}`;
+};
 
 // Scanner text is untrusted: one rendered field never spans lines or carries control bytes, so
 // a crafted pattern cannot forge a Location line for describeScanReport or the log reader.
@@ -524,11 +542,15 @@ const scanOne = (scanner, dir, total, display, skill, entries) => new Promise((r
       for (const f of parsed.suppressed) {
         if (BASELINE_SEVERITIES.has(/** @type {string} */ (f.severity))) continue;
         capped++;
-        const key = findingKey(f);
-        if (entries.some(e => e.skill === skill && e.rule === f.id && e.file === f.location?.file && e.key === key)) continue;
+        // The scanned copy holds the snapshot's exact bytes (a staged copy too), so the file
+        // hash in the key is the hash of the bytes the scanner judged and the install copies.
+        const key = findingKey(f, dir);
+        if (key !== null && entries.some(e => e.skill === skill && e.rule === f.id && e.file === f.location?.file && e.key === key)) continue;
         unreviewed.push(f);
         const [head, location] = findingLines(f);
-        const entry = JSON.stringify({ skill, rule: f.id ?? null, file: f.location?.file ?? null, key, reason: '<review note>' });
+        const entry = key === null
+          ? `none possible (the flagged file ${oneLine(f.location?.file)} is not readable inside the skill folder)`
+          : JSON.stringify({ skill, rule: f.id ?? null, file: f.location?.file ?? null, key, reason: '<review note>' });
         acceptances.push(`  Unreviewed baseline acceptance: ${head}`, location, `    Review entry: ${entry}`);
       }
       lines.push(`Issues (${parsed.issues.length})`);
