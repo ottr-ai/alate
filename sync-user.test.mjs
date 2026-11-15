@@ -571,8 +571,9 @@ try {
   // the terminator that install puts back: install then refuses the machine file, because the
   // captured snapshot is one terminator short of the machine text minus its blocks.
   copyFileSync(fileURLToPath(new URL('./install-user.mjs', import.meta.url)), join(repo, 'install-user.mjs'));
-  // install-user now scans skill snapshots before installing; an exit-0 stub keeps
-  // this roundtrip hermetic, and it answers --version with the pin because the gate
+  // install-user now scans skill snapshots before installing; a stub that answers every scan
+  // with a clean JSON report (the gate reads `--format json` stdout) keeps this roundtrip
+  // hermetic, and it answers --version with the pin because the gate
   // refuses a scanner that does not identify as the pinned build. Windows cannot exec an
   // extensionless stub through spawnSync: there the run needs a real skillspector on
   // PATH (the gate fails closed without one).
@@ -582,7 +583,7 @@ try {
   // from drifting, and the nonexistent venv path makes the run resolve the PATH stub.
   const pin = readFileSync(join(repo, 'install-user.mjs'), 'utf8').match(/^const SKILLSPECTOR_REF = '([^']+)';$/m)?.[1];
   assert.ok(pin, 'install-user.mjs must pin SKILLSPECTOR_REF');
-  writeFileSync(join(stub, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "SkillSpector ${pin}"; exit 0; fi\nexit 0\n`);
+  writeFileSync(join(stub, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "SkillSpector ${pin}"; exit 0; fi\necho '{"issues":[],"suppressed":[],"suppressed_count":0}'\nexit 0\n`);
   chmodSync(join(stub, 'skillspector'), 0o755);
   const stubEnv = { ...process.env, HOME: childHome, USERPROFILE: childHome, SKILLSPECTOR_VENV: join(tmp, 'no-venv') };
   delete stubEnv.PI_CODING_AGENT_DIR;

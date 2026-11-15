@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "accepted": [
+    {
+      "skill": "user/agents/skills/check-ottr-board",
+      "rule": "TM1",
+      "file": "SKILL.md",
+      "key": "sha256:d91e8b0149affca29206a0d87db1de409d67932003badc7a965c89e8f80e7b71",
+      "reason": "Reviewed 2026-11-15 (ALAT-142): the flagged step 4 rows (DELETE /api/drain) are prose for a manual repair that the user approves first (drain, rebase onto origin/main, push with a token, end the drain); the skill runs no tool with these parameters itself."
+    }
+  ]
+}

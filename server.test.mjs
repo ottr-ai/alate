@@ -266,11 +266,12 @@ const sha1 = ghSha();
 // SkillSpector stub for provision children: with the shipped skills installed on every
 // provision, install-user always probes the scanner. The stub answers --version with the
 // pinned version (read from install-user.mjs so the pair cannot drift) and accepts every
-// scan; SKILLSPECTOR_VENV points nowhere, so resolution lands on this PATH stub.
+// scan with a clean JSON report (the gate reads `--format json` stdout); SKILLSPECTOR_VENV
+// points nowhere, so resolution lands on this PATH stub.
 const SKILLSPECTOR_REF = /^const SKILLSPECTOR_REF = '([^']+)';/m.exec(readFileSync(join(repoRoot, 'install-user.mjs'), 'utf8'))[1];
 const scannerStubDir = join(tmp, 'scanner-stub');
 mkdirSync(scannerStubDir, { recursive: true });
-writeFileSync(join(scannerStubDir, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'SkillSpector v${SKILLSPECTOR_REF.slice(1)}'; exit 0; fi\nexit 0\n`, { mode: 0o755 });
+writeFileSync(join(scannerStubDir, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'SkillSpector v${SKILLSPECTOR_REF.slice(1)}'; exit 0; fi\necho '{"issues":[],"suppressed":[],"suppressed_count":0}'\nexit 0\n`, { mode: 0o755 });
 
 const serverEnv = { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, TMPDIR: serverTmp, TEMP: serverTmp, TMP: serverTmp, PATH: `${scannerStubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-scanner-venv'), ALATE_KEEP_TEMP: '', ALATE_TEST_PROVISION_GATE: provisionGate, ALATE_TEST_SCRIPT_GATE: scriptGate, ALATE_TEST_NO_RESULTS_FILE: join(tmp, 'no-results-gate'), ALATE_TEST_GH_BASE: pathToFileURL(join(tmp, 'gh')).href, GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_GLOBAL: 'nul', GIT_CONFIG_SYSTEM: 'nul' };
 // sync.mjs prefers PI_CODING_AGENT_DIR over HOME: an inherited value would install fixture rules into a real agent dir.

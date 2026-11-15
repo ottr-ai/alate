@@ -52,7 +52,7 @@ const runCli = (c, script, args) =>
   mkdirSync(stub, { recursive: true });
   const pin = text(join(TOOL, 'install-user.mjs')).match(/^const SKILLSPECTOR_REF = '([^']+)';$/m)?.[1];
   assert.ok(pin, `install-user.mjs must pin SKILLSPECTOR_REF`);
-  writeFileSync(join(stub, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "SkillSpector ${pin}"; exit 0; fi\nexit 0\n`);
+  writeFileSync(join(stub, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "SkillSpector ${pin}"; exit 0; fi\necho '{"issues":[],"suppressed":[],"suppressed_count":0}'\nexit 0\n`);
   chmodSync(join(stub, 'skillspector'), 0o755);
 }
 

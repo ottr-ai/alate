@@ -50,7 +50,9 @@ import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.m
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
 /** @typedef {{ item: string, status: 'installed' | 'unchanged' | 'added' | 'updated' | 'rejected' | 'no-origin', rule: string | null, at: string | null, report?: string }} ProvisionItem */
-/** @typedef {{ rule?: string, report: string }} ScanRejection */
+/** @typedef {{ rule?: string, at?: string, report: string }} ScanRejection */
+/** @typedef {{ skill: string, rule: string, file: string, key: string, reason: string }} ReviewEntry */
+/** @typedef {{ id?: unknown, severity?: unknown, pattern?: unknown, category?: unknown, explanation?: unknown, match_fingerprint?: unknown, location?: { file?: unknown, start_line?: unknown } | null }} ScanFinding */
 /** @typedef {{ name: string, url: string, sha256: string, unpack: string, bin?: string }} WorkerTool */
 /** @typedef {['unchanged', string, null, string, string | null] | ['installed', string, Buffer, string, string | null]} PlanEntry */
 
@@ -92,6 +94,8 @@ const layerHome = layerMode ? resolveHome(home) : home;
 const trustHome = resolveHome(home);
 const data = resolveDataDir(args, { allowClone: true });
 const userRoot = join(data.dir, 'user');
+// The alate checkout itself: the vendored shipped skills and their review file live under it.
+const toolRoot = dirname(fileURLToPath(import.meta.url));
 // Lifecycle scripts are off unless the data repo opts in: a `plugins-allow-scripts` marker
 // file at the data repo root (never under user/, so it never installs into the home) turns
 // bun's --ignore-scripts off. The install environment is an allowlist either way, so the
@@ -111,8 +115,10 @@ const pluginInstallFile = rel =>
 // anything lands in the home (or, in layer mode, before the layer goes live): findings and
 // scan errors reject that one skill (left out, reported), while a missing scanner or a scanner
 // that cannot run refuse the whole restore before the first write. The scan applies the snapshot's own shipped
-// `.skillspector-baseline.yaml` — its accepted findings are review records committed to the data
-// repo, the same file the data repo's pre-push gate accepts. The upstream build is
+// `.skillspector-baseline.yaml`, but that file ships with the skill, so the gate caps it
+// (specs/skillspector-reviewed-acceptances.md): it may accept LOW and MEDIUM findings, and any
+// other accepted finding needs a review entry from a skillspector-reviews.json outside every
+// skill folder (the data repo root, alate's shipped/). The upstream build is
 // pinned to a tag on purpose:
 // never point this at a moving ref. It needs Python 3.12+ where install-user runs:
 //   pip install "skillspector @ git+https://github.com/NVIDIA/SkillSpector@v2.13.0"
@@ -250,25 +256,30 @@ const collectSkillDirs = (dir, aliases = []) => {
 };
 
 // Fail-closed gate: every skill snapshot is scanned before anything lands on disk (or, in
-// layer mode, before the layer goes live). Each scan's report is buffered and printed as one
-// block, so parallel scans never interleave lines. Exit 1 (findings) rejects that one skill:
-// it is left out of the install and reported. Any other scan failure of one skill folder
-// (another non-zero exit, a signal kill — for example an unparseable baseline file) rejects
-// that skill too, with rule `scan error` and the scanner output as the report. A spawn error
-// means the scanner cannot run at all, which cannot produce verdicts, so the whole run refuses.
-// A skill whose own bytes cannot be hashed is rejected as unreadable rather than scanned. A scan costs ~15 s per
+// layer mode, before the layer goes live). The scanner writes a JSON report to stdout, which
+// the gate judges and prints as one text block, so parallel scans never interleave lines and
+// a log never holds raw JSON. A judged report (exit 0 or 1, a JSON object with issues and
+// suppressed lists) rejects that one skill when it holds an issue, or when the shipped
+// baseline suppressed a finding above MEDIUM that no review entry covers (rule `unreviewed
+// baseline acceptance`): the skill is left out of the install and reported. Any other scan
+// result of one skill folder (another exit, a signal kill, stdout that is not such a report)
+// rejects that skill too, with rule `scan error` and the scanner output as the report. A spawn
+// error means the scanner cannot run at all, which cannot produce verdicts, so the whole run
+// refuses. A skill whose own bytes cannot be hashed is rejected as unreadable rather than
+// scanned. A scan costs ~15 s per
 // skill, which made a 57-skill deploy seed wait ~14 minutes even when one file changed, so
 // the gate re-scans only what changed: it hashes the exact bytes of each skill folder itself
 // (never a hash the data repo ships — .skill-lock.json is data, not proof), one framed digest
 // per entry (rel\0size\0sha256 of the bytes; a symlink contributes its resolved target bytes,
 // the bytes the install copies), and keys a verdict on a format token, that hash, the
-// scanner build (pin and probed version) and the scan arguments; it runs
+// scanner build (pin and probed version), the full scan arguments, and the sorted keys of the
+// review entries for that skill item (a changed entry rescans only its skill); it runs
 // the remaining scans concurrently, at most min(8, availableParallelism()) at a time. Only
 // passes are recorded, in the target home's .alate/skillspector-pass.json (temp file, then
 // atomic rename): a rejection is never cached, and a changed skill, a changed scanner, or an
 // unreadable cache file always means a full rescan. A lost update between two installs that
 // share a home only costs a rescan.
-const SCAN_ARGS = ['--no-llm', '--fail-on-findings', '--use-shipped-baseline'];
+const SCAN_ARGS = ['--no-llm', '--fail-on-findings', '--use-shipped-baseline', '--show-suppressed', '--format', 'json'];
 const scanCachePath = join(home, '.alate', 'skillspector-pass.json');
 
 // The key must bind the bytes the install copies, so each file entry is framed as
@@ -277,7 +288,7 @@ const scanCachePath = join(home, '.alate', 'skillspector-pass.json');
 // resolved target bytes (readFileSync follows the link) — the exact bytes the install walk
 // copies — never the link text. The format token prefixed to every key makes entries an
 // older alate wrote miss once and rescan instead of surviving a framing change.
-const SCAN_CACHE_FORMAT = 'skill-pass-fmt-2';
+const SCAN_CACHE_FORMAT = 'skill-pass-fmt-3';
 /** @param {string} dir @returns {string} */
 const hashSkillDir = dir => {
   const hash = createHash('sha256');
@@ -375,15 +386,122 @@ const stageScanCopy = (dir, root, index) => {
   return dest;
 };
 
-// The pinned build's verdict for these exact bytes, printed as one block so a tail of the
-// output always shows a whole report. Exit 0 resolves clean, exit 1 resolves with the findings
-// report (a per-skill rejection); any other exit or a signal kill resolves as a scan error —
-// also a per-skill rejection, carrying the failure line and the scanner output. Only a spawn
-// error rejects: the scanner cannot run at all, which the caller turns into a whole-run refusal.
-// `display` names the folder in every message: a staged scan copy reports under the snapshot
-// folder's name, so a deploy log's tail still names the skill.
-/** @param {string} scanner @param {string} dir @param {number} total @param {string} [display] @returns {Promise<{ report: string | null, scanError?: string }>} */
-const scanOne = (scanner, dir, total, display = dir) => new Promise((resolve, reject) => {
+// Severity cap on shipped baselines (specs/skillspector-reviewed-acceptances.md): the
+// baseline --use-shipped-baseline applies sits inside the scanned folder, from the skill's own
+// author, and the scanner caps nothing — one glob rule hides every finding. So a suppressed
+// finding passes on the baseline alone only at LOW or MEDIUM; any other severity (HIGH,
+// CRITICAL, or one the gate does not know) needs a review entry from a file no skill folder
+// holds: the data repo root's skillspector-reviews.json (sync-user never captures it, the
+// install never copies it) or alate's own shipped/skillspector-reviews.json for the vendored
+// shipped skills. The gate uses the union of both.
+const REVIEW_FILE = 'skillspector-reviews.json';
+const REVIEW_FIELDS = ['skill', 'rule', 'file', 'key', 'reason'];
+const REVIEW_KEY_RE = /^sha256:[0-9a-f]{64}$/;
+const BASELINE_SEVERITIES = new Set(['LOW', 'MEDIUM']);
+
+// A missing review file holds no entries. Any other read error, or the first broken format
+// rule, throws with the file path first; the caller loads both files before any write, so a
+// broken file refuses the whole run.
+/** @param {string} path @returns {ReviewEntry[]} */
+const loadReviews = path => {
+  /** @param {string} rule @returns {Error} */
+  const broken = rule => new Error(`${path}: ${rule}`);
+  /** @type {Buffer} */
+  let raw;
+  try {
+    raw = readFileSync(path);
+  } catch (err) {
+    const e = /** @type {NodeJS.ErrnoException} */ (err);
+    if (e.code === 'ENOENT') return [];
+    throw broken(`unreadable (${e.code ?? e.message})`);
+  }
+  /** @type {unknown} */
+  let doc;
+  try {
+    doc = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
+  } catch (err) {
+    throw broken(`not UTF-8 JSON (${/** @type {Error} */ (err).message})`);
+  }
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) throw broken('the top level must be a JSON object');
+  const top = /** @type {Record<string, unknown>} */ (doc);
+  if (top.version !== 1) throw broken('version must be 1');
+  if (!Array.isArray(top.accepted)) throw broken('accepted must be an array');
+  const extra = Object.keys(top).find(k => k !== 'version' && k !== 'accepted');
+  if (extra !== undefined) throw broken(`unknown top-level key ${JSON.stringify(extra)}`);
+  /** @type {ReviewEntry[]} */
+  const entries = [];
+  const pairs = new Set();
+  for (const [i, value] of /** @type {unknown[]} */ (top.accepted).entries()) {
+    const at = `accepted[${i}]`;
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw broken(`${at} must be an object`);
+    const fields = /** @type {Record<string, unknown>} */ (value);
+    const keys = Object.keys(fields);
+    if (keys.length !== REVIEW_FIELDS.length || !REVIEW_FIELDS.every(k => keys.includes(k))) throw broken(`${at} must have exactly the keys ${REVIEW_FIELDS.join(', ')}`);
+    const nonString = REVIEW_FIELDS.find(k => typeof fields[k] !== 'string');
+    if (nonString !== undefined) throw broken(`${at}.${nonString} must be a string`);
+    const { skill, rule, file, key, reason } = /** @type {ReviewEntry} */ (/** @type {unknown} */ (fields));
+    if (!skill.startsWith('user/') || skill.includes('\\') || skill.split('/').some(s => s === '' || s === '.' || s === '..')) {
+      throw broken(`${at}.skill must start with user/ and have no empty, ".", or ".." segment and no backslash (got ${JSON.stringify(skill)})`);
+    }
+    if (rule === '') throw broken(`${at}.rule must not be empty`);
+    if (file === '') throw broken(`${at}.file must not be empty`);
+    if (!REVIEW_KEY_RE.test(key)) throw broken(`${at}.key must match ${REVIEW_KEY_RE.source} (got ${JSON.stringify(key)})`);
+    if (reason.trim() === '') throw broken(`${at}.reason must not be empty`);
+    const pair = JSON.stringify([skill, key]);
+    if (pairs.has(pair)) throw broken(`${at} repeats the skill ${JSON.stringify(skill)} and key ${key} of an earlier entry`);
+    pairs.add(pair);
+    entries.push({ skill, rule, file, key, reason });
+  }
+  return entries;
+};
+
+// The finding key binds rule, severity, file, and matched text, never line numbers, so an edit
+// elsewhere in the file keeps its review entry. The spec carries the Python twin.
+/** @param {ScanFinding} f @returns {string} */
+const findingKey = f => `sha256:${createHash('sha256').update(JSON.stringify([
+  f.id ?? null, f.severity ?? null, f.location?.file ?? null, f.match_fingerprint ?? null, f.explanation ?? null,
+])).digest('hex')}`;
+
+// Scanner text is untrusted: one rendered field never spans lines or carries control bytes, so
+// a crafted pattern cannot forge a Location line for describeScanReport or the log reader.
+/** @param {unknown} value @returns {string} */
+const oneLine = value => String(value ?? '?').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ');
+/** @param {ScanFinding} f @returns {string} */
+const findingAt = f => `${oneLine(f.location?.file)}:${oneLine(f.location?.start_line)}`;
+// The scanner's terminal shape: `HIGH: SC2 - <pattern>` (indented by the caller) and
+// `    Location: <file>:<line>`, the two lines describeScanReport parses.
+/** @param {ScanFinding} f @returns {[string, string]} */
+const findingLines = f => [`${oneLine(f.severity)}: ${oneLine(f.id)} - ${oneLine(f.pattern ?? f.category)}`, `    Location: ${findingAt(f)}`];
+
+// A judged report is a JSON object whose issues and suppressed lists hold objects, with a
+// suppressed_count that agrees; anything else proves nothing and is a scan error.
+/** @param {string} stdout @returns {{ issues: ScanFinding[], suppressed: ScanFinding[] } | null} */
+const parseScanReport = stdout => {
+  /** @type {unknown} */
+  let doc;
+  try { doc = JSON.parse(stdout); } catch { return null; }
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return null;
+  const { issues, suppressed, suppressed_count: count } = /** @type {Record<string, unknown>} */ (doc);
+  if (!Array.isArray(issues) || !Array.isArray(suppressed) || count !== suppressed.length) return null;
+  /** @param {unknown} f @returns {boolean} */
+  const isFinding = f => f !== null && typeof f === 'object' && !Array.isArray(f);
+  if (!issues.every(isFinding) || !suppressed.every(isFinding)) return null;
+  return { issues, suppressed };
+};
+
+// The pinned build's verdict for these exact bytes, printed as one text block so a tail of the
+// output always shows a whole report. A judged report (exit 0 or 1) resolves with its issues and
+// the suppressed findings above MEDIUM that no entry for `skill` covers; any other result
+// resolves as a scan error — a per-skill rejection carrying the failure line and the scanner
+// output. Only a spawn error rejects: the scanner cannot run at all, which the caller turns into
+// a whole-run refusal. `display` names the folder in every message: a staged scan copy reports
+// under the snapshot folder's name, so a deploy log's tail still names the skill.
+/**
+ * @param {string} scanner @param {string} dir @param {number} total @param {string} display
+ * @param {string} skill @param {ReviewEntry[]} entries
+ * @returns {Promise<{ issues: ScanFinding[], unreviewed: ScanFinding[], report: string } | { scanError: string, report: string }>}
+ */
+const scanOne = (scanner, dir, total, display, skill, entries) => new Promise((resolve, reject) => {
   const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: scannerEnv() });
   /** @type {Buffer[]} */
   const out = [];
@@ -393,16 +511,52 @@ const scanOne = (scanner, dir, total, display = dir) => new Promise((resolve, re
   child.stderr.on('data', chunk => errOut.push(chunk));
   child.on('error', /** @param {NodeJS.ErrnoException} err */ err => reject(new Error(`skillspector could not run (${err.code ?? err.message}); refusing to install ${total} skill snapshot(s).`)));
   child.on('close', (code, signal) => {
-    const report = `${Buffer.concat(out).toString('utf8')}${Buffer.concat(errOut).toString('utf8')}`.trimEnd();
+    const stdout = Buffer.concat(out).toString('utf8');
+    const parsed = parseScanReport(stdout);
+    /** @type {string[]} */
+    const lines = [];
+    /** @type {ScanFinding[]} */
+    const unreviewed = [];
+    if (parsed) {
+      /** @type {string[]} */
+      const acceptances = [];
+      let capped = 0;
+      for (const f of parsed.suppressed) {
+        if (BASELINE_SEVERITIES.has(/** @type {string} */ (f.severity))) continue;
+        capped++;
+        const key = findingKey(f);
+        if (entries.some(e => e.skill === skill && e.rule === f.id && e.file === f.location?.file && e.key === key)) continue;
+        unreviewed.push(f);
+        const [head, location] = findingLines(f);
+        const entry = JSON.stringify({ skill, rule: f.id ?? null, file: f.location?.file ?? null, key, reason: '<review note>' });
+        acceptances.push(`  Unreviewed baseline acceptance: ${head}`, location, `    Review entry: ${entry}`);
+      }
+      lines.push(`Issues (${parsed.issues.length})`);
+      for (const f of parsed.issues) {
+        const [head, location] = findingLines(f);
+        lines.push(`  ${head}`, location);
+      }
+      lines.push(`Suppressed by the shipped baseline (${parsed.suppressed.length}): ${parsed.suppressed.length - capped} LOW/MEDIUM, ${capped - unreviewed.length} reviewed, ${unreviewed.length} unreviewed`, ...acceptances);
+    } else if (stdout.trim()) lines.push(stdout.trimEnd());
+    const stderr = Buffer.concat(errOut).toString('utf8').trimEnd();
+    if (stderr) lines.push(stderr);
+    const report = lines.join('\n');
     console.log(`--- SkillSpector report: ${display}${report ? `\n${report}` : ''}`);
-    if (code === 0) resolve({ report: null });
-    else if (code === 1) resolve({ report });
-    else resolve({ report, scanError: `SkillSpector scan of ${display} failed (exit ${code ?? `signal ${signal}`}).` });
+    if (parsed && (code === 0 || code === 1)) resolve({ issues: parsed.issues, unreviewed, report });
+    else {
+      const why = code === 0 || code === 1 ? `exit ${code}, stdout is not a SkillSpector JSON report` : `exit ${code ?? `signal ${signal}`}`;
+      resolve({ report, scanError: `SkillSpector scan of ${display} failed (${why}).` });
+    }
   });
 });
 
-/** @param {string[]} skillDirs @returns {Promise<{ rejected: Map<string, ScanRejection> }>} */
-const runScan = async skillDirs => {
+/**
+ * @param {string[]} skillDirs
+ * @param {(dir: string) => string} keyOf the skill item key of a dir, as the provision results spell it
+ * @param {Map<string, ReviewEntry[]>} reviews review entries by skill item key
+ * @returns {Promise<{ rejected: Map<string, ScanRejection> }>}
+ */
+const runScan = async (skillDirs, keyOf, reviews) => {
   // Trust first, probe second (specs/skillspector-scanner-trust.md): no candidate runs
   // before its trust check. SKILLSPECTOR_BIN wins when set and is hard-validated — absolute
   // and outside the target home — with no fallback. Then the pinned venv (same layout and
@@ -480,20 +634,26 @@ const runScan = async skillDirs => {
   /** @type {Map<string, string>} */
   const keys = new Map();
   for (const dir of skillDirs) {
+    // A pass depends on the review entries too: every matched field (rule, file, key) of this
+    // skill item's entries joins the cache key, sorted, so a new, removed, or edited entry
+    // rescans only its own skill. The reason is a note and never changes a verdict.
+    const entryIds = (reviews.get(keyOf(dir)) ?? []).map(e => JSON.stringify([e.rule, e.file, e.key])).sort();
+    const reviewDigest = createHash('sha256').update(JSON.stringify(entryIds)).digest('hex');
     try {
-      keys.set(dir, `${SCAN_CACHE_FORMAT} ${hashSkillDir(dir)} ${SKILLSPECTOR_REF} ${reported} scan ${SCAN_ARGS.join(' ')}`);
+      keys.set(dir, `${SCAN_CACHE_FORMAT} ${hashSkillDir(dir)} ${SKILLSPECTOR_REF} ${reported} scan ${SCAN_ARGS.join(' ')} reviews ${reviewDigest}`);
     } catch (err) {
       rejected.set(dir, { rule: 'unreadable skill files', report: `${dir}: ${/** @type {Error} */ (err).message}` });
     }
   }
   const scanList = skillDirs.filter(dir => keys.has(dir));
   const pending = scanList.filter(dir => passes[/** @type {string} */ (keys.get(dir))] !== true);
-  console.log(`Scanning ${pending.length} of ${scanList.length} skill snapshot(s) (${scanList.length - pending.length} cached) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied)...`);
+  console.log(`Scanning ${pending.length} of ${scanList.length} skill snapshot(s) (${scanList.length - pending.length} cached) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied up to MEDIUM, above it only with a review entry)...`);
   if (!pending.length) return { rejected };
-  // Findings (exit 1) reject their own skill only; so does any other scan failure (another
-  // non-zero exit, a signal kill): the skill is left out with rule `scan error` and the scan
-  // continues. Only a spawn error — the scanner cannot run at all, so no verdict is possible —
-  // stops scheduling, lets the in-flight scans finish, and refuses the whole run.
+  // Findings and unreviewed baseline acceptances reject their own skill only; so does any other
+  // scan failure (another exit, a signal kill, a report that does not parse): the skill is left
+  // out with rule `scan error` and the scan continues. Only a spawn error — the scanner cannot
+  // run at all, so no verdict is possible — stops scheduling, lets the in-flight scans finish,
+  // and refuses the whole run.
   let fatal = /** @type {Error | null} */ (null);
   let next = 0;
   // Staged scan copies for folders whose shipped baseline carries exec bits (the Windows
@@ -523,18 +683,23 @@ const runScan = async skillDirs => {
           continue;
         }
         try {
-          const res = await scanOne(/** @type {string} */ (scanner), scanTarget, skillDirs.length, dir);
-          if (res.report === null) {
-            passes[/** @type {string} */ (keys.get(dir))] = true;
-            recordPass(passes);
-          } else if (res.scanError !== undefined) {
+          // The verdict and the entries belong to the snapshot dir, never to a staged copy.
+          const skill = keyOf(dir);
+          const res = await scanOne(/** @type {string} */ (scanner), scanTarget, skillDirs.length, dir, skill, reviews.get(skill) ?? []);
+          if ('scanError' in res) {
             rejected.set(dir, { rule: 'scan error', report: `${res.scanError}${res.report ? `\n${res.report}` : ''}` });
             // Stdout too: the deploy log's tail must name the rejected skill folder.
             console.log(`${res.scanError} The skill is left out of this install.`);
-          } else {
-            rejected.set(dir, { report: res.report });
+          } else if (res.issues.length) {
+            rejected.set(dir, { rule: oneLine(res.issues[0].id), at: findingAt(res.issues[0]), report: res.report });
             // Stdout too: the deploy log's tail must name the rejected skill folder.
-            console.log(`SkillSpector rejected ${dir} (exit 1); the skill is left out of this install.`);
+            console.log(`SkillSpector rejected ${dir} (${res.issues.length} finding(s)); the skill is left out of this install.`);
+          } else if (res.unreviewed.length) {
+            rejected.set(dir, { rule: 'unreviewed baseline acceptance', at: findingAt(res.unreviewed[0]), report: res.report });
+            console.log(`SkillSpector rejected ${dir}: its shipped baseline accepts ${res.unreviewed.length} finding(s) above MEDIUM that no review entry covers; the skill is left out of this install.`);
+          } else {
+            passes[/** @type {string} */ (keys.get(dir))] = true;
+            recordPass(passes);
           }
         } catch (err) {
           fatal = /** @type {Error} */ (err);
@@ -636,12 +801,12 @@ const capReport = report => report.length > 4000 ? `${report.slice(0, 4000)}…`
 /** @param {string} item @param {ProvisionItem['status']} status @param {string | null} [rule] @param {string | null} [at] @param {string | null} [report] */
 const failItem = (item, status, rule, at, report) =>
   items.push({ item, status, rule: rule ?? null, at: at ?? null, ...(report == null ? {} : { report: capReport(report) }) });
-// A scan rejection carries the first SkillSpector finding as rule and position; a scan-error
-// rejection carries rule `scan error`; the hash-error rejection carries its own rule. `key` is
-// the item key of the skill dir.
+// A scan rejection carries the first SkillSpector finding (or the first unreviewed baseline
+// acceptance) as rule and position; a scan-error rejection carries rule `scan error`; the
+// hash-error rejection carries its own rule. `key` is the item key of the skill dir.
 /** @param {string} key @param {ScanRejection} info @returns {void} */
 const addScanRejection = (key, info) => {
-  if (info.rule !== undefined) failItem(key, 'rejected', info.rule, null, info.report);
+  if (info.rule !== undefined) failItem(key, 'rejected', info.rule, info.at ?? null, info.report);
   else {
     const d = describeScanReport(info.report);
     failItem(key, 'rejected', d.rule, d.at, info.report);
@@ -670,6 +835,16 @@ try {
   // case-insensitive file system maps user/Alate onto the same dir.
   const reserved = readdirSync(userRoot).find(name => name.toLowerCase() === 'alate');
   if (reserved !== undefined) throw new Error(`refusing: user/${reserved} would install into ~/.alate, alate's own state dir; remove it from the snapshot`);
+  // The review entries for baseline acceptances above MEDIUM (specs/skillspector-reviewed-
+  // acceptances.md) load before any write or layer creation, in both modes: an invalid file
+  // refuses the whole run, naming the file, and a missing one holds no entries.
+  /** @type {Map<string, ReviewEntry[]>} */
+  const reviews = new Map();
+  for (const entry of [...loadReviews(join(data.dir, REVIEW_FILE)), ...loadReviews(join(toolRoot, 'shipped', REVIEW_FILE))]) {
+    const list = reviews.get(entry.skill);
+    if (list) list.push(entry);
+    else reviews.set(entry.skill, [entry]);
+  }
   // Check source bytes on every install, before target reads, scanner calls, or layer creation.
   /** @type {string[]} */
   const rootAliases = [];
@@ -1125,7 +1300,6 @@ try {
   // rejection fails that one skill per item and never stops the others. The vendored bytes
   // are upstream content, never captured machine config, so no forTarget and no
   // remapHomePaths apply.
-  const toolRoot = dirname(fileURLToPath(import.meta.url));
   // Presence-based, but only for a copy the gates so far accept: a rejected snapshot skill
   // (no origin, structure) installs nothing and its rels leave the plan, the manifest, and
   // the conflicts, so counting it would suppress the shipped skill here and then let the
@@ -1249,9 +1423,11 @@ try {
   // instead: the shipped skills ride in the layer, and the existing post-write cleanup
   // removes a rejected one.
   if (!layerMode && (skillDirs.length || shippedScanDirs.length)) {
-    const scan = await runScan([...skillDirs.filter(dir => !rejectedSkills.has(dir)), ...shippedScanDirs]);
+    /** @param {string} dir @returns {string} */
+    const itemKey = dir => shippedDirKey.get(dir) ?? skillKey(userRoot, dir);
+    const scan = await runScan([...skillDirs.filter(dir => !rejectedSkills.has(dir)), ...shippedScanDirs], itemKey, reviews);
     for (const [dir, info] of scan.rejected) {
-      addScanRejection(shippedDirKey.get(dir) ?? skillKey(userRoot, dir), info);
+      addScanRejection(itemKey(dir), info);
       rejectedSkills.add(dir);
     }
     // Drop every rel inside a rejected skill from the plan, the manifest, and the conflicts.
@@ -1409,7 +1585,9 @@ try {
       assertLayer();
       const layerSkillDirs = collectSkillDirs(/** @type {string} */ (newLayerDir));
       if (layerSkillDirs.length) {
-        const scan = await runScan(layerSkillDirs);
+        /** @param {string} dir @returns {string} */
+        const itemKey = dir => skillKey(/** @type {string} */ (newLayerDir), dir);
+        const scan = await runScan(layerSkillDirs, itemKey, reviews);
         for (const [dir, info] of scan.rejected) {
           // The manifest must never name a file the layer lacks: the rejected skill dir is
           // removed from the fresh layer, and its rels from the record, before the switch.
@@ -1417,7 +1595,7 @@ try {
           assertLayer();
           makeDirInside(layerHome, dir);
           rmSync(dir, { recursive: true, force: true });
-          addScanRejection(skillKey(/** @type {string} */ (newLayerDir), dir), info);
+          addScanRejection(itemKey(dir), info);
           // The layer mirrors the home in dot-dirs (.omp); the record keys use the snapshot
           // spelling (omp), so the leading dot drops out of the top-level segment.
           const layerRel = relative(/** @type {string} */ (newLayerDir), dir).split(sep).join('/');
