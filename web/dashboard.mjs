@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { assertSourceInside, checkDestination, cloneCommand, dataHost, descriptionText, gitAuthEnv, githubHost, parseDataSpec, redactSecrets, SNAP_AGENTS_DIR } from '../lib/data.mjs';
+import { assertSourceInside, checkDestination, cloneCommand, dataHost, descriptionText, gitAuthEnv, githubHost, parseDataSpec, redactSecrets, serverGitEnv, SNAP_AGENTS_DIR } from '../lib/data.mjs';
 
 /** @typedef {import('node:sqlite').DatabaseSync} DashDb */
 /** @typedef {import('../lib/data.mjs').DataSpec} DataSpec */
@@ -404,7 +404,7 @@ function cloneRepo(spec, parsed, token) {
   const url = remoteUrl(parsed.name, host);
   const active = token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
   const dir = mkdtempSync(join(tmpdir(), 'alate-dashboard-'));
-  const { args: gitArgs, env } = cloneCommand(url, parsed.ref, active, dir);
+  const { args: gitArgs, env } = cloneCommand(url, parsed.ref, active, dir, repoGitBase());
   const git = spawnSync('git', gitArgs, { env, stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });
   if (git.status !== 0) {
     rmSync(dir, { recursive: true, force: true }); // our own fresh temp dir only
@@ -412,7 +412,7 @@ function cloneRepo(spec, parsed, token) {
     throw Object.assign(new Error(`git clone failed for ${parsed.name}${parsed.ref ? `@${parsed.ref}` : ''}${stderr ? `: ${stderr}` : ''}`), { status: 400 });
   }
   // HEAD sha at clone time: the baseline the periodic remote check compares against.
-  const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+  const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { env: serverGitEnv(), stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
   if (head.status !== 0) {
     rmSync(dir, { recursive: true, force: true });
     throw new Error(`cannot read cloned HEAD for ${parsed.name}`);
@@ -570,10 +570,14 @@ function applyToTree(dir, rel, base, bytes) {
 }
 
 // git in dir; env carries auth through per-process config, never argv or URL.
-/** @param {string} dir @param {string[]} args @param {NodeJS.ProcessEnv} [env=process.env] */
-function runGit(dir, args, env = process.env) {
+/** @param {string} dir @param {string[]} args @param {NodeJS.ProcessEnv} [env] */
+function runGit(dir, args, env = serverGitEnv()) {
   return spawnSync('git', ['-C', dir, ...args], { env, encoding: 'utf8' });
 }
+
+// Repo-source git (alate's own temp clone, ls-remote, push with the token): the isolated
+// server env over https or a local path only (local paths serve the test fixtures).
+const repoGitBase = () => ({ ...serverGitEnv(), GIT_ALLOW_PROTOCOL: 'https:file' });
 
 // True when dir sits inside a git work tree — the gate editPathSource uses before it
 // commits, and the `git` flag GET /health reports for a path source (specs/source-write-flags.md).
@@ -635,7 +639,7 @@ function editRepoSource(state, db, src, op, token) {
   const resolved = cloneRepo(src.spec, { name: src.name, ref: src.ref, host: src.host }, token);
   try {
     applyToTree(resolved.dir, op.rel, op.base, op.bytes);
-    const env = gitAuthEnv(remoteUrl(src.name, src.host), token);
+    const env = gitAuthEnv(remoteUrl(src.name, src.host), token, repoGitBase());
     const commit = commitEdit(resolved.dir, op.rel, op.message, env, token);
     const branch = src.ref || runGit(resolved.dir, ['rev-parse', '--abbrev-ref', 'HEAD'], env).stdout.trim();
     const push = runGit(resolved.dir, ['push', 'origin', `HEAD:${branch}`], env);
@@ -649,8 +653,10 @@ function editRepoSource(state, db, src, op, token) {
 }
 
 // Path source: verify against disk, write, then commit and push in the user's own work tree
-// (its hooks and credential helpers run untouched, never --no-verify). The disk stays the
-// truth: a failed commit or push still re-imports the snapshot before the error is rethrown.
+// (its own hooks and repo config run untouched, never --no-verify). Global and system git
+// config stay off (serverGitEnv), so a global credential helper or identity does not apply.
+// The disk stays the truth: a failed commit or push still re-imports the snapshot before
+// the error is rethrown.
 /**
  * @param {StateDef} state
  * @param {DashDb} db
@@ -668,7 +674,7 @@ function editPathSource(state, db, src, op, token) {
   let failure = null;
   if (isGitWorkTree(dir)) {
     try {
-      commit = commitEdit(dir, op.rel, op.message, process.env, token);
+      commit = commitEdit(dir, op.rel, op.message, serverGitEnv(), token);
       if (runGit(dir, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']).status !== 0) {
         warning = 'no upstream configured; the commit stayed local';
       } else {
@@ -727,7 +733,7 @@ function applyFileEdit(state, db, edit, token) {
 function remoteHead(name, ref, token, host = '') {
   const url = remoteUrl(name, host);
   const git = spawnSync('git', ['ls-remote', url, ref || 'HEAD'], {
-    env: gitAuthEnv(url, token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN),
+    env: gitAuthEnv(url, token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN, repoGitBase()),
     stdio: ['ignore', 'pipe', 'ignore'],
     encoding: 'utf8',
   });

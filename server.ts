@@ -10,7 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { AddressInfo } from 'node:net'
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
-import { DEFAULT_GITHUB_HOST, keepTemp, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
+import { childEnv, DEFAULT_GITHUB_HOST, keepTemp, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
 import { runCleanup, runEdit, runImport, runSnapshot } from './lib/server-worker.mjs'
 import { isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead } from './web/dashboard.mjs'
 import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
@@ -25,21 +25,6 @@ const repoRoot = import.meta.dirname
 const CONFIG_FILE = flagValue('--config') ?? join(repoRoot, 'server-config.json')
 const CAP = 200000
 const SCRIPTS = ['sync.mjs', 'install-user.mjs', 'install-projects.mjs']
-// Allowlisted child environment: keeps ALATE_API_KEY and every other secret inside the server
-// process. Children and their children never see it. NODE_USE_ENV_PROXY crosses so provision
-// children inherit the flag and their fetches honor the proxy too.
-const CHILD_ENV_KEYS = ['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'SystemDrive', 'ComSpec', 'PATHEXT', 'PI_CODING_AGENT_DIR', 'ALATE_LAYER', 'ALATE_DATA', 'ALATE_KEEP_TEMP', 'SKILLSPECTOR_BIN', 'SKILLSPECTOR_VENV', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'NODE_USE_ENV_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
-function childEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {}
-  for (const key of CHILD_ENV_KEYS) {
-    const value = process.env[key]
-    if (value !== undefined) env[key] = value
-  }
-  for (const key of Object.keys(process.env)) {
-    if (key.startsWith('ALATE_TEST_')) env[key] = process.env[key]
-  }
-  return env
-}
 const KNOWN_ROUTES = ['/health', '/config', '/provision', '/api/updates', '/api/updates/check', '/api/files', '/api/file']
 const testChildEnvCapture = process.env.ALATE_TEST_CHILD_ENV
 // Test hook: a server that ignores SIGTERM exercises the test suite's teardown escalation;

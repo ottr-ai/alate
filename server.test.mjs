@@ -1203,9 +1203,10 @@ try {
     mkdirSync(home2, { recursive: true });
     mkdirSync(tmp2, { recursive: true });
     // git URL rewrite: the spec's explicit host resolves to the local fixture repo, so
-    // remoteHead exercises the host argument hermetically.
+    // remoteHead exercises the host argument hermetically. Server git ignores
+    // GIT_CONFIG_GLOBAL and the home config; the test seam is its only global config.
     writeFileSync(join(tmp, 'srv2-gitconfig'), `[url "${pathToFileURL(join(tmp, 'gh')).href}/"]\n\tinsteadOf = https://myhost.ghe.com/\n`);
-    const env2 = { ...serverEnv, HOME: home2, USERPROFILE: home2, TMPDIR: tmp2, TEMP: tmp2, TMP: tmp2, ALATE_TEST_PROVISION_GATE: join(tmp2, 'provision-gate'), ALATE_TEST_SCRIPT_GATE: join(tmp2, 'script-gate'), ALATE_TEST_NO_RESULTS_FILE: join(tmp2, 'no-results-gate'), GIT_CONFIG_GLOBAL: join(tmp, 'srv2-gitconfig') };
+    const env2 = { ...serverEnv, HOME: home2, USERPROFILE: home2, TMPDIR: tmp2, TEMP: tmp2, TMP: tmp2, ALATE_TEST_PROVISION_GATE: join(tmp2, 'provision-gate'), ALATE_TEST_SCRIPT_GATE: join(tmp2, 'script-gate'), ALATE_TEST_NO_RESULTS_FILE: join(tmp2, 'no-results-gate'), ALATE_TEST_GIT_CONFIG_GLOBAL: join(tmp, 'srv2-gitconfig') };
     delete env2.ALATE_TEST_GH_BASE;
     const bootSrv2 = async interval => {
       // A fresh config every boot: the server then prints a new API key line, and the
@@ -5718,11 +5719,12 @@ try {
 
     // -- remoteUrl/cloneRepo survivors: local-path wins, host lands in the URL, and every
     // clone-failure literal. A fresh import with no ALATE_TEST_GH_BASE makes the https://
-    // branch live; insteadOf rewrites in a per-call git config keep every URL hermetic: the
-    // expected host maps onto the fixture remote, and a broken spelling fails at once.
+    // branch live; insteadOf rewrites in a per-call git config (the ALATE_TEST_GIT_CONFIG_GLOBAL
+    // seam) keep every URL hermetic: the expected host maps onto the fixture remote, and a
+    // broken spelling fails at once.
     const savedBase11 = process.env.ALATE_TEST_GH_BASE;
     const savedHost11 = process.env.ALATE_GITHUB_HOST;
-    const savedCfg11 = process.env.GIT_CONFIG_GLOBAL;
+    const savedCfg11 = process.env.ALATE_TEST_GIT_CONFIG_GLOBAL;
     try {
       delete process.env.ALATE_TEST_GH_BASE;
       delete process.env.ALATE_GITHUB_HOST;
@@ -5743,32 +5745,32 @@ try {
 
       // remoteHead on an existing local path: the path wins as the URL and a missing ref
       // argument falls back to HEAD.
-      process.env.GIT_CONFIG_GLOBAL = cfgNone11;
+      process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = cfgNone11;
       assert.equal(dash11.remoteHead(ghOwn, undefined, null), ghHead11);
 
       // Default host with no GH_BASE: the URL is https://github.com/<name>, so the rewrite
       // lands on the fixture and the sha comes back. A forced-local URL or a flipped host
       // never reaches the rewrite and yields ''.
-      process.env.GIT_CONFIG_GLOBAL = cfgGhcom11;
+      process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = cfgGhcom11;
       assert.equal(dash11.remoteHead('own/data', 'main', null), ghHead11);
 
       // Explicit host in the spec: the URL must carry it, or the clone misses the rewrite
       // and the import fails instead of landing the fixture's sha.
-      process.env.GIT_CONFIG_GLOBAL = cfgAcme11;
+      process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = cfgAcme11;
       const db11a = mkDb10('alat11-a.db');
       const c11 = leak10(() => dash11.importSource(dash11.loadState(db11a), 'acme.ghe.com/own/data@main', 'repo', null, db11a));
       assert.deepEqual([c11.source.name, c11.source.host, c11.source.ref, c11.source.importedSha], ['own/data', 'acme.ghe.com', 'main', ghHead11]);
       assert.equal(dash11.remoteHead('own/data', 'main', null, 'acme.ghe.com'), ghHead11);
 
       // An existing local path wins over the URL form even for repo sources.
-      process.env.GIT_CONFIG_GLOBAL = cfgNone11;
+      process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = cfgNone11;
       const ghwtSha11 = git10(['-C', 'ghwt', 'rev-parse', 'HEAD']).stdout.trim();
       const db11b = mkDb10('alat11-b.db');
       const p11 = leak10(() => dash11.importSource(dash11.loadState(db11b), join(w10, 'ghwt'), 'repo', null, db11b));
       assert.deepEqual([p11.source.kind, p11.source.name, p11.source.importedSha], ['repo', join(w10, 'ghwt'), ghwtSha11]);
 
       // A ref-less clone failure names just the repo, then the colon and git's stderr.
-      process.env.GIT_CONFIG_GLOBAL = cfgAcme11;
+      process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = cfgAcme11;
       const db11c = mkDb10('alat11-c.db');
       e = err10(() => dash11.importSource(dash11.loadState(db11c), 'acme.ghe.com/own/no-such-alat11', 'repo', null, db11c));
       assert.equal(e.status, 400);
@@ -5793,7 +5795,85 @@ try {
     } finally {
       if (savedBase11 === undefined) delete process.env.ALATE_TEST_GH_BASE; else process.env.ALATE_TEST_GH_BASE = savedBase11;
       if (savedHost11 === undefined) delete process.env.ALATE_GITHUB_HOST; else process.env.ALATE_GITHUB_HOST = savedHost11;
-      if (savedCfg11 === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = savedCfg11;
+      if (savedCfg11 === undefined) delete process.env.ALATE_TEST_GIT_CONFIG_GLOBAL; else process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = savedCfg11;
+    }
+
+    // -- Server git isolation (security audit run-6): worker turns can write the shared
+    // home, so a hostile ~/.gitconfig (and ~/.config/git/config) plants an ext:: url
+    // rewrite, a hooksPath, an fsmonitor command and an identity. None of it may apply to
+    // a repo import, ls-remote, repo-source edit (clone, commit, push) or path-source
+    // commit. Repo-local hooks of a path source still run, and they see no server secret.
+    {
+      const { gitAuthEnv: authEnv12, serverGitEnv } = await import('./lib/data.mjs');
+      const keys12 = ['HOME', 'XDG_CONFIG_HOME', 'GIT_CONFIG_GLOBAL', 'ALATE_TEST_GIT_CONFIG_GLOBAL', 'ALATE_API_KEY', 'GH_TOKEN'];
+      const saved12 = keys12.map(k => process.env[k]);
+      const evil12 = join(tmp, 'alat12-evil-home');
+      const marks12 = join(tmp, 'alat12-marks');
+      const slash = p => p.replace(/\\/g, '/');
+      const marker = name => `#!/bin/sh\necho ran > "${slash(join(marks12, name))}"\n`;
+      mkdirSync(join(evil12, 'hooks'), { recursive: true });
+      mkdirSync(join(evil12, '.config', 'git'), { recursive: true });
+      mkdirSync(marks12, { recursive: true });
+      for (const hook of ['post-checkout', 'pre-commit', 'post-commit', 'pre-push']) {
+        writeFileSync(join(evil12, 'hooks', hook), marker(hook));
+        chmodSync(join(evil12, 'hooks', hook), 0o755);
+      }
+      writeFileSync(join(evil12, 'fsmonitor.sh'), marker('fsmonitor'));
+      chmodSync(join(evil12, 'fsmonitor.sh'), 0o755);
+      const hostile = `[core]\n\thooksPath = ${slash(join(evil12, 'hooks'))}\n\tfsmonitor = ${slash(join(evil12, 'fsmonitor.sh'))}\n`
+        + `[url "ext::sh -c touch% ${slash(join(marks12, 'ext'))}"]\n\tinsteadOf = ${pathToFileURL(gh10).href}/\n`
+        + '[protocol "ext"]\n\tallow = always\n[user]\n\tname = evil\n\temail = evil@example.invalid\n';
+      writeFileSync(join(evil12, '.gitconfig'), hostile);
+      writeFileSync(join(evil12, '.config', 'git', 'config'), hostile);
+      // A path source with its own post-commit hook that dumps the env git hands it.
+      const pt12 = join(tmp, 'alat12-path');
+      assert.equal(git(['init', '-q', pt12]).status, 0);
+      writeFileSync(join(pt12, 'seed.md'), 'seed\n');
+      assert.equal(git(['-C', pt12, 'add', '-A']).status, 0);
+      assert.equal(git(['-C', pt12, '-c', 'user.email=t@x', '-c', 'user.name=t', 'commit', '-qm', 'seed']).status, 0);
+      writeFileSync(join(pt12, '.git', 'hooks', 'post-commit'), `#!/bin/sh\nenv > "${slash(join(marks12, 'local-env'))}"\n`);
+      chmodSync(join(pt12, '.git', 'hooks', 'post-commit'), 0o755);
+      try {
+        process.env.HOME = evil12;
+        delete process.env.XDG_CONFIG_HOME;
+        delete process.env.GIT_CONFIG_GLOBAL;
+        delete process.env.ALATE_TEST_GIT_CONFIG_GLOBAL;
+        process.env.ALATE_API_KEY = 'alat12-api-key';
+        process.env.GH_TOKEN = 'alat12-gh-token';
+
+        // The env every server git child starts from: allowlisted, no global or system config.
+        const env12 = serverGitEnv();
+        assert.deepEqual([env12.GIT_CONFIG_GLOBAL, env12.GIT_CONFIG_NOSYSTEM, env12.GIT_TERMINAL_PROMPT, env12.HOME], ['/dev/null', '1', '0', evil12]);
+        assert.equal(env12.ALATE_API_KEY, undefined, 'server git never sees ALATE_API_KEY');
+        assert.equal(env12.GH_TOKEN, undefined, 'server git never sees GH_TOKEN');
+        const auth12 = authEnv12('https://github.com/own/data', 'tok12', env12);
+        assert.deepEqual([auth12.GIT_CONFIG_GLOBAL, auth12.GIT_CONFIG_NOSYSTEM, auth12.ALATE_API_KEY, auth12.GIT_CONFIG_KEY_0], ['/dev/null', '1', undefined, 'http.https://github.com/.extraheader']);
+
+        // Repo source: import (clone + rev-parse), edit (clone, commit, push), ls-remote.
+        const db12 = mkDb10('alat12.db');
+        const r12 = leak10(() => dash.importSource(dash.loadState(db12), 'own/data@main', 'repo', null, db12));
+        assert.equal(r12.source.importedSha, git10(['--git-dir', ghOwn, 'rev-parse', 'main']).stdout.trim());
+        const e12 = await leak10(() => dash.applyFileEdit(r12, db12, { path: 'iso12.md', content: 'iso\n', base: null }));
+        assert.equal(e12.pushed, true);
+        assert.equal(git10(['--git-dir', ghOwn, 'log', '-1', '--format=%ae']).stdout.trim(), 'alate@localhost', 'the hostile identity never reaches a repo-source commit');
+        assert.equal(dash.remoteHead('own/data', 'main', null), e12.commit);
+
+        // Path source: the commit runs the tree's own hook, never the hostile hooksPath.
+        const dbP12 = mkDb10('alat12-p.db');
+        const p12 = dash.importSource(dash.loadState(dbP12), pt12, 'path', null, dbP12);
+        const pe12 = await dash.applyFileEdit(p12, dbP12, { path: 'iso12.md', content: 'path\n', base: null });
+        assert.equal(pe12.warning, 'no upstream configured; the commit stayed local');
+        assert.equal(git(['-C', pt12, 'log', '-1', '--format=%H %ae'], { encoding: 'utf8' }).stdout.trim(), `${pe12.commit} alate@localhost`);
+
+        assert.deepEqual(readdirSync(marks12), ['local-env'], 'no hostile hook, fsmonitor or ext:: command ran');
+        const dump12 = readFileSync(join(marks12, 'local-env'), 'utf8');
+        assert.match(dump12, /^GIT_CONFIG_GLOBAL=\/dev\/null$/m);
+        assert.match(dump12, /^GIT_CONFIG_NOSYSTEM=1$/m);
+        assert.doesNotMatch(dump12, /alat12-api-key|ALATE_API_KEY/, 'a path-source hook never sees ALATE_API_KEY');
+        assert.doesNotMatch(dump12, /alat12-gh-token|GH_TOKEN/, 'a path-source hook never sees GH_TOKEN');
+      } finally {
+        keys12.forEach((k, i) => { if (saved12[i] === undefined) delete process.env[k]; else process.env[k] = saved12[i]; });
+      }
     }
 
     // -- snapshotData: exact tree, temp prefix, unsafe stored paths refused.
