@@ -5,7 +5,8 @@
 // .omp/run, the session stores under .omp — context-mode, custom-session-files,
 // snapcompact — the cache and session stores of the browser profiles under
 // .omp/browser-profiles, the live worker's .omp/plugins/cache downloads (anything
-// else under plugins/ stays checked), .omp/memories, .omp/oauth, .omp/install-id,
+// else under plugins/ stays checked), .omp/memories, the memory backend store
+// .omp/agent/memories, .omp/oauth, .omp/install-id,
 // .omp/marketplaces.json, .omp/natives, the .omp/autoqa.db database with its -wal and
 // -journal files, the two bookkeeping files under .alate, and the
 // live worker's layer runtime (each layer's .omp tree under .alate/layers — the same
@@ -30,7 +31,8 @@ const WATCHED = ['.alate', '.agents', '.omp'];
 // DawnGraphiteCache, DawnWebGPUCache) and the Cookies and History session stores with
 // their -wal and -journal files: a live browser rewrites those mid-chain. A live worker
 // also rewrites its plugin download cache (.omp/plugins/cache; anything else under
-// plugins/ stays checked), its memories, its oauth state, its native grammar files
+// plugins/ stays checked), its memories (.omp/memories and the memory backend store
+// .omp/agent/memories), its oauth state, its native grammar files
 // (.omp/natives), the install-id and marketplaces.json bookkeeping files, and its
 // autoqa.db runtime database with its -wal and -journal files.
 // Everything else in the watched dirs — skills, rules, agent context, installed.json,
@@ -44,6 +46,7 @@ const OMP_LIVE = rel => rel === 'logs' || rel.startsWith('logs/') || rel === 'ca
   || rel === 'agent/custom-session-files' || rel.startsWith('agent/custom-session-files/')
   || rel === 'snapcompact-savings.jsonl'
   || rel === 'agent/blobs' || rel.startsWith('agent/blobs/')
+  || rel === 'agent/memories' || rel.startsWith('agent/memories/')
   || (/^browser-profiles\//.test(rel)
     && (/\/(?:Cache|Code Cache|GPUCache|GPUPersistentCache|GrShaderCache|ShaderCache|GraphiteDawnCache|DawnGraphiteCache|DawnWebGPUCache)(?:\/|$)/.test(rel)
       || /\/(?:Cookies|History)(?:-wal|-journal)?$/.test(rel)))
@@ -70,10 +73,11 @@ const LIVE = {
 };
 const resolveSnap = (argv) => argv[3] ?? process.env.ALATE_HOME_GUARD_SNAPSHOT ?? join(tmpdir(), 'alate-home-guard-snapshot.json');
 
-// Walk one watched dir into out: every file and subdirectory, keyed relative with forward
-// slashes, value lstat mtimeMs. Never follow symlinks; a symlinked root records nothing,
-// no walk. A missing dir records as absent.
-const walkWatched = (root, out, isLive) => {
+// Walk one watched dir into mtime: every checked file and subdirectory, keyed relative
+// with forward slashes, value lstat mtimeMs; every checked directory also lands in dirs.
+// Never follow symlinks; a symlinked root records nothing, no walk. A missing dir
+// records as absent.
+const walkWatched = (root, mtime, dirs, isLive) => {
   if (!existsSync(root)) return;
   const st = lstatSync(root);
   if (st.isSymbolicLink()) return;
@@ -82,7 +86,10 @@ const walkWatched = (root, out, isLive) => {
       const relKey = rel ? `${rel}/${name}` : name;
       const full = join(dir, name);
       const s = lstatSync(full);
-      if (!isLive(relKey)) out[relKey] = s.mtimeMs;
+      if (!isLive(relKey)) {
+        mtime[relKey] = s.mtimeMs;
+        if (s.isDirectory()) dirs[relKey] = true;
+      }
       if (s.isDirectory()) walk(full, relKey);
     }
   };
@@ -90,9 +97,10 @@ const walkWatched = (root, out, isLive) => {
 };
 
 const snapshot = () => {
-  const out = {};
-  for (const dir of WATCHED) walkWatched(join(homedir(), dir), out, LIVE[dir] ?? (() => false));
-  return out;
+  const mtime = {};
+  const dirs = {};
+  for (const dir of WATCHED) walkWatched(join(homedir(), dir), mtime, dirs, LIVE[dir] ?? (() => false));
+  return { mtime, dirs };
 };
 
 const saveSnap = (path, data) => {
@@ -106,15 +114,37 @@ const run = (mode, home, snap) => spawnSync(process.execPath, [fileURLToPath(imp
 });
 
 // Compare against the snapshot; returns an array of diff lines.
+// A file mtime diff always reports. A directory's mtime also moves when a live-ignored
+// child is created or removed inside it — the memory backend creating
+// .omp/agent/memories mid-chain moves the agent mtime without touching any checked
+// path. A real change to a checked child reports that child on its own, so a directory
+// that stayed a directory and has no direct-child diff of its own is ignored-child
+// churn and its mtime diff is dropped; a type flip (dir to file or back) still reports.
 const diff = (snapPathArg) => {
   if (!existsSync(snapPathArg)) return [`snapshot missing: ${snapPathArg}`];
   const snap = JSON.parse(readFileSync(snapPathArg, 'utf8'));
   const now = snapshot();
+  const removed = [];
+  const added = [];
+  const mtimed = [];
+  for (const key of Object.keys(snap.mtime)) if (!(key in now.mtime)) removed.push(key);
+  for (const key of Object.keys(now.mtime)) {
+    if (!(key in snap.mtime)) added.push(key);
+    else if (snap.mtime[key] !== now.mtime[key] || (key in snap.dirs) !== (key in now.dirs)) mtimed.push(key);
+  }
+  const changed = new Set([...removed, ...added, ...mtimed]);
+  const hasDirectChildDiff = (key) => {
+    const prefix = `${key}/`;
+    for (const other of changed) {
+      if (other.startsWith(prefix) && !other.slice(prefix.length).includes('/')) return true;
+    }
+    return false;
+  };
   const lines = [];
-  for (const key of Object.keys(snap)) if (!(key in now)) lines.push(`removed entry: ${key}`);
-  for (const key of Object.keys(now)) {
-    if (!(key in snap)) lines.push(`added entry: ${key}`);
-    else if (snap[key] !== now[key]) lines.push(`mtime changed: ${key}`);
+  for (const key of removed) lines.push(`removed entry: ${key}`);
+  for (const key of added) lines.push(`added entry: ${key}`);
+  for (const key of mtimed) {
+    if (!(key in now.dirs) || !(key in snap.dirs) || hasDirectChildDiff(key)) lines.push(`mtime changed: ${key}`);
   }
   return lines;
 };
@@ -154,13 +184,16 @@ const selfCheck = () => {
     '.omp/memories/m.md', '.omp/oauth/tokens.json', '.omp/install-id',
     '.omp/marketplaces.json', '.omp/natives/grammars/en.wasm',
     '.alate/layers/w1/.omp/puppeteer/package.json', '.alate/layers/w1/.omp/install-id',
+    '.alate/layers/w1/.omp/agent/rules/r.md',
     '.alate/layers/w1/config.yml', '.alate/layers/token-reminders.json']) {
     mkdirSync(join(fake, rel, '..'), { recursive: true });
     writeFileSync(join(fake, rel), rel);
   }
   // The blob cache dir pre-exists on any machine that has run omp once; its entries churn.
-  // So does the live worker's own state: the plugin download cache, memories, oauth,
-  // natives, install-id and marketplaces.json.
+  // So does the live worker's own state: the plugin download cache, memories (flat and
+  // the .omp/agent/memories backend store, which the churn block below creates
+  // mid-chain, as the memory backend does), oauth, natives, install-id and
+  // marketplaces.json.
   mkdirSync(join(fake, '.omp/agent/blobs'), { recursive: true });
   mkdirSync(join(fake, '.alate/layers/w1/.omp/cache'), { recursive: true });
   const snap = join(tmp, 'snap.json');
@@ -200,12 +233,25 @@ const selfCheck = () => {
     writeFileSync(join(fake, '.omp/install-id'), 'id-2\n');
     writeFileSync(join(fake, '.omp/marketplaces.json'), '[]\n');
     writeFileSync(join(fake, '.omp/natives/grammars/en.wasm'), 'wasm\n');
+    // The memory backend writes below .omp/agent/memories and below each layer's
+    // .omp/agent/memories. The flat .omp store did not exist at record time, so its
+    // creation also moves the agent dir's mtime; with no checked child changed that
+    // parent-mtime diff must be dropped.
+    mkdirSync(join(fake, '.omp/agent/memories/mnemopi'), { recursive: true });
+    writeFileSync(join(fake, '.omp/agent/memories/mnemopi/m.md'), 'memory\n');
+    writeFileSync(join(fake, '.omp/agent/memories/mnemopi/m2.md'), 'memory\n');
+    mkdirSync(join(fake, '.alate/layers/w1/.omp/agent/memories/mnemopi'), { recursive: true });
+    writeFileSync(join(fake, '.alate/layers/w1/.omp/agent/memories/mnemopi/m.md'), 'memory\n');
     // The live worker's layer runtime churns the same way inside .alate/layers/<id>/.omp,
     // and its browser tooling rewrites puppeteer there mid-chain.
     writeFileSync(join(fake, '.alate/layers/w1/.omp/puppeteer/package.json'), '{"puppeteer":true}\n');
     writeFileSync(join(fake, '.alate/layers/w1/.omp/install-id'), 'id-2\n');
     writeFileSync(join(fake, '.alate/layers/w1/.omp/cache/idx'), '{}\n');
     assert.equal(run('check', fake, snap).status, 0, 'live runtime churn passes');
+    // A write to a checked child of agent still fails: the new file reports itself as an
+    // added entry, and with that direct-child diff the agent dir mtime diff stays too.
+    writeFileSync(join(fake, '.omp/agent/rules/x.md'), 'x');
+    assert.notEqual(run('check', fake, snap).status, 0, 'checked agent child write fails');
     // Non-runtime layer content stays checked.
     utimesSync(join(fake, '.alate/layers/w1/config.yml'), new Date(), new Date(Date.now() + 9000));
     utimesSync(join(fake, '.alate/layers/token-reminders.json'), new Date(), new Date(Date.now() + 9000));
@@ -235,25 +281,33 @@ const selfCheck = () => {
     assert.match(missing.stderr, /snapshot missing/);
     // The recorded snapshot contains the watched entries and no unwatched one.
     const recorded = JSON.parse(readFileSync(snap, 'utf8'));
-    assert.deepEqual(Object.keys(recorded).sort(), ['agent', 'agent/rules', 'agent/rules/r.md',
+    assert.deepEqual(Object.keys(recorded.mtime).sort(), ['agent', 'agent/rules', 'agent/rules/r.md',
       'browser-profiles', 'browser-profiles/chrome-x', 'browser-profiles/chrome-x/Default',
       'browser-profiles/chrome-x/Default/Preferences',
-      'layers', 'layers/token-reminders.json', 'layers/w1', 'layers/w1/.omp', 'layers/w1/config.yml',
+      'layers', 'layers/token-reminders.json', 'layers/w1', 'layers/w1/.omp',
+      'layers/w1/.omp/agent', 'layers/w1/.omp/agent/rules', 'layers/w1/.omp/agent/rules/r.md',
+      'layers/w1/config.yml',
       'plugins', 'plugins/installed', 'plugins/installed/p', 'plugins/installed/p/manifest.json',
       'skills', 'skills/x', 'skills/x/SKILL.md', 'state.json']);
-    assert.ok(!('agent/agent.db' in recorded) && !('logs' in recorded) && !('in-use.json' in recorded)
-      && !('context-mode' in recorded) && !('snapcompact-savings.jsonl' in recorded)
-      && !('plugins/cache' in recorded) && !('memories' in recorded) && !('oauth' in recorded)
-      && !('install-id' in recorded) && !('marketplaces.json' in recorded) && !('natives' in recorded)
-      && !('browser-profiles/chrome-x/Default/Cache' in recorded)
-      && !('browser-profiles/chrome-x/Default/GPUCache' in recorded)
-      && !('browser-profiles/chrome-x/GrShaderCache' in recorded)
-      && !('browser-profiles/chrome-x/GPUPersistentCache' in recorded)
-      && !('browser-profiles/chrome-x/Default/Cookies' in recorded)
-      && !('browser-profiles/chrome-x/Default/History-journal' in recorded)
-      && !('layers/w1/.omp/puppeteer' in recorded) && !('layers/w1/.omp/cache' in recorded)
-      && !('layers/w1/.omp/install-id' in recorded),
+    assert.ok(!('agent/agent.db' in recorded.mtime) && !('logs' in recorded.mtime) && !('in-use.json' in recorded.mtime)
+      && !('context-mode' in recorded.mtime) && !('snapcompact-savings.jsonl' in recorded.mtime)
+      && !('plugins/cache' in recorded.mtime) && !('memories' in recorded.mtime) && !('oauth' in recorded.mtime)
+      && !('install-id' in recorded.mtime) && !('marketplaces.json' in recorded.mtime) && !('natives' in recorded.mtime)
+      && !('browser-profiles/chrome-x/Default/Cache' in recorded.mtime)
+      && !('browser-profiles/chrome-x/Default/GPUCache' in recorded.mtime)
+      && !('browser-profiles/chrome-x/GrShaderCache' in recorded.mtime)
+      && !('browser-profiles/chrome-x/GPUPersistentCache' in recorded.mtime)
+      && !('browser-profiles/chrome-x/Default/Cookies' in recorded.mtime)
+      && !('browser-profiles/chrome-x/Default/History-journal' in recorded.mtime)
+      && !('layers/w1/.omp/puppeteer' in recorded.mtime) && !('layers/w1/.omp/cache' in recorded.mtime)
+      && !('layers/w1/.omp/install-id' in recorded.mtime),
       'live runtime entries stay out of the snapshot');
+    assert.deepEqual(Object.keys(recorded.dirs).sort(), ['agent', 'agent/rules',
+      'browser-profiles', 'browser-profiles/chrome-x', 'browser-profiles/chrome-x/Default',
+      'layers', 'layers/w1', 'layers/w1/.omp',
+      'layers/w1/.omp/agent', 'layers/w1/.omp/agent/rules',
+      'plugins', 'plugins/installed', 'plugins/installed/p',
+      'skills', 'skills/x']);
     console.log('home-guard ok');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
