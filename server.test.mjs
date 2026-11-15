@@ -2180,6 +2180,13 @@ try {
       r = await postImport(JSON.stringify({ source: 'https://acme.ghe.com/demo/missing.git', kind: 'repo' }));
       assert.equal(r.status, 400);
       assert.equal(JSON.parse(readFileSync(upConfig, 'utf8')).tokenHost, 'acme.ghe.com', 'the attempted foreign host is persisted');
+      // Drain once: the one-second update timer or an earlier trigger can leave a pass
+      // that started before the failed import in flight, and that pass read the older
+      // github.com source, so its remaining requests still ride the token. The
+      // single-flight POST joins it and returns only after it ends, so the window
+      // below counts only passes that started after the failed import was persisted.
+      r = await postJson('/api/updates/check', {}, true);
+      assert.equal(r.status, 200);
       const before = authSeen.length;
       r = await postJson('/api/updates/check', {}, true);
       assert.equal(r.status, 200);
@@ -6685,34 +6692,59 @@ try {
     child.once('exit', onExit);
     setTimeout(() => reject(new Error(`test server did not start: ${buf.slice(-300)}`)), 30_000).unref();
   });
-  // Probes /health every 10 ms while `run` is in flight; every probe must answer 200 fast.
+  // Probes /health every 10 ms while `run` is in flight; every probe must answer 200
+  // fast. A control window first samples the same probe loop with no op in flight, so
+  // the worst-probe bound can follow the host's measured noise: on a loaded machine a
+  // single wall-clock sample cannot tell host jitter from a real stall.
   const probeHealthWhile = async (base, run) => {
     const times = [];
+    const at = [];
+    const control = [];
     let done = false;
     let failure = null;
+    const probe = async into => {
+      const t0 = Date.now();
+      try {
+        const r = await fetch(new URL('/health', base));
+        if (r.status !== 200) failure ??= `health probe answered ${r.status}`;
+      } catch (err) { failure ??= `health probe failed: ${err.message}`; }
+      into.push(Date.now() - t0);
+      return Date.now();
+    };
+    for (let i = 0; i < 30; i++) {
+      await probe(control);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const startedAt = Date.now();
     const loop = (async () => {
       while (!done) {
-        const t0 = Date.now();
-        try {
-          const r = await fetch(new URL('/health', base));
-          if (r.status !== 200) failure ??= `health probe answered ${r.status}`;
-        } catch (err) { failure ??= `health probe failed: ${err.message}`; }
-        times.push(Date.now() - t0);
+        const finishedAt = await probe(times);
+        at.push(finishedAt);
         await new Promise(resolve => setTimeout(resolve, 10));
       }
     })();
-    const t0 = Date.now();
     const result = await run();
-    const elapsed = Date.now() - t0;
+    const runEnd = Date.now();
     done = true;
     await loop;
     assert.equal(failure, null, failure ?? 'probes ok');
-    return { result, times, elapsed };
+    return { result, times, at, runEnd, control, elapsed: runEnd - startedAt };
   };
-  const assertFastProbes = (times, label, bound = 300) => {
+  // Worker isolation is the property under test: while the op holds the worker, the
+  // main event loop keeps serving /health. A loop blocked by the op cannot answer any
+  // probe that arrives while the op request is pending, so the served-during-op count
+  // is the load-immune stall detector. The worst single sample cannot tell host jitter
+  // from a stall, so it is bounded against the idle control window instead of only the
+  // fixed ceiling: on a quiet host the ceiling stays the plain bound.
+  const assertFastProbes = (probeRun, label, bound = 300) => {
+    const { times, at, runEnd, control } = probeRun;
     assert.ok(times.length >= 10, `at least 10 probes ran while ${label} held the worker (${times.length})`);
+    const servedDuringOp = at.filter(t => t < runEnd).length;
+    assert.ok(servedDuringOp >= 3, `the main loop answered ${servedDuringOp} probes while ${label} held the worker; a loop blocked by the op would answer only the one probe that raced ahead of it`);
     const worst = Math.max(...times);
-    assert.ok(worst < bound, `every health probe stayed under ${bound} ms during ${label} (worst: ${Math.round(worst)} ms)`);
+    const controlWorst = Math.max(...control);
+    const ceiling = Math.max(bound, controlWorst + bound);
+    assert.ok(worst < ceiling, `every health probe stayed under ${Math.round(ceiling)} ms during ${label} (worst: ${Math.round(worst)} ms, idle control worst: ${Math.round(controlWorst)} ms)`);
   };
 
   {
@@ -6745,7 +6777,7 @@ try {
           await new Promise(resolve => setTimeout(resolve, 25));
         }
       })();
-      const { result: importRes, times, elapsed } = await probeHealthWhile(bulkBase, () =>
+      const { result: importRes, times, at, runEnd, control, elapsed } = await probeHealthWhile(bulkBase, () =>
         fetch(new URL(`${bulkBase}/api/import`), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bulkKey}` }, body: JSON.stringify({ source: bulkSource }) }));
       reading = false;
       await readLoop;
@@ -6760,7 +6792,7 @@ try {
       const importBody = JSON.parse(importText);
       assert.equal(importBody.ok, true);
       assert.equal(importBody.state.inventory.rules.length, 14000);
-      assertFastProbes(times, 'the bulk import');
+      assertFastProbes({ times, at, runEnd, control }, 'the bulk import');
       assert.ok(reads.length >= 20, `reads ran during the import transaction (${reads.length})`);
       assert.deepEqual(reads.filter(s => !s.endsWith(':200')), [], `every read during the import answered 200: ${reads.filter(s => !s.endsWith(':200')).join(', ')}`);
       const stored = await (await fetch(new URL('/api/files', bulkBase))).json();
@@ -6798,7 +6830,7 @@ try {
       const started = Date.now();
       const freshSnapshots = () => readdirSync(serverTmp)
         .filter(n => n.startsWith('alate-snapshot-') && statSync(join(serverTmp, n)).mtimeMs >= started);
-      const { result: provRes, times } = await probeHealthWhile(snapBase, () =>
+      const { result: provRes, times, at, runEnd, control } = await probeHealthWhile(snapBase, () =>
         fetch(new URL('/provision', snapBase), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${snapKey}` }, body: '{}' }));
       assert.equal(provRes.status, 200);
       const provBody = await provRes.json();
@@ -6806,7 +6838,7 @@ try {
       // The defect class this test catches is a synchronous snapshot copy: it stalls
       // /health for the whole copy, about a second at this fixture size. 300 ms keeps
       // that failure visible and still clears the measured worst probe with margin.
-      assertFastProbes(times, 'the 384 MB snapshot copy');
+      assertFastProbes({ times, at, runEnd, control }, 'the 384 MB snapshot copy');
       assert.deepEqual(freshSnapshots(), [], 'the temp snapshot dir is gone after provision responds');
     } finally { await stopServer(snapSrv); }
   }
@@ -6895,7 +6927,7 @@ try {
       const before = await (await fetch(new URL('/api/file?path=notes.md', editDelayBase), { headers: { Authorization: `Bearer ${editDelayKey}` } })).json();
       const moved = `${before.content}edited on the worker\n`;
       let deferredCheck = null;
-      const { result: editRes, times, elapsed } = await probeHealthWhile(editDelayBase, () => {
+      const { result: editRes, times, at, runEnd, control, elapsed } = await probeHealthWhile(editDelayBase, () => {
         const editP = fetch(new URL('/api/file', editDelayBase), { method: 'PUT', headers: editAuth, body: JSON.stringify({ path: 'notes.md', content: moved, base: before.hash, message: 'test: edit through the worker' }) });
         // Fired while the edit holds the worker: the route defers it, it must not block or 500.
         deferredCheck = fetch(new URL('/api/updates/check', editDelayBase), { method: 'POST', headers: { Authorization: `Bearer ${editDelayKey}` } });
@@ -6908,7 +6940,7 @@ try {
       assert.equal(edit.ok, true);
       assert.match(edit.commit, /^[0-9a-f]{40}$/);
       assert.equal(edit.pushed, true, 'the edit reached the bare upstream');
-      assertFastProbes(times, 'the file edit');
+      assertFastProbes({ times, at, runEnd, control }, 'the file edit');
       const deferredRes = await deferredCheck;
       const deferredText = await deferredRes.text();
       assert.equal(deferredRes.status, 200, `the deferred update check must not 500: ${deferredText}`);
