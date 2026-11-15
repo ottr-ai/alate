@@ -79,15 +79,20 @@ Rules for the links:
    even as a dangling link. A planted entry at the layer path, or a symlink at `.alate` or
    `.alate/layers`, refuses the run, and the run does not delete the planted entry. The run
    creates `<layer>/.omp/agent/rules` the same way before step 4. The run records the
-   device and inode of the layer dir and of the rules dir. Each later write, the scan
-   clean-up, the plugins install, the link set, and the switch first check that the layer
-   path still names the recorded layer dir. A layer that a turn replaced (by a symlink or
-   by a fresh dir) refuses the run, and the failure path leaves the replacement in place.
-4. Rules: spawn `node sync.mjs <layer>/.omp/agent/rules --data <dir> --within <home> --pin
-   <dev:ino>`. With `--within`, each sync write refuses a symlink on its whole path below
-   the home. With `--pin`, each sync write refuses when the rules dir has a different
-   identity. Its gates stay fail-closed; a failure surfaces its error text, deletes the
-   layer folder, and exits non-zero with `current` unchanged.
+   device and inode of the layer dir. Each later write, the scan clean-up, the plugins
+   install, the link set, and the switch first check that the layer path still names the
+   recorded layer dir. A layer that a turn replaced (by a symlink or by a fresh dir) refuses
+   the run, and the failure path leaves the replacement in place.
+
+   Containment rule: a write lands in the layer only when the layer root has its recorded
+   identity and the path from the home to the file has no symlink. The identity of the
+   target dir alone proves nothing, because a turn can move that dir into a replacement
+   layer, and the dir keeps its inode.
+4. Rules: spawn `node sync.mjs <layer>/.omp/agent/rules --data <dir> --within <home> --layer
+   <layer> --pin <dev:ino>`. The three options go together. With them, each sync write
+   refuses a symlink on its whole path below the home, and refuses when the layer dir has a
+   different identity. Its gates stay fail-closed; a failure surfaces its error text,
+   deletes the layer folder, and exits non-zero with `current` unchanged.
 5. Write the user snapshot and the worker lists into the layer (conflict rule below).
 6. SkillSpector scan of the skills inside the installed layer, same pin, same flags
    (`--no-llm --fail-on-findings --use-shipped-baseline`). A failed scan deletes the layer
@@ -251,9 +256,10 @@ them at turn end.
 - A symlink planted at `layers/nogit-9007199254740992` does not receive the layer: the run
   switches to `layers/nogit-9007199254740993`. A symlinked `.alate/layers` refuses the run,
   and the link target receives no file.
-- While the test gate holds the nested sync, a turn renames the layer away and puts a symlink
-  to it, or a fresh dir, at the layer path. The sync refuses, no rule lands in either dir,
-  the replacement stays, and `current` does not switch.
+- While the test gate holds the nested sync, a turn renames the layer away and puts one of
+  these at the layer path: a symlink to the old layer, a fresh dir, or a fresh dir that holds
+  the moved original rules dir. The sync refuses, no rule lands in either dir, the
+  replacement stays, and `current` does not switch.
 - The non-layer suite (`install-user.test.mjs`) passes unchanged.
 
 ## Non-goals
@@ -273,7 +279,7 @@ them at turn end.
   recorded identity of the layer dir, creates its missing dirs without a symlink below the
   home, repeats `checkDestination` from the home immediately before the open, and opens
   with `O_NOFOLLOW`. The layer record opens with `O_EXCL`. `sync.mjs` writes its rules and
-  its record the same way, with the home as root and the rules dir identity as pin.
+  its record the same way, with the home as root and the layer dir identity as pin.
 - Limit: Node has no `openat`. A turn that swaps a dir component between the last check
   and the open can still redirect one write. The plugins install (`bun`) and the
   SkillSpector scan check the layer identity before they start, but not during their run.

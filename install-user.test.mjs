@@ -2543,9 +2543,17 @@ exit 0
       child.stderr.on('data', d => { stderr += d; });
       child.on('close', status => done({ status, stdout, stderr }));
     });
-    for (const [kind, replace, refusal] of [
-      ['symlink', (layer, moved) => symlinkSync(moved, layer), /is a symbolic link below the chosen root/],
-      ['directory', layer => mkdirSync(join(layer, '.omp', 'agent', 'rules'), { recursive: true }), /was replaced during the install/],
+    const rulesIn = layer => (existsSync(join(layer, '.omp', 'agent', 'rules')) ? readdirSync(join(layer, '.omp', 'agent', 'rules')) : []);
+    // Each replacement refuses at the child's layer identity check, before any rule write.
+    for (const [kind, replace] of [
+      ['symlink', (layer, moved) => symlinkSync(moved, layer)],
+      ['directory', layer => mkdirSync(join(layer, '.omp', 'agent', 'rules'), { recursive: true })],
+      // The original rules dir moves into the replacement layer and keeps its inode: only the
+      // layer root's identity tells the replacement apart.
+      ['transplant', (layer, moved) => {
+        mkdirSync(join(layer, '.omp', 'agent'), { recursive: true });
+        renameSync(join(moved, '.omp', 'agent', 'rules'), join(layer, '.omp', 'agent', 'rules'));
+      }],
     ]) {
       const swapHome = join(tmpReal, `layer-home-swap-${kind}`);
       const swapLayer = join(swapHome, '.alate', 'layers', 'nogit-1');
@@ -2564,10 +2572,10 @@ exit 0
       rmSync(gate);
       r = await pending;
       assert.equal(r.status, 1, r.stdout);
-      assert.match(r.stderr, new RegExp(`rules install failed:[\\s\\S]*${refusal.source}`), `the gated sync refuses the ${kind} swap`);
+      assert.match(r.stderr, /rules install failed:[\s\S]*was replaced during the install/, `the gated sync refuses the ${kind} swap`);
       assert.match(r.stderr, /left in place: .*no longer the layer this run created/);
-      assert.deepEqual(readdirSync(join(moved, '.omp', 'agent', 'rules')), [], `no rule lands in the renamed layer (${kind})`);
-      assert.deepEqual(readdirSync(join(swapLayer, '.omp', 'agent', 'rules')), [], `no rule lands in the replacement (${kind})`);
+      assert.deepEqual(rulesIn(moved), [], `no rule lands in the renamed layer (${kind})`);
+      assert.deepEqual(rulesIn(swapLayer), [], `no rule lands in the replacement (${kind})`);
       assert.equal(lstatSync(swapLayer).isSymbolicLink(), kind === 'symlink', `the ${kind} replacement stays in place`);
       assert.equal(lstatSync(join(swapHome, '.alate', 'current'), { throwIfNoEntry: false }), undefined, `current never switches (${kind})`);
     }

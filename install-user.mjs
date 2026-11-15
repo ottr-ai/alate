@@ -1324,12 +1324,12 @@ try {
       makeDirInside(layerHome, /** @type {string} */ (newLayerDir), true);
       layerCreated = true;
       layerPin = { dir: /** @type {string} */ (newLayerDir), id: dirIdentity(/** @type {string} */ (newLayerDir)) };
-      // The rules dir is created here, through no link, and the nested sync gets its identity
-      // plus the home as the root of its path checks: a layer swapped while sync runs refuses.
+      // The rules dir is created here, through no link. The nested sync gets the home as the
+      // root of its path checks and the layer identity as its pin: only the layer root's
+      // identity plus a symlink-free path proves containment (a pinned rules dir could be
+      // moved into a replacement layer and keep its inode).
       const rulesDir = join(/** @type {string} */ (newLayerDir), '.omp', 'agent', 'rules');
       makeDirInside(layerHome, rulesDir);
-      // Pin first, then check the layer: a swap before the pin fails the layer check.
-      const rulesPin = dirIdentity(rulesDir);
       assertLayer();
       // The data-root rules install straight into the layer, through the same sync.mjs and its
       // per-item gates the server-side provision uses. When the server asked for per-item
@@ -1348,7 +1348,7 @@ try {
       // refuse when it leaves the live layer, before sync reads anything.
       const compareRules = readRoot === newLayerDir ? null : join(readRoot, '.omp', 'agent', 'rules');
       if (compareRules && lstatSync(compareRules, { throwIfNoEntry: false })) assertSourceInside(readRoot, compareRules);
-      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), rulesDir, '--data', data.dir, '--within', layerHome, '--pin', rulesPin, ...(compareRules ? ['--compare', compareRules] : [])], { encoding: 'utf8', env: rulesEnv });
+      const rules = spawnSync(process.execPath, [join(toolDir, 'sync.mjs'), rulesDir, '--data', data.dir, '--within', layerHome, '--layer', layerPin.dir, '--pin', layerPin.id, ...(compareRules ? ['--compare', compareRules] : [])], { encoding: 'utf8', env: rulesEnv });
       let nested = null;
       if (resultsPath) {
         try { nested = JSON.parse(readFileSync(resultsPath, 'utf8')); } catch { nested = null; }
