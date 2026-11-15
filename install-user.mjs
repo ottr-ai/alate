@@ -226,8 +226,8 @@ const BIN_SEGMENT = /^[A-Za-z0-9._-]+$/;
 // Every directory named skills/ or managed-skills/ anywhere under a root holds executable
 // agent content; each skill inside it goes to the scanner. A directory whose name only
 // aliases a skill root (case variant `Skills/`, 8.3 short name `MANAGE~1/`,
-// ignorable-code-point variant `skil\u200Cls/`) is collected into `aliases`, never
-// descended into: the caller rejects it whole before any write.
+// ignorable-code-point variant `skil\u200Cls/`, trailing-dot `skills./`) is collected into
+// `aliases`, never descended into: the caller rejects it whole before any write.
 /** @param {string} dir @param {string[]} [aliases] @returns {string[]} */
 const collectSkillDirs = (dir, aliases = []) => {
   /** @type {string[]} */
@@ -684,10 +684,10 @@ try {
   const dirByKey = new Map(skillDirs.map(dir => [`user/${relative(userRoot, dir).split(sep).join('/')}`, dir]));
   /** @type {Set<string>} */
   const rejectedSkills = new Set();
-  // A folder whose name only aliases a skill root (case variant `Skills/`, 8.3 short name
-  // `MANAGE~1/`, ignorable-code-point variant `skil\u200Cls/`) is the root's folder as
-  // Windows and macOS resolve it, but no skill gate ever saw its skills: the whole folder
-  // is rejected and excluded.
+  // A folder whose name only aliases a skill root (case variant `Skills/` or trailing-dot
+  // `skills./`, 8.3 short name `MANAGE~1/`, ignorable-code-point variant `skil\u200Cls/`)
+  // is the root's folder as Windows and macOS resolve it, but no skill gate ever saw its
+  // skills: the whole folder is rejected and excluded.
   for (const dir of rootAliases) {
     const key = `user/${relative(userRoot, dir).split(sep).join('/')}`;
     const alias = /** @type {{ root: string, reason: 'case variant' | '8.3 short name' | 'ignorable code point variant' }} */ (skillRootAlias(basename(dir)));

@@ -123,13 +123,15 @@ failure; `provisionedSha` still moves only on `ok`.
 
 `install-user.mjs`:
 0. skill root alias: a folder whose name matches `skills` or `managed-skills` only
-   after case folding (`Skills`, `MANAGED-SKILLS`, `ſkills`), only after removing
-   the Unicode default-ignorable code points (`skil\u200Cls`), or whose name is an
-   8.3 short-name shape (`MANAGE~1`) of one is `rejected` with rule
-   `<reason> of skill root "<root>"` and excluded whole. NTFS resolves 8.3 short
-   names into the long folder (creation is on by default on the Windows system
-   volume), case-insensitive filesystems resolve case variants, and case-insensitive
-   HFS+ name comparison ignores the default-ignorable code points — omp loads the
+   after case folding (`Skills`, `MANAGED-SKILLS`, `ſskills`), only after removing
+   the Unicode default-ignorable code points (`skil\u200Cls`), only after stripping
+   the trailing dots and spaces Win32 removes from a path element (`Skills.`,
+   `MANAGE~1 `), or whose name is an 8.3 short-name shape (`MANAGE~1`) of one is
+   `rejected` with rule `<reason> of skill root "<root>"` and excluded whole. NTFS
+   resolves 8.3 short names into the long folder (creation is on by default on the
+   Windows system volume), case-insensitive filesystems resolve case variants,
+   case-insensitive HFS+ name comparison ignores the default-ignorable code points,
+   and Win32 path normalization writes `Skills.` into the real root — omp loads the
    folder's skills either way, but the skill gates check only the exact names;
 1. origin gate: fatal problems refuse; uncovered skill dirs are `no origin` items,
    excluded before the walk; uncovered MCP servers are `no origin` reports;
@@ -197,10 +199,10 @@ h. A fatal refusal or a killed child stores the failing script and its output on
    `GET /api/state`.
 i. The overview renders the "Provision failed" line and per-script output
    disclosures for a failed run, and nothing for a clean run.
-j. A case variant (`Skills/`), an 8.3 short name (`MANAGE~1/`), and an
-   ignorable-code-point variant (`skil\u200Cls/`) of a skill root are each reported
-   `rejected`, are never scanned or installed, and the exact skill roots still
-   install; exit 1, `fatal: false`.
+j. A case variant (`Skills/`), an 8.3 short name (`MANAGE~1/`), an ignorable-code-point
+   variant (`skil\u200Cls/`), and a trailing-dot variant (`skills./`) of a skill root are
+   each reported `rejected`, are never scanned or installed, and the exact skill roots
+   still install; exit 1, `fatal: false`.
 
 ## Non-goals
 

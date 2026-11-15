@@ -291,12 +291,14 @@ try {
     assert.ok(problems.some(problem => problem.includes('hidden/SKILL.md') && /hidden character/.test(problem)), 'forbidden hidden characters refuse skill bodies');
   });
   // A skill root name that a case-insensitive filesystem (NTFS upper case, APFS case
-  // folding) resolves to the root aliases it; the exact root and every other name do not.
+  // folding) resolves to the root aliases it, and so does a name Win32 normalizes onto one
+  // by stripping trailing dots or spaces; the exact root and every other name do not.
   forAll(rand => {
     const root = choose(rand, ['skills', 'managed-skills']);
-    const name = [...root].map(c => flip(rand, c)).join('');
-    const other = choose(rand, ['skill', 'skillz', 'xskills', 'skills-', 'managed', 'managedskills', 'skills.', ' skills', '']);
-    return { root, name, other: [...other].map(c => flip(rand, c)).join('') };
+    const pad = rand() < 0.3 ? (rand() < 0.5 ? '.' : ' ') : '';
+    const name = [...root].map(c => flip(rand, c)).join('') + pad;
+    const other = choose(rand, ['skill', 'skillz', 'xskills', 'skills-', 'managed', 'managedskills', ' skills', '']);
+    return { root, name, other: [...other].map(c => flip(rand, c)).join('') + pad };
   }, input => {
     const { root, name, other } = /** @type {{ root: string, name: string, other: string }} */ (input);
     const want = name === root ? null : { root, reason: 'case variant' };
@@ -317,7 +319,7 @@ try {
       }
       return out;
     };
-    const other = choose(rand, ['skill', 'skillz', 'xskills', 'skills-', 'managed', 'managedskills', 'skills.', ' skills', '']);
+    const other = choose(rand, ['skill', 'skillz', 'xskills', 'skills-', 'managed', 'managedskills', ' skills', '']);
     return { root, name: poison([...root].map(c => flip(rand, c)).join('')), other: poison(other) };
   }, input => {
     const { root, name, other } = /** @type {{ root: string, name: string, other: string }} */ (input);
@@ -339,7 +341,7 @@ try {
   forAll(rand => `${choose(rand, ['skillz', 'skillx', 'skilla', 'skill-', 'xskill', 'skilsl'])}~1${rand() < 0.3 ? '.txt' : ''}`, name => {
     assert.deepEqual(skillRootAlias(name), null, `${name} is not an 8.3 alias of a skill root`);
   });
-  for (const [name, root, reason] of [['Skills', 'skills', 'case variant'], ['\u017Fkills', 'skills', 'case variant'], ['MANAGED-SKILLS', 'managed-skills', 'case variant'], ['skills', null], ['managed-skills', null], ['Skill', null], ['SKILLS.', null], ['MANAGE~1', 'managed-skills', '8.3 short name'], ['manage~3.txt', 'managed-skills', '8.3 short name'], ['SKILL~2', 'skills', '8.3 short name'], ['skil\u200Cls', 'skills', 'ignorable code point variant'], ['MANAG\u200BED-SKILLS', 'managed-skills', 'ignorable code point variant'], ['skillz~1', null], ['skil\u200Clz', null], ['\u200Cskillz\u200C', null], ['~1', null]]) {
+  for (const [name, root, reason] of [['Skills', 'skills', 'case variant'], ['\u017Fkills', 'skills', 'case variant'], ['MANAGED-SKILLS', 'managed-skills', 'case variant'], ['skills', null], ['managed-skills', null], ['Skill', null], ['SKILLS.', 'skills', 'case variant'], ['Skills ', 'skills', 'case variant'], ['skills. . ', 'skills', 'case variant'], ['MANAGE~1', 'managed-skills', '8.3 short name'], ['MANAGE~1 ', 'managed-skills', '8.3 short name'], ['manage~3.txt', 'managed-skills', '8.3 short name'], ['SKILL~2', 'skills', '8.3 short name'], ['skil\u200Cls', 'skills', 'ignorable code point variant'], ['MANAG\u200BED-SKILLS', 'managed-skills', 'ignorable code point variant'], ['skillz~1', null], ['skil\u200Clz', null], ['\u200Cskillz\u200C', null], ['skillz. ', null], ['~1', null], ['~1 ', null]]) {
     assert.deepEqual(skillRootAlias(name), root === null ? null : { root, reason }, `${name} aliases ${root}`);
   }
 
@@ -2886,9 +2888,10 @@ exit 0
   }
 
   // An 8.3 short name of a skill root (MANAGE~1/) resolves to the long folder on NTFS
-  // volumes with short-name creation (the default on the Windows system volume), and an
-  // ignorable-code-point variant (skil\u200Cls/) resolves on case-insensitive HFS+.
-  // Both are rejected whole, never scanned or installed; the real roots still install.
+  // volumes with short-name creation (the default on the Windows system volume), an
+  // ignorable-code-point variant (skil\u200Cls/) resolves on case-insensitive HFS+, and
+  // Win32 strips trailing dots and spaces from a path element (skills./). All are
+  // rejected whole, never scanned or installed; the real roots still install.
   if (scanned) {
     const alData = join(tmp, 'data-root-alias');
     const alHome = join(tmp, 'home-root-alias');
@@ -2897,22 +2900,25 @@ exit 0
     putA('omp/agent/skills/fine/SKILL.md', skillText('fine'));
     putA('omp/agent/MANAGE~1/short/SKILL.md', skillText('short'));
     putA('omp/agent/skil\u200Cls/tricky/SKILL.md', skillText('tricky'));
+    putA('omp/agent/skills./dotted/SKILL.md', skillText('dotted'));
     writeStub(0);
     const alCallsBefore = readFileSync(callsLog, 'utf8');
     const alResults = join(tmp, 'root-alias-results.json');
     r = run(['--data', alData, '--skip-plugins'], alHome, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ALATE_PROVISION_RESULTS: alResults });
     assert.equal(r.status, 1, 'an aliased skill root fails the run but not the install');
     assert.ok(existsSync(join(alHome, '.omp/agent/skills/fine/SKILL.md')), 'the exact skill root installs');
-    for (const rel of ['.omp/agent/MANAGE~1', '.omp/agent/skil\u200Cls', '.omp/agent/managed-skills']) assert.ok(!existsSync(join(alHome, rel)), `${rel} never lands`);
+    for (const rel of ['.omp/agent/MANAGE~1', '.omp/agent/skil\u200Cls', '.omp/agent/skills.', '.omp/agent/managed-skills']) assert.ok(!existsSync(join(alHome, rel)), `${rel} never lands`);
     const alCalls = readFileSync(callsLog, 'utf8').slice(alCallsBefore.length);
     assert.ok(alCalls.includes(join(alData, 'user/omp/agent/skills/fine')), 'the exact root is scanned');
-    for (const name of ['short', 'tricky']) assert.ok(!alCalls.includes(name), `${name} is never scanned`);
+    for (const name of ['short', 'tricky', 'dotted']) assert.ok(!alCalls.includes(name), `${name} is never scanned`);
     assert.ok(r.stdout.includes('user/omp/agent/MANAGE~1 — rejected: 8.3 short name of skill root "managed-skills"'), r.stdout);
     assert.ok(r.stdout.includes('user/omp/agent/skil\u200Cls — rejected: ignorable code point variant of skill root "skills"'), r.stdout);
+    assert.ok(r.stdout.includes('user/omp/agent/skills. — rejected: case variant of skill root "skills"'), r.stdout);
     const alItems = JSON.parse(readFileSync(alResults, 'utf8'));
     assert.equal(alItems.fatal, false, 'an aliased skill root is a per-item rejection, not a refusal');
     assert.deepEqual(alItems.items.find(i => i.item === 'user/omp/agent/MANAGE~1'), { item: 'user/omp/agent/MANAGE~1', status: 'rejected', rule: '8.3 short name of skill root "managed-skills"', at: null, report: 'user/omp/agent/MANAGE~1: 8.3 short name of skill root "managed-skills"; NTFS resolves the 8.3 short name to the long folder, so it installs as managed-skills/ unchecked by the skill gates. Rename the folder to managed-skills/.' });
     assert.deepEqual(alItems.items.find(i => i.item === 'user/omp/agent/skil\u200Cls'), { item: 'user/omp/agent/skil\u200Cls', status: 'rejected', rule: 'ignorable code point variant of skill root "skills"', at: null, report: 'user/omp/agent/skil\u200Cls: ignorable code point variant of skill root "skills"; HFS+ name comparison ignores these code points, so it installs as skills/ unchecked by the skill gates. Rename the folder to skills/.' });
+    assert.deepEqual(alItems.items.find(i => i.item === 'user/omp/agent/skills.'), { item: 'user/omp/agent/skills.', status: 'rejected', rule: 'case variant of skill root "skills"', at: null, report: 'user/omp/agent/skills.: case variant of skill root "skills"; a case-insensitive filesystem installs it as skills/ unchecked by the skill gates. Rename the folder to skills/.' });
   }
 
   // The machine-readable results file: with ALATE_PROVISION_RESULTS set, every run writes
