@@ -274,19 +274,35 @@ notes and the refresh behave as for a file edit.
 - `POST /api/bundle` serves every action. It runs serialized with the import
   chain and the editor, and answers 409 while another write runs.
 - `create` (`{ action, name }`): the name must match the bundle folder rule
-  (`[a-z0-9][a-z0-9-]*`), and `bundles/<name>/` must not exist. The action
-  creates `bundles/<name>/skills.txt` with a two-line comment header, because
-  git tracks no empty folder.
-- `add` and `remove` (`{ action, bundle, kind: 'skill' | 'plugin', name }`):
-  structured item edits cover the two name lists only. A list file that does
-  not exist yet starts with the same comment header. The server keeps the
-  file's line-ending style and its comment and blank lines. Adding a name the
-  file already lists is a refusal, so a save never makes an empty commit.
-- `move` (`{ action, kind, name, from, to }`): `from` is a bundle that names
-  the item; `to` is a bundle name or `shelf`. A move between bundles writes
-  both files in the one save. A move to the shelf removes the name from every
-  bundle that names it. The action refuses when `from` does not name the
-  item, and when `to` is a bundle that already names it.
+  (`[a-z0-9][a-z0-9-]*`), and `bundles/<name>/` must hold no list file, so the
+  action refuses a bundle that only `plugins.txt`, `apt.txt`, `tools.json`,
+  `env.txt` or `requirements.txt` exists under. The action creates
+  `bundles/<name>/skills.txt` with a two-line comment header, because git
+  tracks no empty folder.
+- `add` and `remove`: structured item edits cover all six kinds. `kind` is one of
+  `skill`, `plugin`, `apt`, `env`, `requirements`, `tools`; the payload field is
+  `name` for the two name lists and `item` for the four worker lists (the whole
+  line, or the tool entry as JSON text). A list file that does not exist yet
+  starts with a `# <kind> of bundle <name>` comment header; a new `tools.json`
+  starts as a JSON array holding the one entry. The server keeps the file's
+  line-ending style and its comment and blank lines. Adding an item the file
+  already lists under the same dedup key is a refusal, so a save never makes an
+  empty commit.
+- Dedup keys follow the merge-order section: the first token for apt and env
+  lines, the package name before `==` lowercased for requirements, the entry
+  `name` for tools, the name itself for skills and plugins. A new apt line is
+  one Debian package name per line. The composed file must pass the rules the
+  install applies to that file: `tools.json` entries are declarative objects
+  (`name`, `url`, `sha256`, `unpack`, `bin`), `env.txt` lines are one name plus
+  the optional word `plain`, `requirements.txt` lines are pinned and hashed.
+  `lib/worker-lists.mjs` mirrors those rules; its header names the installer
+  functions it must stay in sync with.
+- `move` (`{ action, kind, name | item, from, to }`): `from` is a bundle that
+  lists the item under its dedup key; `to` is a bundle name or `shelf`. A move
+  between bundles writes both files in the one save. A move to the shelf
+  removes the item, by its dedup key, from every bundle of that kind that
+  lists it. The action refuses when `from` does not list the item, and when
+  `to` is a bundle that already lists it.
 - `assign` and `unassign` (`{ action, project, bundle }`): the server parses
   the stored `projects/projects.json`, changes only that project's `bundles`
   array, and writes the whole manifest back as JSON with two-space indent and
@@ -299,17 +315,16 @@ notes and the refresh behave as for a file edit.
   message the install throws: the list path, the kind, the name. Every
   refusal is a 4xx before any write. A file that changed since the caller
   read it fails with the editor's 409.
-- The four worker lists (apt, tools, env, requirements) stay list-only in the
-  Bundles section: the scan reports their items, and each file name links into
-  the file editor for hand edits. The card adds no structured editor for them;
-  their validators live in the installer, and a `tools.json` entry is an
-  object, not a name.
+- The four worker lists take the same controls as the name lists: their items
+  carry remove and move controls, and the bundle's add form takes their lines
+  and tool entries. The install still owns the validators' source of truth;
+  `lib/worker-lists.mjs` mirrors it and names the functions it follows.
 - A move to the shelf does not touch `workers/<p>/` lists. A name that a
   project's own list still holds stays off the shelf for it, and the row says
   so.
 - Display: each bundle block lists its items by kind (skills, plugins, apt
-  lines, tool names, env lines, requirement pins). Name items carry remove and
-  move controls; each list-file name links to the file editor. Each project
+  lines, tool names, env lines, requirement pins), and every item carries
+  remove and move controls; each list-file name links to the file editor. Each project
   block shows its bundles as removable rows plus a picker of the bundles it
   does not carry yet, and its effective item list per kind with the source of
   each item: `core`, the bundle name, or `workers/<p>`. The merge follows the
@@ -346,6 +361,10 @@ Tests use a temp data repo and a temp home, and each fails before the change:
    item shows on the shelf and in no effective list.
 9. An add of an unknown skill or plugin name refuses with the install's
    message and writes nothing.
+10. The dashboard adds an apt line and a tool entry to a bundle, moves the apt
+   line to another bundle in one save, and removes both; a broken
+   requirements pin and a bundle folder that holds only `apt.txt` refuse as
+   this section says.
 
 The repo check and test commands (the verified chain in `AGENTS.md`, `npm test`)
 exit 0 with the new test files joined into the chain, `package.json`, and
