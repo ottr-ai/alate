@@ -3038,6 +3038,8 @@ try {
   writeFileSync(join(bundleSeed, 'bundles', 'gamedev-2d', 'skills.txt'), 'bundled\nshelfy\n');
   writeFileSync(join(bundleSeed, 'bundles', 'gamedev-2d', 'plugins.txt'), 'plug-two\n');
   writeFileSync(join(bundleSeed, 'bundles', 'gamedev-2d', 'apt.txt'), 'curl\n');
+  mkdirSync(join(bundleSeed, 'bundles', 'toolsonly'), { recursive: true });
+  writeFileSync(join(bundleSeed, 'bundles', 'toolsonly', 'apt.txt'), 'htop\n');
   mkdirSync(join(bundleSeed, 'workers', 'alpha'), { recursive: true });
   writeFileSync(join(bundleSeed, 'workers', 'alpha', 'skills.txt'), 'workeronly\n');
   mkdirSync(join(bundleSeed, 'projects', 'alpha'), { recursive: true });
@@ -3088,6 +3090,13 @@ try {
   r = await postImport(JSON.stringify({ source: bundleDir }));
   assert.equal(r.status, 200, JSON.stringify(await r.json()));
 
+  // create refuses a bundle folder that holds no skills.txt either: toolsonly only
+  // carries apt.txt, the refusal names the bundle, and the disk stays unchanged.
+  r = await postBundle({ action: 'create', name: 'toolsonly' });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, 'bundles/toolsonly: bundle already exists');
+  assert.deepEqual(readdirSync(join(bundleDir, 'bundles', 'toolsonly')), ['apt.txt'], 'the refusal wrote nothing');
+
   // b. create: the folder's list file starts with the comment header, the commit
   // reaches the bare remote, and the inventory names the new bundle.
   r = await postBundle({ action: 'create', name: 'web' });
@@ -3100,7 +3109,7 @@ try {
   assert.equal(bundleDisk('bundles/web/skills.txt'), skillsHeader('web'));
   assert.equal(bundleRemoteText('bundles/web/skills.txt'), skillsHeader('web'));
   assert.equal(bundleSubject(), 'alate: add bundle web');
-  assert.ok(body.state.inventory.bundles.some(b => b.name === 'web'), 'the response state names bundle web');
+  assert.deepEqual(body.state.inventory.bundles.map(b => b.name), ['core', 'gamedev-2d', 'toolsonly', 'web'], 'the response state names every bundle, sorted');
 
   // c. add: the name is the last line on disk and the skill row names its bundle.
   r = await postBundle({ action: 'add', bundle: 'web', kind: 'skill', name: 'shelfy' });
@@ -3191,6 +3200,106 @@ try {
   r = await postBundle({ action: 'teleport', name: 'web' });
   assert.equal(r.status, 400);
   assert.equal((await r.json()).error, 'unknown bundle action');
+
+  // k. worker add (apt): an existing file takes the line as its last line without a
+  // header, and the response inventory shows both lines in file order.
+  r = await postBundle({ action: 'add', bundle: 'toolsonly', kind: 'apt', item: 'curl' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(body.pushed, true);
+  assert.equal(bundleDisk('bundles/toolsonly/apt.txt'), 'htop\ncurl\n', 'no header lands in an existing file');
+  assert.equal(bundleRemoteText('bundles/toolsonly/apt.txt'), 'htop\ncurl\n');
+  const toolsonlyRow = body.state.inventory.bundles.find(b => b.name === 'toolsonly');
+  assert.deepEqual(toolsonlyRow.items.apt, ['htop', 'curl']);
+
+  // l. a line whose dedup key (the package name, =version pin dropped) is already
+  // listed refuses, so a save never makes an empty commit.
+  r = await postBundle({ action: 'add', bundle: 'toolsonly', kind: 'apt', item: 'curl=7.81' });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, 'bundles/toolsonly/apt.txt: already lists package "curl"');
+
+  // m. a line that is not one Debian package name gets the mirrored validator's
+  // message with the composed file's line number, and nothing is written.
+  r = await postBundle({ action: 'add', bundle: 'toolsonly', kind: 'apt', item: 'two words' });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'bundles/toolsonly/apt.txt: apt.txt line 3: "two words" is not a valid apt line (one Debian package name per line)');
+  assert.equal(bundleDisk('bundles/toolsonly/apt.txt'), 'htop\ncurl\n');
+
+  // n. a list file that does not exist yet starts with the one-line comment header.
+  r = await postBundle({ action: 'add', bundle: 'toolsonly', kind: 'env', item: 'LOG_LEVEL plain' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(bundleDisk('bundles/toolsonly/env.txt'), '# env names of bundle toolsonly\nLOG_LEVEL plain\n');
+  assert.equal(bundleRemoteText('bundles/toolsonly/env.txt'), '# env names of bundle toolsonly\nLOG_LEVEL plain\n');
+
+  // o. requirements pins: the first add creates the file, the second lands after the
+  // existing pin, the dedup key is the lowercased package name, and a broken pin
+  // names its line.
+  const ruffPin = 'ruff==0.4.0 --hash=sha256:' + 'b'.repeat(64);
+  const uvPin = 'uv==0.5.0 --hash=sha256:' + 'c'.repeat(64);
+  r = await postBundle({ action: 'add', bundle: 'gamedev-2d', kind: 'requirements', item: ruffPin });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(bundleDisk('bundles/gamedev-2d/requirements.txt'), `# requirement pins of bundle gamedev-2d\n${ruffPin}\n`);
+  r = await postBundle({ action: 'add', bundle: 'gamedev-2d', kind: 'requirements', item: uvPin });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(bundleDisk('bundles/gamedev-2d/requirements.txt'), `# requirement pins of bundle gamedev-2d\n${ruffPin}\n${uvPin}\n`, 'the new pin lands after the existing pin');
+  r = await postBundle({ action: 'add', bundle: 'gamedev-2d', kind: 'requirements', item: 'RUFF==9.9.9 --hash=sha256:' + 'd'.repeat(64) });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, 'bundles/gamedev-2d/requirements.txt: already lists package "ruff"');
+  r = await postBundle({ action: 'add', bundle: 'gamedev-2d', kind: 'requirements', item: 'pytest==7.4.0' });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'bundles/gamedev-2d/requirements.txt: requirements.txt line 4: not a pinned, hashed line (name==version --hash=sha256:<64 hex>)');
+
+  // p. tools entries: a new tools.json is the 2-space JSON array with the one entry,
+  // the next add reformats with both, and the refusals carry the validator's messages.
+  const rgTool = { name: 'ripgrep', url: 'https://example.com/rg.zip', sha256: 'a'.repeat(64), unpack: 'zip', bin: 'bin/rg' };
+  const fdTool = { name: 'fd', url: 'https://example.com/fd.zip', sha256: 'e'.repeat(64), unpack: 'zip', bin: 'bin/fd' };
+  r = await postBundle({ action: 'add', bundle: 'core', kind: 'tools', item: JSON.stringify(rgTool) });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(bundleDisk('bundles/core/tools.json'), `${JSON.stringify([rgTool], null, 2)}\n`, 'the new tools.json is the one entry, 2-space JSON, trailing newline');
+  r = await postBundle({ action: 'add', bundle: 'core', kind: 'tools', item: JSON.stringify(fdTool) });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(bundleDisk('bundles/core/tools.json'), `${JSON.stringify([rgTool, fdTool], null, 2)}\n`, 'both entries in the reformatted array');
+  r = await postBundle({ action: 'add', bundle: 'core', kind: 'tools', item: JSON.stringify(rgTool) });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, 'bundles/core/tools.json: already lists tool "ripgrep"');
+  r = await postBundle({ action: 'add', bundle: 'core', kind: 'tools', item: JSON.stringify({ ...fdTool, name: 'fd-find', sha256: 'nothex' }) });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'bundles/core/tools.json: tools.json entry 3: "sha256" must be 64 lowercase hex characters');
+
+  // q. a worker move between bundles writes both list files in exactly one commit.
+  const commitsBeforeAptMove = bundleCommitCount();
+  r = await postBundle({ action: 'move', kind: 'apt', item: 'curl', from: 'toolsonly', to: 'web' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(body.pushed, true);
+  assert.equal(bundleCommitCount(), commitsBeforeAptMove + 1, 'the move makes exactly one commit');
+  assert.deepEqual(bundleStatFiles(body.commit), ['bundles/toolsonly/apt.txt', 'bundles/web/apt.txt']);
+  assert.equal(bundleRemoteText('bundles/toolsonly/apt.txt'), 'htop\n');
+  assert.equal(bundleRemoteText('bundles/web/apt.txt'), '# apt packages of bundle web\ncurl\n');
+
+  // r. a tool moved to the shelf leaves every bundle tools.json that listed it.
+  r = await postBundle({ action: 'add', bundle: 'gamedev-2d', kind: 'tools', item: JSON.stringify(fdTool) });
+  assert.equal(r.status, 200, JSON.stringify(await r.json()));
+  r = await postBundle({ action: 'move', kind: 'tools', item: JSON.stringify(fdTool), from: 'gamedev-2d', to: 'shelf' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(bundleRemoteText('bundles/core/tools.json'), `${JSON.stringify([rgTool], null, 2)}\n`, 'fd left the core list');
+  assert.equal(bundleRemoteText('bundles/gamedev-2d/tools.json'), '[]\n', 'fd left the gamedev list too, as an empty array');
+
+  // s. removes: the line leaves the file, its header stays, and a missing line is a 404.
+  r = await postBundle({ action: 'remove', bundle: 'web', kind: 'apt', item: 'curl' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(bundleDisk('bundles/web/apt.txt'), '# apt packages of bundle web\n', 'the header stays when its last line leaves');
+  assert.equal(bundleRemoteText('bundles/web/apt.txt'), '# apt packages of bundle web\n');
+  r = await postBundle({ action: 'remove', bundle: 'web', kind: 'apt', item: 'curl' });
+  assert.equal(r.status, 404);
+  assert.equal((await r.json()).error, 'bundles/web/apt.txt: no package "curl"');
 
   // Repo source through the fake GitHub base: fresh clone, one move, one push, and
   // the bare remote carries both file changes in that one commit.
@@ -7296,6 +7405,22 @@ try {
       assert.ok(fileLinks1.length >= 9, 'every list-file name links into the editor');
       assert.ok(fileLinks1.some((a) => a.attrs.href === '#/file/bundles/gamedev-2d/skills.txt'));
 
+      // Worker rows carry the same remove and move controls as the name rows.
+      const aptRow1 = kindRows180(gamedev1, 'Apt').find((r) => r.children[0].textContent === 'libsdl2');
+      const aptControls1 = aptRow1.children.find((c) => c.attrs && c.attrs.class === 'row-controls').children;
+      assert.ok(aptControls1.some((c) => c.tag === 'button' && c.attrs['aria-label'] === 'Remove libsdl2 from gamedev-2d'), 'the apt row carries its Remove button');
+      assert.deepEqual(aptControls1.filter((c) => c.tag === 'select').map((c) => c.attrs['aria-label']), ['Move libsdl2 to'], 'the apt row carries its move select');
+      // The add form offers exactly the six kinds and retitles the input per kind.
+      const addForm1 = flat180(gamedev1).find((e) => e.tag === 'form' && e.attrs && e.attrs.class === 'inline-form');
+      const kindSel1 = flat180(addForm1).find((e) => e.tag === 'select' && e.attrs['aria-label'] === 'Item kind');
+      assert.deepEqual(kindSel1.children.filter((c) => c.tag === 'option').map((c) => c.attrs.value),
+        ['skill', 'plugin', 'apt', 'env', 'requirements', 'tools'], 'the add form offers exactly the six kinds');
+      const addInput1 = flat180(addForm1).find((e) => e.tag === 'input');
+      assert.equal(addInput1.attrs.placeholder, 'skill-name', 'the input starts with the skill placeholder');
+      kindSel1.value = 'apt';
+      kindSel1.fire('change');
+      assert.equal(addInput1.attrs.placeholder, 'package-name', 'the placeholder follows the chosen kind');
+
       // 2. The Shelf part: exactly the shelf-flagged skill and plugin, each with picker and button.
       const shelfPart2 = part180('Shelf', nodes1);
       assert.ok(shelfPart2, 'the Shelf part renders');
@@ -7351,6 +7476,14 @@ try {
       const remove4e = flat180(gamedev4e).find((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Remove shelfy from gamedev-2d');
       assert.deepEqual(await doAction180(() => remove4e.fire('click')),
         { action: 'remove', bundle: 'gamedev-2d', kind: 'skill', name: 'shelfy' });
+      // f. Move the apt line libsdl2 to the shelf: the body sends the singular worker
+      // kind and the item field, like every worker-kind row's controls.
+      const gamedev4f = block180(flat180(galley180.children[0]), 'gamedev-2d');
+      const li4f = flat180(gamedev4f).find((e) => e.tag === 'li' && e.children.some((c) => c.attrs && c.attrs.class === 'item' && c.textContent === 'libsdl2'));
+      const controls4f = li4f.children.find((c) => c.attrs && c.attrs.class === 'row-controls').children;
+      controls4f.find((c) => c.tag === 'select').value = 'shelf';
+      assert.deepEqual(await doAction180(() => controls4f.find((c) => c.tag === 'button' && c.textContent === 'Move').fire('click')),
+        { action: 'move', kind: 'apt', item: 'libsdl2', from: 'gamedev-2d', to: 'shelf' });
 
       // 5. A refused action: the section status carries the message, the button unlocks again.
       failAt180 = posts180.length + 1;

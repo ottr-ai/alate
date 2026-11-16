@@ -154,7 +154,7 @@ This change ships the data side only. A turn does not read the per-project folde
 
 The dashboard inventory scans `bundles/` and reports, per bundle, its list files and its items by kind. A name that the repo does not hold gets a warning on the dashboard. The install itself refuses that name. Each project row shows its `bundles` list, a picker for the bundles it does not carry, and the merged effective lists with the source of each item: `core`, the bundle name, or `workers/<p>`. Each skill and plugin row shows the bundles that name it, or an `on the shelf` marker. The counts row gains the bundle count.
 
-The dashboard also edits. It creates a bundle, adds or removes a skill or plugin name in a bundle, moves a name between bundles or to the shelf, and assigns or unassigns a bundle for a project. The Shelf section lists the items that no bundle and no worker list names, each with an `Add to bundle` picker. Every action goes through `POST /api/bundle`, writes through the file editor's save path, and makes one commit per save. An unknown name gets the install's refusal. The four worker lists stay list-only: their files link into the file editor.
+The dashboard also edits. It creates a bundle, adds or removes a skill or plugin name in a bundle, moves a name between bundles or to the shelf, and assigns or unassigns a bundle for a project. The Shelf section lists the items that no bundle and no worker list names, each with an `Add to bundle` picker. Every action goes through `POST /api/bundle`, writes through the file editor's save path, and makes one commit per save. An unknown name gets the install's refusal. All six kinds take the add, remove, and move controls. The worker list rules mirror the install validators.
 
 ## Skills alate ships
 

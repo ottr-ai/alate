@@ -296,9 +296,9 @@ async function runBundleAction(body, btn, status) {
 }
 
 // One bundle block: title with the list-file count, the file names as links into
-// the editor, the items by kind with remove and move controls on the two name
-// lists, and an add form. The four worker lists stay list-only; their files are
-// the edit path (specs/bundles.md, Editing section).
+// the editor, the items by kind, each with remove and move controls (move targets
+// are the other bundles and the shelf), and an add form over all six kinds. The
+// worker-kind rules mirror the install validators (specs/bundles.md, Editing).
 function bundleBlock(b, bundles, status) {
   const name = b && b.name ? String(b.name) : '';
   const bfiles = arrayOf(b && b.files);
@@ -312,37 +312,49 @@ function bundleBlock(b, bundles, status) {
   const kindBlock = (kind, label) => {
     const names = lists[kind];
     if (!names.length) return null;
-    const named = kind === 'skills' || kind === 'plugins';
+    const actionKind = kind === 'skills' ? 'skill' : kind === 'plugins' ? 'plugin' : kind;
+    const field = actionKind === 'skill' || actionKind === 'plugin' ? 'name' : 'item';
     return h('div', { class: 'kind-block' },
       h('h4', { class: 'kind-label', text: label }),
       h('ul', { class: 'kind-list' }, names.map((raw) => {
         const item = String(raw);
         const li = h('li', null, h('span', { class: 'item', text: item }));
-        if (!named) return li;
-        const nameKind = kind === 'skills' ? 'skill' : 'plugin';
         const move = h('select', { 'aria-label': 'Move ' + item + ' to' },
           h('option', { value: 'shelf', text: 'shelf' }),
           others.map((n) => h('option', { value: n, text: n })));
         const moveBtn = h('button', { type: 'button', class: 'btn quiet', text: 'Move',
           'aria-label': 'Move ' + item + ' from ' + name,
-          onclick: () => runBundleAction({ action: 'move', kind: nameKind, name: item, from: name, to: move.value }, moveBtn, status) });
+          onclick: () => runBundleAction({ action: 'move', kind: actionKind, [field]: item, from: name, to: move.value }, moveBtn, status) });
         const removeBtn = h('button', { type: 'button', class: 'btn danger', text: 'Remove',
           'aria-label': 'Remove ' + item + ' from ' + name,
-          onclick: () => runBundleAction({ action: 'remove', bundle: name, kind: nameKind, name: item }, removeBtn, status) });
+          onclick: () => runBundleAction({ action: 'remove', bundle: name, kind: actionKind, [field]: item }, removeBtn, status) });
         li.append(h('span', { class: 'row-controls' }, removeBtn, move, moveBtn));
         return li;
       })));
   };
   const addId = 'add-item-' + Math.random().toString(36).slice(2, 8);
+  // Placeholder per kind: the shape the kind's validator expects in the input.
+  const placeholders = {
+    skill: 'skill-name', plugin: '@scope/plugin-name', apt: 'package-name',
+    env: 'NAME or NAME plain', requirements: 'name==version --hash=sha256:...',
+    tools: '{"name":"tool","url":"https://...","sha256":"...","unpack":"zip","bin":"bin/tool"}',
+  };
   const kindSel = h('select', { 'aria-label': 'Item kind' },
-    h('option', { value: 'skill', text: 'skill' }), h('option', { value: 'plugin', text: 'plugin' }));
-  const addItem = h('input', { type: 'text', id: addId, autocomplete: 'off', spellcheck: 'false', placeholder: 'skill-name' });
+    h('option', { value: 'skill', text: 'skill' }), h('option', { value: 'plugin', text: 'plugin' }),
+    h('option', { value: 'apt', text: 'apt' }), h('option', { value: 'env', text: 'env' }),
+    h('option', { value: 'requirements', text: 'requirements' }), h('option', { value: 'tools', text: 'tools' }));
+  const addItem = h('input', { type: 'text', id: addId, autocomplete: 'off', spellcheck: 'false', placeholder: placeholders.skill });
+  kindSel.addEventListener('change', () => {
+    addItem.setAttribute('placeholder', placeholders[kindSel.value] || placeholders.skill);
+  });
   const addForm = h('form', { class: 'inline-form' },
     h('label', { for: addId, text: 'Add item to ' + name }), kindSel, addItem,
     h('button', { type: 'submit', class: 'btn quiet', text: 'Add' }));
   addForm.addEventListener('submit', (ev) => {
     ev.preventDefault();
-    runBundleAction({ action: 'add', bundle: name, kind: kindSel.value, name: addItem.value.trim() },
+    const kind = String(kindSel.value);
+    const field = kind === 'skill' || kind === 'plugin' ? 'name' : 'item';
+    runBundleAction({ action: 'add', bundle: name, kind, [field]: addItem.value.trim() },
       addForm.querySelector('button[type="submit"]'), status);
   });
   return h('div', { class: 'project' },

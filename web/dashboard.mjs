@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { assertSourceInside, checkDestination, cloneCommand, dataHost, descriptionText, gitAuthEnv, githubHost, parseDataSpec, redactSecrets, serverGitEnv, SNAP_AGENTS_DIR } from '../lib/data.mjs';
 import { isBundlesMode, mergeLineSources, mergeNamedSources, mergeToolsSources, parseNameList, readBundleFolder } from '../lib/bundles.mjs';
+import { composeWorkerAdd, parseWorkerItems, validateWorkerBytes, workerItemKey } from '../lib/worker-lists.mjs';
 
 /** @typedef {import('node:sqlite').DatabaseSync} DashDb */
 /** @typedef {import('../lib/data.mjs').DataSpec} DataSpec */
@@ -31,6 +32,7 @@ import { isBundlesMode, mergeLineSources, mergeNamedSources, mergeToolsSources, 
 /** @typedef {{ source: SourceInfo, inventory: Inventory | null, previous: Inventory | null, changes: Changes | null, update?: UpdateInfo | null, provision?: unknown }} StateDef */
 /** @typedef {{ name: string, extras?: number, files?: number, live?: string, entries?: InventoryEntry[] }} ProjectListItem */
 /** @typedef {{ rel: string, base: string | null, bytes: Buffer | null, message: string }} EditOp */
+/** @typedef {'skill' | 'plugin' | 'apt' | 'env' | 'requirements' | 'tools'} BundleKind */
 /** @typedef {{ commit: string, pushed: boolean, warning?: string, state: StateDef }} EditResult */
 /** @typedef {Error & { status?: number, snapshotChanged?: boolean }} StatusedError */
 /** @typedef {{ path: string, bytes: number, binary: boolean, content: string | null, hash: string }} StoredFile */
@@ -1010,6 +1012,19 @@ const bundleFolderName = /^[a-z0-9][a-z0-9-]*$/;
 const bundleItemName = kind => (kind === 'skill' ? /^[a-z0-9][a-z0-9-]*$/ : /^(?:@[a-z0-9][a-z0-9-]*\/)?[a-z0-9][a-z0-9-]*$/);
 /** @param {'skill' | 'plugin'} kind @returns {string} */
 const bundleListFile = kind => (kind === 'skill' ? 'skills.txt' : 'plugins.txt');
+// The six singular kinds the structured bundle actions accept (specs/bundles.md, Editing).
+/** @type {BundleKind[]} */
+const ACTION_KINDS = ['skill', 'plugin', 'apt', 'env', 'requirements', 'tools'];
+// The four worker kinds: list file, refusal noun, and the one-line comment header a new
+// file starts with. tools.json starts as a JSON array and takes no header.
+/** @typedef {{ file: string, noun: string, header: (bundle: string) => string | null }} WorkerKindInfo */
+/** @type {Record<'apt' | 'env' | 'requirements' | 'tools', WorkerKindInfo>} */
+const workerKinds = {
+  apt: { file: 'apt.txt', noun: 'package', header: b => `# apt packages of bundle ${b}\n` },
+  env: { file: 'env.txt', noun: 'name', header: b => `# env names of bundle ${b}\n` },
+  requirements: { file: 'requirements.txt', noun: 'package', header: b => `# requirement pins of bundle ${b}\n` },
+  tools: { file: 'tools.json', noun: 'tool', header: () => null },
+};
 // Two-line comment header every created list file starts with.
 /** @param {'skill' | 'plugin'} kind @param {string} bundle @returns {string} */
 const bundleListHeader = (kind, bundle) => `# ${kind === 'skill' ? 'skills' : 'plugins'} of bundle ${bundle}\n# one name per line; # comments and blank lines are ignored\n`;
@@ -1031,6 +1046,60 @@ function storedBytes(db, rel) {
 function storedBundleFiles(db, name) {
   const prefix = `bundles/${name}/`;
   return listStoredFiles(db).map(f => f.path).filter(p => p.startsWith(prefix));
+}
+
+// Dedup key of a worker-kind item body: the key parseWorkerItems computes for a stored
+// line, with the tools entry pre-checked so every add refusal fires before any compose.
+// `rel` names the list in the refusal messages.
+/** @param {'apt' | 'env' | 'requirements' | 'tools'} kind @param {string} item @param {string} rel @returns {string} */
+function workerItemBodyKey(kind, item, rel) {
+  if (kind !== 'tools') return workerItemKey(kind, item);
+  /** @type {unknown} */
+  let parsed;
+  try {
+    parsed = JSON.parse(item);
+  } catch {
+    fail(400, `${rel}: the item is not a JSON object`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) fail(400, `${rel}: the item is not a JSON object`);
+  return toolNameOf(parsed);
+}
+
+/** @param {unknown} entry @returns {string} */
+const toolNameOf = entry => (entry !== null && typeof entry === 'object' && typeof /** @type {{ name?: unknown }} */ (entry).name === 'string')
+  ? /** @type {{ name: string }} */ (entry).name
+  : '';
+
+// Stored items of one worker list, parsed with the list's path so a malformed stored
+// tools.json refuses as a client-safe 400. The three line lists never throw here.
+/** @param {'apt' | 'env' | 'requirements' | 'tools'} kind @param {Buffer | null} bytes @param {string} rel @returns {{ key: string, text: string }[]} */
+function workerItems(kind, bytes, rel) {
+  try {
+    return parseWorkerItems(kind, bytes ?? Buffer.alloc(0), rel);
+  } catch (err) {
+    fail(400, /** @type {Error} */ (err).message);
+  }
+}
+
+// Bytes of a worker list with the first item whose dedup key is key dropped. The line
+// lists keep every other byte: split on \n, splice the one matching line, rejoin.
+// tools.json re-serializes the remaining entries as the canonical 2-space JSON array.
+// The caller has already parsed the list and found the key, so a lost match here is a
+// broken invariant, not a client error.
+/** @param {'apt' | 'env' | 'requirements' | 'tools'} kind @param {Buffer} bytes @param {string} key @returns {Buffer} */
+function dropWorkerItem(kind, bytes, key) {
+  if (kind === 'tools') {
+    const entries = parseWorkerItems('tools', bytes, 'tools.json').map(it => JSON.parse(it.text));
+    const at = entries.findIndex(entry => toolNameOf(entry) === key);
+    if (at === -1) throw new Error('tools.json lost its entry between parse and drop');
+    entries.splice(at, 1);
+    return Buffer.from(`${JSON.stringify(entries, null, 2)}\n`, 'utf8');
+  }
+  const lines = bytes.toString('utf8').split('\n');
+  const at = lines.findIndex(line => line.replace(/#.*/, '').trim() !== '' && workerItemKey(kind, line) === key);
+  if (at === -1) throw new Error('worker list lost its line between parse and drop');
+  lines.splice(at, 1);
+  return Buffer.from(lines.join('\n'), 'utf8');
 }
 
 // Text of a name list after appending name as its last non-empty line: existing lines
@@ -1068,7 +1137,7 @@ function dropBundleName(bytes, name) {
 /**
  * @param {StateDef} state
  * @param {DashDb} db
- * @param {{ action?: unknown, name?: unknown, bundle?: unknown, kind?: unknown, from?: unknown, to?: unknown, project?: unknown }} body
+ * @param {{ action?: unknown, name?: unknown, bundle?: unknown, kind?: unknown, item?: unknown, from?: unknown, to?: unknown, project?: unknown }} body
  * @param {string | undefined} token
  * @param {{ skills: Set<string>, plugins: Set<string> }} known
  * @returns {EditResult}
@@ -1080,76 +1149,144 @@ function applyBundleAction(state, db, body, token, known) {
   let message = '';
   /** @param {string} rel @param {string | null} base @param {Buffer} bytes */
   const stage = (rel, base, bytes) => ops.push({ rel, base, bytes, message });
-  /** @param {unknown} kind @returns {'skill' | 'plugin'} */
-  const listKind = kind => (kind === 'skill' || kind === 'plugin' ? kind : fail(400, 'kind must be "skill" or "plugin"'));
+  /** @param {unknown} kind @returns {BundleKind} */
+  const listKind = kind => (ACTION_KINDS.includes(/** @type {BundleKind} */ (kind)) ? /** @type {BundleKind} */ (kind) : fail(400, 'kind must be one of: skill, plugin, apt, env, requirements, tools'));
   const action = body.action;
   if (action === 'create') {
     const name = typeof body.name === 'string' ? body.name : '';
     if (!bundleFolderName.test(name)) fail(400, `bundles: "${name}" is not a valid bundle folder name`);
-    if (storedBytes(db, `bundles/${name}/skills.txt`) !== null) fail(409, `bundles/${name}: bundle already exists`);
+    // "The folder exists" means any of its list files is stored, so a folder that only
+    // apt.txt (or any other single list) holds refuses create too.
+    if (storedBundleFiles(db, name).length > 0) fail(409, `bundles/${name}: bundle already exists`);
     message = `alate: add bundle ${name}`;
     stage(`bundles/${name}/skills.txt`, null, Buffer.from(bundleListHeader('skill', name), 'utf8'));
   } else if (action === 'add' || action === 'remove') {
     const kind = listKind(body.kind);
     const bundle = typeof body.bundle === 'string' ? body.bundle : '';
-    const name = typeof body.name === 'string' ? body.name : '';
-    const rel = `bundles/${bundle}/${bundleListFile(kind)}`;
+    const workerInfo = kind === 'skill' || kind === 'plugin' ? null : workerKinds[kind];
+    const rel = `bundles/${bundle}/${workerInfo ? workerInfo.file : bundleListFile(/** @type {'skill' | 'plugin'} */ (kind))}`;
     if (!bundleFolderName.test(bundle)) fail(400, `bundles: "${bundle}" is not a valid bundle folder name`);
     const bytes = storedBytes(db, rel);
     if (bytes === null && storedBundleFiles(db, bundle).length === 0) fail(404, `bundles: bundle "${bundle}" has no folder under bundles/`);
-    // Format and known-ness gate an add; a remove only asks whether the list holds the name.
-    if (action === 'add') {
-      if (!bundleItemName(kind).test(name)) fail(400, `${rel}: "${name}" is not a valid ${kind} name`);
-      const knownSet = kind === 'skill' ? known.skills : known.plugins;
-      if (!knownSet.has(name)) fail(400, unknownItemMessage(rel, kind, name));
-    }
-    const listed = parseNameList(bytes ?? Buffer.alloc(0), rel, kind);
-    if (!listed.includes(name)) {
-      if (action === 'remove') fail(404, `${rel}: no ${kind} "${name}"`);
-      message = `alate: add ${kind} ${name} to bundle ${bundle}`;
-      // A list file that does not exist yet starts with the comment header; an existing
-      // one keeps its lines and takes the name as its last non-empty line.
-      stage(rel, bytes === null ? null : sha256(bytes), bytes === null
-        ? Buffer.from(`${bundleListHeader(kind, bundle)}${name}\n`, 'utf8')
-        : Buffer.from(appendBundleName(bytes.toString('utf8'), name), 'utf8'));
+    if (workerInfo) {
+      // The four worker lists carry the whole line (or the tool entry as JSON text) in
+      // `item`; the dedup key decides the add refusals and the remove target, and the
+      // composed bytes must pass the rules the install applies to the file.
+      const workerKind = /** @type {'apt' | 'env' | 'requirements' | 'tools'} */ (kind);
+      const item = typeof body.item === 'string' ? body.item.trim() : '';
+      if (!item) fail(400, `${rel}: the item is empty`);
+      const key = workerItemBodyKey(workerKind, item, rel);
+      if (action === 'add') {
+        // A list file that does not exist yet lists nothing (and an absent tools.json
+        // must not reach the tools parser as empty bytes).
+        if (bytes !== null && workerItems(workerKind, bytes, rel).some(it => it.key === key)) fail(409, `${rel}: already lists ${workerInfo.noun} "${key}"`);
+        message = `alate: add ${kind} ${key} to bundle ${bundle}`;
+        const composed = composeWorkerAdd(workerKind, bytes, item, bytes === null ? workerInfo.header(bundle) : null);
+        try { validateWorkerBytes(workerKind, composed, rel); } catch (err) { fail(400, /** @type {Error} */ (err).message); }
+        stage(rel, bytes === null ? null : sha256(bytes), composed);
+      } else {
+        const hit = bytes === null ? undefined : workerItems(workerKind, bytes, rel).find(it => it.key === key);
+        if (!hit) fail(404, `${rel}: no ${workerInfo.noun} "${key}"`);
+        message = `alate: remove ${kind} ${key} from bundle ${bundle}`;
+        stage(rel, sha256(/** @type {Buffer} */ (bytes)), dropWorkerItem(workerKind, /** @type {Buffer} */ (bytes), key));
+      }
     } else {
-      if (action === 'add') fail(409, `${rel}: already names ${kind} "${name}"`);
-      message = `alate: remove ${kind} ${name} from bundle ${bundle}`;
-      stage(rel, sha256(/** @type {Buffer} */ (bytes)), Buffer.from(dropBundleName(/** @type {Buffer} */ (bytes), name), 'utf8'));
+      // The two name lists keep their body shape and messages; kind is a name kind here.
+      const nameKind = /** @type {'skill' | 'plugin'} */ (kind);
+      const name = typeof body.name === 'string' ? body.name : '';
+      // Format and known-ness gate an add; a remove only asks whether the list holds the name.
+      if (action === 'add') {
+        if (!bundleItemName(nameKind).test(name)) fail(400, `${rel}: "${name}" is not a valid ${kind} name`);
+        const knownSet = nameKind === 'skill' ? known.skills : known.plugins;
+        if (!knownSet.has(name)) fail(400, unknownItemMessage(rel, nameKind, name));
+      }
+      const listed = parseNameList(bytes ?? Buffer.alloc(0), rel, nameKind);
+      if (!listed.includes(name)) {
+        if (action === 'remove') fail(404, `${rel}: no ${kind} "${name}"`);
+        message = `alate: add ${kind} ${name} to bundle ${bundle}`;
+        // A list file that does not exist yet starts with the comment header; an existing
+        // one keeps its lines and takes the name as its last non-empty line.
+        stage(rel, bytes === null ? null : sha256(bytes), bytes === null
+          ? Buffer.from(`${bundleListHeader(nameKind, bundle)}${name}\n`, 'utf8')
+          : Buffer.from(appendBundleName(bytes.toString('utf8'), name), 'utf8'));
+      } else {
+        if (action === 'add') fail(409, `${rel}: already names ${kind} "${name}"`);
+        message = `alate: remove ${kind} ${name} from bundle ${bundle}`;
+        stage(rel, sha256(/** @type {Buffer} */ (bytes)), Buffer.from(dropBundleName(/** @type {Buffer} */ (bytes), name), 'utf8'));
+      }
     }
   } else if (action === 'move') {
     const kind = listKind(body.kind);
-    const name = typeof body.name === 'string' ? body.name : '';
     const from = typeof body.from === 'string' ? body.from : '';
-    const file = bundleListFile(kind);
+    const workerInfo = kind === 'skill' || kind === 'plugin' ? null : workerKinds[kind];
+    const file = workerInfo ? workerInfo.file : bundleListFile(/** @type {'skill' | 'plugin'} */ (kind));
     const fromRel = `bundles/${from}/${file}`;
-    const fromBytes = storedBytes(db, fromRel);
-    if (!parseNameList(fromBytes ?? Buffer.alloc(0), fromRel, kind).includes(name)) fail(409, `${fromRel}: does not name ${kind} "${name}"`);
-    if (body.to === 'shelf') {
-      // The shelf: drop the name from every stored list of this kind that names it,
-      // wherever it sits; `from` only names the refusal when nothing lists the name.
-      const rels = listStoredFiles(db).map(f => f.path).filter(p => p.endsWith(`/${file}`) && p.startsWith('bundles/') && p.split('/').length === 3);
-      const hits = rels.filter(rel => parseNameList(/** @type {Buffer} */ (storedBytes(db, rel)), rel, kind).includes(name));
-      if (hits.length === 0) fail(404, `${fromRel}: no ${kind} "${name}"`);
-      message = `alate: move ${kind} ${name} from ${from} to shelf`;
-      for (const rel of hits) {
-        const bytes = /** @type {Buffer} */ (storedBytes(db, rel));
-        stage(rel, sha256(bytes), Buffer.from(dropBundleName(bytes, name), 'utf8'));
+    if (workerInfo) {
+      // Same semantics as the name lists, keyed on the item's dedup key; the add side
+      // against `to` runs the full worker-kind add gates, and the whole move is one save.
+      const workerKind = /** @type {'apt' | 'env' | 'requirements' | 'tools'} */ (kind);
+      const item = typeof body.item === 'string' ? body.item.trim() : '';
+      if (!item) fail(400, `${fromRel}: the item is empty`);
+      const key = workerItemBodyKey(workerKind, item, fromRel);
+      const fromBytes = storedBytes(db, fromRel);
+      // An absent list file names nothing; an absent tools.json must not reach the tools parser as empty bytes.
+      if (fromBytes === null || !workerItems(workerKind, fromBytes, fromRel).some(it => it.key === key)) fail(409, `${fromRel}: does not name ${kind} "${key}"`);
+      const label = kind === 'tools' ? key : item;
+      if (body.to === 'shelf') {
+        // The shelf: drop the key from every stored list of this kind that lists it,
+        // wherever it sits; `from` only names the refusal when nothing lists the key.
+        const rels = listStoredFiles(db).map(f => f.path).filter(p => p.endsWith(`/${file}`) && p.startsWith('bundles/') && p.split('/').length === 3);
+        const hits = rels.filter(rel => workerItems(workerKind, storedBytes(db, rel), rel).some(it => it.key === key));
+        if (hits.length === 0) fail(404, `${fromRel}: no ${workerInfo.noun} "${key}"`);
+        message = `alate: move ${kind} ${label} from ${from} to shelf`;
+        for (const rel of hits) {
+          const bytes = /** @type {Buffer} */ (storedBytes(db, rel));
+          stage(rel, sha256(bytes), dropWorkerItem(workerKind, bytes, key));
+        }
+      } else {
+        const to = typeof body.to === 'string' ? body.to : '';
+        const toRel = `bundles/${to}/${file}`;
+        const toBytes = storedBytes(db, toRel);
+        if (!bundleFolderName.test(to)) fail(400, `bundles: "${to}" is not a valid bundle folder name`);
+        if (toBytes === null && storedBundleFiles(db, to).length === 0) fail(404, `bundles: bundle "${to}" has no folder under bundles/`);
+        if (toBytes !== null && workerItems(workerKind, toBytes, toRel).some(it => it.key === key)) fail(409, `${toRel}: already lists ${workerInfo.noun} "${key}"`);
+        message = `alate: move ${kind} ${label} from ${from} to ${to}`;
+        const composed = composeWorkerAdd(workerKind, toBytes, item, toBytes === null ? workerInfo.header(to) : null);
+        try { validateWorkerBytes(workerKind, composed, toRel); } catch (err) { fail(400, /** @type {Error} */ (err).message); }
+        stage(fromRel, sha256(/** @type {Buffer} */ (fromBytes)), dropWorkerItem(workerKind, /** @type {Buffer} */ (fromBytes), key));
+        stage(toRel, toBytes === null ? null : sha256(toBytes), composed);
       }
     } else {
-      const to = typeof body.to === 'string' ? body.to : '';
-      const toRel = `bundles/${to}/${file}`;
-      const toBytes = storedBytes(db, toRel);
-      if (!bundleFolderName.test(to)) fail(400, `bundles: "${to}" is not a valid bundle folder name`);
-      if (toBytes === null && storedBundleFiles(db, to).length === 0) fail(404, `bundles: bundle "${to}" has no folder under bundles/`);
-      const knownSet = kind === 'skill' ? known.skills : known.plugins;
-      if (parseNameList(toBytes ?? Buffer.alloc(0), toRel, kind).includes(name)) fail(409, `${toRel}: already names ${kind} "${name}"`);
-      if (!knownSet.has(name)) fail(400, unknownItemMessage(toRel, kind, name));
-      message = `alate: move ${kind} ${name} from ${from} to ${to}`;
-      stage(fromRel, sha256(/** @type {Buffer} */ (fromBytes)), Buffer.from(dropBundleName(/** @type {Buffer} */ (fromBytes), name), 'utf8'));
-      stage(toRel, toBytes === null ? null : sha256(toBytes), toBytes === null
-        ? Buffer.from(`${bundleListHeader(kind, to)}${name}\n`, 'utf8')
-        : Buffer.from(appendBundleName(toBytes.toString('utf8'), name), 'utf8'));
+      const nameKind = /** @type {'skill' | 'plugin'} */ (kind);
+      const name = typeof body.name === 'string' ? body.name : '';
+      const fromBytes = storedBytes(db, fromRel);
+      if (!parseNameList(fromBytes ?? Buffer.alloc(0), fromRel, nameKind).includes(name)) fail(409, `${fromRel}: does not name ${kind} "${name}"`);
+      if (body.to === 'shelf') {
+        // The shelf: drop the name from every stored list of this kind that names it,
+        // wherever it sits; `from` only names the refusal when nothing lists the name.
+        const rels = listStoredFiles(db).map(f => f.path).filter(p => p.endsWith(`/${file}`) && p.startsWith('bundles/') && p.split('/').length === 3);
+        const hits = rels.filter(rel => parseNameList(/** @type {Buffer} */ (storedBytes(db, rel)), rel, nameKind).includes(name));
+        if (hits.length === 0) fail(404, `${fromRel}: no ${kind} "${name}"`);
+        message = `alate: move ${kind} ${name} from ${from} to shelf`;
+        for (const rel of hits) {
+          const bytes = /** @type {Buffer} */ (storedBytes(db, rel));
+          stage(rel, sha256(bytes), Buffer.from(dropBundleName(bytes, name), 'utf8'));
+        }
+      } else {
+        const to = typeof body.to === 'string' ? body.to : '';
+        const toRel = `bundles/${to}/${file}`;
+        const toBytes = storedBytes(db, toRel);
+        if (!bundleFolderName.test(to)) fail(400, `bundles: "${to}" is not a valid bundle folder name`);
+        if (toBytes === null && storedBundleFiles(db, to).length === 0) fail(404, `bundles: bundle "${to}" has no folder under bundles/`);
+        const knownSet = nameKind === 'skill' ? known.skills : known.plugins;
+        if (parseNameList(toBytes ?? Buffer.alloc(0), toRel, nameKind).includes(name)) fail(409, `${toRel}: already names ${kind} "${name}"`);
+        if (!knownSet.has(name)) fail(400, unknownItemMessage(toRel, nameKind, name));
+        message = `alate: move ${kind} ${name} from ${from} to ${to}`;
+        stage(fromRel, sha256(/** @type {Buffer} */ (fromBytes)), Buffer.from(dropBundleName(/** @type {Buffer} */ (fromBytes), name), 'utf8'));
+        stage(toRel, toBytes === null ? null : sha256(toBytes), toBytes === null
+          ? Buffer.from(`${bundleListHeader(nameKind, to)}${name}\n`, 'utf8')
+          : Buffer.from(appendBundleName(toBytes.toString('utf8'), name), 'utf8'));
+      }
     }
   } else if (action === 'assign' || action === 'unassign') {
     const project = typeof body.project === 'string' ? body.project : '';
