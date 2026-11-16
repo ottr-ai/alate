@@ -5340,6 +5340,18 @@ try {
       try { assert.equal(dash.isWritableDir(flagsRo), false, 'a read-only folder reports not writable'); }
       finally { chmodSync(flagsRo, 0o755); }
     }
+    // A repo owned by another uid: git refuses rev-parse there with "dubious ownership",
+    // so the probe must still report a work tree after runGit passes safe.directory for
+    // that dir (fix list 2026-11-16 #63). Root-only, because only root can chown a folder
+    // to another uid; the non-root runner covers the same refusal with the git shim in
+    // the foreign-owned source block near the end of this suite.
+    if (process.platform !== 'win32' && process.getuid?.() === 0) {
+      const flagsForeign = join(w10, 'flags-foreign');
+      mkdirSync(flagsForeign, { recursive: true });
+      assert.equal(git(['init', flagsForeign]).status, 0);
+      assert.equal(spawnSync('chown', ['-R', '65534', flagsForeign]).status, 0);
+      assert.equal(dash.isGitWorkTree(flagsForeign), true, 'a foreign-owned git folder is still a work tree');
+    }
 
     // -- scanInventory: empty repo returns the full default shape.
     ddir('e10');
@@ -7141,6 +7153,94 @@ try {
         assert.ok(after - before <= 3, `the client keeps one worker: 5 imports added ${after - before} threads`);
       }
     } finally { await stopServer(threadSrv); }
+  }
+
+  {
+    // A path source owned by another user stays a git repo for the server (fix list
+    // 2026-11-16 #63): a compose /data bind mount owned by uid 1000 runs a root server,
+    // and git refuses every child in that folder with "dubious ownership" until runGit
+    // passes safe.directory for it. Root runs the real refusal (chown to 65534); a
+    // non-root runner (CI) cannot chown, so a git shim on the server's PATH refuses the
+    // same way unless the argv carries safe.directory for the guarded folder. Windows
+    // has neither chown nor sh and runs the plain folder.
+    const ownCfg = join(tmp, 'server-config-own-edit.json');
+    writeFileSync(ownCfg, JSON.stringify({ apiKey: null }));
+    const ownSeed = join(tmp, 'own-edit-seed');
+    const ownBare = join(tmp, 'own-edit-bare.git');
+    const ownSource = join(tmp, 'own-edit-source');
+    mkdirSync(ownSeed, { recursive: true });
+    writeFileSync(join(ownSeed, 'notes.md'), 'seed notes\n');
+    assert.equal(git(['init', '-q', '-b', 'main', ownSeed]).status, 0);
+    git(['-C', ownSeed, 'config', 'user.name', 't']);
+    git(['-C', ownSeed, 'config', 'user.email', 't@t']);
+    assert.equal(git(['-C', ownSeed, 'add', '-A']).status, 0);
+    assert.equal(git(['-C', ownSeed, 'commit', '-qm', 'seed']).status, 0);
+    assert.equal(git(['init', '-q', '--bare', '-b', 'main', ownBare]).status, 0);
+    assert.equal(git(['-C', ownSeed, 'push', '-q', ownBare, 'main']).status, 0);
+    assert.equal(git(['clone', '-q', ownBare, ownSource]).status, 0);
+    git(['-C', ownSource, 'config', 'user.name', 't']);
+    git(['-C', ownSource, 'config', 'user.email', 't@t']);
+    let ownEnv = testServerEnv;
+    if (process.platform !== 'win32') {
+      if (process.getuid?.() === 0) {
+        assert.equal(spawnSync('chown', ['-R', '65534', ownSource]).status, 0);
+      } else {
+        const shimDir = join(tmp, 'git-own-shim');
+        mkdirSync(shimDir);
+        const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+        assert.ok(realGit, 'the real git binary was found for the ownership shim');
+        const shim = [
+          '#!/bin/sh',
+          "# Test shim: simulates git's dubious-ownership refusal for one guarded source",
+          '# folder. A child that targets the guarded folder through -C fails with git\'s own',
+          '# message unless the argv carries safe.directory for it; everything else passes',
+          '# through to the real git.',
+          `guarded='${ownSource}'`,
+          `guarded2='${realpathSync(ownSource)}'`,
+          `real='${realGit}'`,
+          "target=''",
+          "prev=''",
+          'for arg in "$@"; do',
+          '  if [ "$prev" = "-C" ]; then target="$arg"; fi',
+          '  prev="$arg"',
+          'done',
+          'if [ "$target" = "$guarded" ] || [ "$target" = "$guarded2" ]; then',
+          '  target=refuse',
+          '  for arg in "$@"; do',
+          '    if [ "$arg" = "safe.directory=$guarded" ] || [ "$arg" = "safe.directory=$guarded2" ]; then target=pass; fi',
+          '  done',
+          'fi',
+          'if [ "$target" = refuse ]; then',
+          '  printf "fatal: detected dubious ownership in repository at \'%s\'\\n" "$guarded" >&2',
+          '  exit 128',
+          'fi',
+          'exec "$real" "$@"',
+        ].join('\n');
+        writeFileSync(join(shimDir, 'git'), shim, { mode: 0o755 });
+        ownEnv = { ...testServerEnv, PATH: `${shimDir}${delimiter}${testServerEnv.PATH}` };
+      }
+    }
+    const ownSrv = spawnServer(['--port', '0', '--config', ownCfg, '--db', join(tmp, 'state-own-edit.db')], ownEnv);
+    try {
+      const { apiKey: ownKey, base: ownBase } = await awaitStartup(ownSrv);
+      const ownAuth = { 'Content-Type': 'application/json', Authorization: `Bearer ${ownKey}` };
+      const ownGet = async route => fetch(new URL(route, ownBase), { headers: { Authorization: `Bearer ${ownKey}` } });
+      const ownPut = async b => fetch(new URL('/api/file', ownBase), { method: 'PUT', headers: ownAuth, body: JSON.stringify(b) });
+      const ir = await fetch(new URL(`${ownBase}/api/import`), { method: 'POST', headers: ownAuth, body: JSON.stringify({ source: ownSource }) });
+      assert.equal(ir.status, 200, JSON.stringify(await ir.json()));
+      const health = await (await ownGet('/health')).json();
+      assert.equal(health.git, true, 'a foreign-owned path source still reports git true');
+      assert.equal(health.writable, true, 'the foreign-owned path source reports writable');
+      const notes = await (await ownGet('/api/file?path=notes.md')).json();
+      const er = await ownPut({ path: 'notes.md', content: `${notes.content}edited by the server\n`, base: notes.hash, message: 'test: edit in a foreign-owned source' });
+      const edit = await er.json();
+      assert.equal(er.status, 200, JSON.stringify(edit));
+      assert.ok(edit.commit, 'the edit committed in the foreign-owned work tree');
+      assert.equal(edit.pushed, true, 'the commit pushed to the bare remote');
+      // The test process reads the commit with its own safe.directory (root gets the same refusal).
+      const inspect = args => git(['-C', ownSource, '-c', `safe.directory=${realpathSync(ownSource)}`, ...args]);
+      assert.equal(inspect(['rev-parse', 'HEAD']).stdout.toString().trim(), edit.commit, 'the commit landed in the work tree');
+    } finally { await stopServer(ownSrv); }
   }
 
   // Teardown escalation: a server that ignores SIGTERM (what a mutant can become) must still

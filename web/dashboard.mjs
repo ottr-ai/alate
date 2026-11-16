@@ -1,7 +1,7 @@
 // Dashboard core for the alate web UI: inventory scan and data-repo import.
 // HTTP serving lives in server.ts; this module is transport-free.
 import { createHash } from 'node:crypto';
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -569,10 +569,20 @@ function applyToTree(dir, rel, base, bytes) {
   }
 }
 
-// git in dir; env carries auth through per-process config, never argv or URL.
+// git in dir; env carries auth through per-process config, never argv or URL. A path
+// source is operator config, so runGit trusts exactly that one directory across a uid
+// boundary (a compose /data bind mount owned by another user runs the server as root,
+// and git then refuses every child with "dubious ownership"). git reads safe.directory
+// only from system, global or command-line config, so the -c argument is the only way
+// to pass it, and GIT_CONFIG_* env stays out because it can carry helpers. Resolved,
+// because git compares the entry against the resolved path. For the server's own temp
+// clones the argument changes nothing: their ownership check already passes.
 /** @param {string} dir @param {string[]} args @param {NodeJS.ProcessEnv} [env] */
 function runGit(dir, args, env = serverGitEnv()) {
-  return spawnSync('git', ['-C', dir, ...args], { env, encoding: 'utf8' });
+  /** @type {string[]} */
+  let safe = [];
+  try { safe = ['-c', `safe.directory=${realpathSync(dir)}`]; } catch { /* a missing dir is git's own error */ }
+  return spawnSync('git', ['-C', dir, ...safe, ...args], { env, encoding: 'utf8' });
 }
 
 // Repo-source git (alate's own temp clone, ls-remote, push with the token): the isolated
