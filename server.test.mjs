@@ -3016,6 +3016,213 @@ try {
   assert.equal(r.status, 404);
   assert.ok((await r.json()).error.includes('no stored file at only.md'), 'the 404 names the file');
 
+  // Bundle actions through POST /api/bundle: every action validates against the stored
+  // snapshot and writes through the editor's save path (specs/bundles.md, Editing). Own
+  // server/config/db, so the first probe sees a state with no source configured.
+  await new Promise(resolve => { child.once('close', resolve); child.kill(); });
+  const fm = d => `---\ndescription: ${d}\n---\n`;
+  const skillsHeader = name => `# skills of bundle ${name}\n# one name per line; # comments and blank lines are ignored\n`;
+  const bundleSeed = join(tmp, 'bundle-seed');
+  const bundleDir = join(tmp, 'bundle-dir');
+  const bundleBare = join(tmp, 'gh', 'demo', 'bundata.git');
+  mkdirSync(join(bundleSeed, 'user', 'omp', 'plugins'), { recursive: true });
+  writeFileSync(join(bundleSeed, 'user', 'omp', 'plugins', 'package.json'), `${JSON.stringify({ dependencies: { '@scope/plug': '^1.0.0', 'plug-two': '^1.0.0', loneplug: '^1.0.0' } }, null, 2)}\n`);
+  for (const skill of ['shared', 'bundled', 'shelfy']) {
+    mkdirSync(join(bundleSeed, 'user', 'omp', 'agent', 'skills', skill), { recursive: true });
+    writeFileSync(join(bundleSeed, 'user', 'omp', 'agent', 'skills', skill, 'SKILL.md'), fm(`${skill} skill`));
+  }
+  mkdirSync(join(bundleSeed, 'bundles', 'core'), { recursive: true });
+  writeFileSync(join(bundleSeed, 'bundles', 'core', 'skills.txt'), 'shared\n');
+  writeFileSync(join(bundleSeed, 'bundles', 'core', 'plugins.txt'), '@scope/plug\n');
+  mkdirSync(join(bundleSeed, 'bundles', 'gamedev-2d'), { recursive: true });
+  writeFileSync(join(bundleSeed, 'bundles', 'gamedev-2d', 'skills.txt'), 'bundled\nshelfy\n');
+  writeFileSync(join(bundleSeed, 'bundles', 'gamedev-2d', 'plugins.txt'), 'plug-two\n');
+  writeFileSync(join(bundleSeed, 'bundles', 'gamedev-2d', 'apt.txt'), 'curl\n');
+  mkdirSync(join(bundleSeed, 'workers', 'alpha'), { recursive: true });
+  writeFileSync(join(bundleSeed, 'workers', 'alpha', 'skills.txt'), 'workeronly\n');
+  mkdirSync(join(bundleSeed, 'projects', 'alpha'), { recursive: true });
+  mkdirSync(join(bundleSeed, 'projects', 'beta'), { recursive: true });
+  writeFileSync(join(bundleSeed, 'projects', 'projects.json'), `${JSON.stringify({ contextFiles: [], projects: { alpha: { extras: ['s.md'], bundles: ['gamedev-2d'] }, beta: ['s.md'] } }, null, 2)}\n`);
+  writeFileSync(join(bundleSeed, 'projects', 'alpha', 's.md'), 'alpha context\n');
+  writeFileSync(join(bundleSeed, 'projects', 'beta', 's.md'), 'beta context\n');
+  assert.equal(git(['init', '-q', '-b', 'main', bundleSeed]).status, 0);
+  git(['-C', bundleSeed, 'config', 'user.name', 't']);
+  git(['-C', bundleSeed, 'config', 'user.email', 't@t']);
+  assert.equal(git(['-C', bundleSeed, 'add', '-A']).status, 0);
+  assert.equal(git(['-C', bundleSeed, 'commit', '-qm', 'seed']).status, 0);
+  assert.equal(git(['init', '-q', '--bare', '-b', 'main', bundleBare]).status, 0);
+  assert.equal(git(['-C', bundleSeed, 'push', '-q', bundleBare, 'main']).status, 0);
+  assert.equal(git(['clone', '-q', bundleBare, bundleDir]).status, 0);
+  git(['-C', bundleDir, 'config', 'user.name', 't']);
+  git(['-C', bundleDir, 'config', 'user.email', 't@t']);
+  const bundleDisk = (rel, root = bundleDir) => readFileSync(join(root, ...rel.split('/')), 'utf8');
+  const bundleRemoteText = (rel, bare = bundleBare) => git(['--git-dir', bare, 'show', `main:${rel}`], { encoding: 'utf8' }).stdout.replaceAll('\r\n', '\n');
+  const bundleSubject = (bare = bundleBare) => git(['--git-dir', bare, 'log', '-1', '--format=%s'], { encoding: 'utf8' }).stdout.trim();
+  const bundleStatFiles = (sha, bare = bundleBare) => git(['--git-dir', bare, 'show', '--stat', '--format=', sha], { encoding: 'utf8' })
+    .stdout.split('\n').filter(l => l.includes(' | ')).map(l => l.split(' | ')[0].trim()).sort();
+  const bundleCommitCount = (bare = bundleBare) => Number(git(['--git-dir', bare, 'rev-list', '--count', 'main'], { encoding: 'utf8' }).stdout.trim());
+
+  child = spawnServer(['--port', '0', '--config', join(tmp, 'server-config-bundle.json'), '--db', join(tmp, 'state-bundle.db')]);
+  base = await new Promise((resolve, reject) => {
+    let buf = '';
+    child.stdout.on('data', chunk => {
+      buf += chunk;
+      const k = /alate API key: (\S+)\n/.exec(buf);
+      const l = /alate server on (http:\/\/127\.0\.0\.1:\d+)\n/.exec(buf);
+      if (k) apiKey = k[1];
+      if (k && l) resolve(l[1]);
+    });
+    child.once('exit', code => reject(new Error(`bundle server exited early (${code})`)));
+    setTimeout(() => reject(new Error(`bundle server did not start; got: ${buf}`)), 10_000).unref();
+  });
+  const postBundle = async b => fetch(new URL('/api/bundle', base), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify(b) });
+  const bundleToken = 'alate-bundle-token-4e08';
+  assert.equal((await postJson('/api/settings', { token: bundleToken })).status, 200);
+
+  // a. No source configured: the action refuses before anything runs.
+  r = await postBundle({ action: 'create', name: 'web' });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'no data source configured');
+
+  // Path source: the clone twin of the seed, pushing to the bare remote.
+  r = await postImport(JSON.stringify({ source: bundleDir }));
+  assert.equal(r.status, 200, JSON.stringify(await r.json()));
+
+  // b. create: the folder's list file starts with the comment header, the commit
+  // reaches the bare remote, and the inventory names the new bundle.
+  r = await postBundle({ action: 'create', name: 'web' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(body.ok, true);
+  assert.match(body.commit, /^[0-9a-f]{40}$/);
+  assert.equal(body.pushed, true);
+  assert.equal(body.state.source.kind, 'path');
+  assert.equal(bundleDisk('bundles/web/skills.txt'), skillsHeader('web'));
+  assert.equal(bundleRemoteText('bundles/web/skills.txt'), skillsHeader('web'));
+  assert.equal(bundleSubject(), 'alate: add bundle web');
+  assert.ok(body.state.inventory.bundles.some(b => b.name === 'web'), 'the response state names bundle web');
+
+  // c. add: the name is the last line on disk and the skill row names its bundle.
+  r = await postBundle({ action: 'add', bundle: 'web', kind: 'skill', name: 'shelfy' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(body.pushed, true);
+  assert.equal(bundleDisk('bundles/web/skills.txt'), `${skillsHeader('web')}shelfy\n`);
+  // gamedev-2d still names shelfy here, so the row carries both bundles, web included.
+  const shelfyRow = body.state.inventory.user.skills.find(s => s.name === 'shelfy');
+  assert.deepEqual([...shelfyRow.bundles].sort(), ['gamedev-2d', 'web']);
+
+  // d. assign: the manifest keeps its shape and key order, beta gains the bundle,
+  // and beta's effective list shows the bundle skill with its source.
+  r = await postBundle({ action: 'assign', project: 'beta', bundle: 'web' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(body.pushed, true);
+  const manifestText = bundleDisk('projects/projects.json');
+  const manifest = JSON.parse(manifestText);
+  assert.deepEqual(manifest.projects.beta, { extras: ['s.md'], bundles: ['web'] });
+  assert.deepEqual(manifest.projects.alpha, { extras: ['s.md'], bundles: ['gamedev-2d'] }, 'the untouched project keeps its value');
+  assert.equal(manifestText, `${JSON.stringify(manifest, null, 2)}\n`, 'the manifest is 2-space JSON with a trailing newline');
+  const beta = body.state.inventory.projects.named.find(p => p.name === 'beta');
+  assert.deepEqual(beta.bundles, ['web']);
+  assert.ok(beta.effective.skills.some(e => e.item === 'shelfy' && e.source === 'web'), "beta's effective list shows shelfy from web");
+
+  // e. move between bundles: exactly one new commit on the bare remote carrying
+  // exactly the two list files.
+  const commitsBeforeMove = bundleCommitCount();
+  r = await postBundle({ action: 'move', kind: 'skill', name: 'bundled', from: 'gamedev-2d', to: 'web' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(body.pushed, true);
+  assert.equal(bundleCommitCount(), commitsBeforeMove + 1, 'the move makes exactly one commit');
+  assert.deepEqual(bundleStatFiles(body.commit), ['bundles/gamedev-2d/skills.txt', 'bundles/web/skills.txt']);
+  assert.equal(bundleRemoteText('bundles/gamedev-2d/skills.txt'), 'shelfy\n');
+  assert.equal(bundleRemoteText('bundles/web/skills.txt'), `${skillsHeader('web')}shelfy\nbundled\n`);
+
+  // f. move to the shelf: the name leaves every bundle that names it and no
+  // effective list shows it any more.
+  r = await postBundle({ action: 'move', kind: 'skill', name: 'shelfy', from: 'web', to: 'shelf' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(body.pushed, true);
+  assert.equal(bundleRemoteText('bundles/web/skills.txt'), `${skillsHeader('web')}bundled\n`);
+  assert.equal(bundleRemoteText('bundles/gamedev-2d/skills.txt'), '', 'the shelf move cleared the other naming bundle too');
+  assert.deepEqual(bundleStatFiles(body.commit), ['bundles/gamedev-2d/skills.txt', 'bundles/web/skills.txt']);
+  const shelfyAfter = body.state.inventory.user.skills.find(s => s.name === 'shelfy');
+  assert.equal(shelfyAfter.shelf, true);
+  assert.deepEqual(shelfyAfter.bundles, []);
+  for (const project of body.state.inventory.projects.named) {
+    assert.equal(project.effective.skills.some(e => e.item === 'shelfy'), false, `${project.name}'s effective list lost shelfy`);
+  }
+
+  // g. unknown skill name: the install's refusal, byte for byte, and no write.
+  const webBeforeRefusal = bundleDisk('bundles/web/skills.txt');
+  r = await postBundle({ action: 'add', bundle: 'web', kind: 'skill', name: 'ghost-skill' });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'bundles/web/skills.txt: unknown skill "ghost-skill" (the data repo holds no skill folder of that name)');
+  assert.equal(bundleDisk('bundles/web/skills.txt'), webBeforeRefusal, 'the refusal wrote nothing');
+
+  // h. unknown plugin name: the plugin variant of the same refusal.
+  r = await postBundle({ action: 'add', bundle: 'gamedev-2d', kind: 'plugin', name: 'ghost-plug' });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'bundles/gamedev-2d/plugins.txt: unknown plugin "ghost-plug" (the data repo holds no plugin of that name)');
+
+  // i. assigning an unknown bundle: the manifest's refusal with the folder hint.
+  r = await postBundle({ action: 'assign', project: 'beta', bundle: 'nope' });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'projects.json: project "beta" names unknown bundle "nope" (no folder bundles/nope/)');
+
+  // j. The remaining refusals, each with its exact message.
+  r = await postBundle({ action: 'add', bundle: 'core', kind: 'skill', name: 'shared' });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, 'bundles/core/skills.txt: already names skill "shared"');
+  r = await postBundle({ action: 'remove', bundle: 'web', kind: 'skill', name: 'ghost-skill' });
+  assert.equal(r.status, 404);
+  assert.equal((await r.json()).error, 'bundles/web/skills.txt: no skill "ghost-skill"');
+  r = await postBundle({ action: 'move', kind: 'skill', name: 'shared', from: 'gamedev-2d', to: 'web' });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, 'bundles/gamedev-2d/skills.txt: does not name skill "shared"');
+  r = await postBundle({ action: 'create', name: 'Web' });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'bundles: "Web" is not a valid bundle folder name');
+  r = await postBundle({ action: 'create', name: 'web' });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, 'bundles/web: bundle already exists');
+  r = await postBundle({ action: 'teleport', name: 'web' });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'unknown bundle action');
+
+  // Repo source through the fake GitHub base: fresh clone, one move, one push, and
+  // the bare remote carries both file changes in that one commit.
+  const bundleSeed2 = join(tmp, 'bundle-seed-2');
+  const bundleBare2 = join(tmp, 'gh', 'demo', 'bundata2.git');
+  for (const skill of ['shared', 'nomad']) {
+    mkdirSync(join(bundleSeed2, 'user', 'omp', 'agent', 'skills', skill), { recursive: true });
+    writeFileSync(join(bundleSeed2, 'user', 'omp', 'agent', 'skills', skill, 'SKILL.md'), fm(`${skill} skill`));
+  }
+  mkdirSync(join(bundleSeed2, 'bundles', 'core'), { recursive: true });
+  writeFileSync(join(bundleSeed2, 'bundles', 'core', 'skills.txt'), 'shared\n');
+  mkdirSync(join(bundleSeed2, 'bundles', 'hold'), { recursive: true });
+  writeFileSync(join(bundleSeed2, 'bundles', 'hold', 'skills.txt'), 'nomad\n');
+  assert.equal(git(['init', '-q', '-b', 'main', bundleSeed2]).status, 0);
+  git(['-C', bundleSeed2, 'config', 'user.name', 't']);
+  git(['-C', bundleSeed2, 'config', 'user.email', 't@t']);
+  assert.equal(git(['-C', bundleSeed2, 'add', '-A']).status, 0);
+  assert.equal(git(['-C', bundleSeed2, 'commit', '-qm', 'seed']).status, 0);
+  assert.equal(git(['init', '-q', '--bare', '-b', 'main', bundleBare2]).status, 0);
+  assert.equal(git(['-C', bundleSeed2, 'push', '-q', bundleBare2, 'main']).status, 0);
+  r = await postImport(JSON.stringify({ source: 'https://github.com/demo/bundata2.git', kind: 'repo' }));
+  assert.equal(r.status, 200, JSON.stringify(await r.json()));
+  r = await postBundle({ action: 'move', kind: 'skill', name: 'nomad', from: 'hold', to: 'core' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(body.pushed, true);
+  assert.equal(body.state.source.importedSha, body.commit, 'state carries the new commit');
+  assert.equal(bundleSubject(bundleBare2), 'alate: move skill nomad from hold to core');
+  assert.deepEqual(bundleStatFiles(body.commit, bundleBare2), ['bundles/core/skills.txt', 'bundles/hold/skills.txt']);
+  assert.equal(bundleRemoteText('bundles/core/skills.txt', bundleBare2), 'shared\nnomad\n');
+  assert.equal(bundleRemoteText('bundles/hold/skills.txt', bundleBare2), '');
+
   assert.deepEqual(readdirSync(serverTmp).filter(name => /^alate-(?:dashboard|snapshot)-/.test(name)), [], 'the editor removed its temp clones');
 
   console.log('server ok');
@@ -5459,6 +5666,7 @@ try {
         contextFiles: ['ctx.md'],
         named: [{
           name: 'alpha', extras: 2, files: 3, live: 'off', bundles: [],
+          effective: { skills: [], plugins: [], apt: [], env: [], requirements: [], tools: [] },
           entries: [
             { path: 's1.md', bytes: 4, status: 'unknown' },
             { path: 's2.md', bytes: 4, status: 'unknown' },
@@ -5505,6 +5713,7 @@ try {
     assert.deepEqual(live.projects.named, [
       {
         name: 'alpha', extras: 7, files: 3, live: 'checked', bundles: [],
+        effective: { skills: [], plugins: [], apt: [], env: [], requirements: [], tools: [] },
         entries: [
           { path: 'a0.md', bytes: 2, status: 'uncaptured' },
           { path: 'ctx.md', bytes: 4, status: 'uncaptured' },
@@ -5514,8 +5723,8 @@ try {
           { path: 'z9.md', bytes: 2, status: 'uncaptured' },
         ],
       },
-      { name: 'esc', extras: 0, files: 0, live: 'off', bundles: [], entries: [] },
-      { name: 'ghost', extras: 0, files: 0, live: 'gone', bundles: [], entries: [] },
+      { name: 'esc', extras: 0, files: 0, live: 'off', bundles: [], effective: { skills: [], plugins: [], apt: [], env: [], requirements: [], tools: [] }, entries: [] },
+      { name: 'ghost', extras: 0, files: 0, live: 'gone', bundles: [], effective: { skills: [], plugins: [], apt: [], env: [], requirements: [], tools: [] }, entries: [] },
     ]);
     assert.deepEqual(live.warnings, [
       'alpha: rejected unsafe snapshot path "../nope.md"',
@@ -5703,8 +5912,8 @@ try {
     }));
     const bnd = scan10('bnd10');
     assert.deepEqual(bnd.bundles, [
-      { name: 'core', files: ['plugins.txt', 'skills.txt', 'tools.json'], skills: ['shared'], plugins: ['@scope/plug'] },
-      { name: 'gamedev-2d', files: ['apt.txt', 'plugins.txt', 'skills.txt'], skills: ['bundled', 'shelfy'], plugins: ['plug-two'] },
+      { name: 'core', files: ['plugins.txt', 'skills.txt', 'tools.json'], skills: ['shared'], plugins: ['@scope/plug'], items: { apt: [], tools: ['ripgrep'], env: [], requirements: [] } },
+      { name: 'gamedev-2d', files: ['apt.txt', 'plugins.txt', 'skills.txt'], skills: ['bundled', 'shelfy'], plugins: ['plug-two'], items: { apt: ['curl'], tools: [], env: [], requirements: [] } },
     ]);
     assert.deepEqual(bnd.user.skills, [
       { name: 'bundled', origin: 'skills', path: 'user/omp/agent/skills/bundled/SKILL.md', description: 'bundled skill', bundles: ['gamedev-2d'], shelf: false },
@@ -5719,8 +5928,27 @@ try {
       { name: 'loneplug', version: '^3.0.0', origin: 'package.json', bundles: [], shelf: true },
     ]);
     assert.deepEqual(bnd.projects.named, [
-      { name: 'alpha', extras: 1, files: 1, live: 'off', bundles: ['gamedev-2d'], entries: [{ path: 's.md', bytes: 2, status: 'unknown' }] },
-      { name: 'beta', extras: 1, files: 1, live: 'off', bundles: [], entries: [{ path: 's.md', bytes: 2, status: 'unknown' }] },
+      {
+        name: 'alpha', extras: 1, files: 1, live: 'off', bundles: ['gamedev-2d'],
+        effective: {
+          skills: [{ item: 'shared', source: 'core' }, { item: 'bundled', source: 'gamedev-2d' }, { item: 'shelfy', source: 'gamedev-2d' }, { item: 'workeronly', source: 'workers/alpha' }],
+          plugins: [{ item: '@scope/plug', source: 'core' }, { item: 'plug-two', source: 'gamedev-2d' }],
+          apt: [{ item: 'curl', source: 'gamedev-2d' }],
+          env: [], requirements: [],
+          tools: [{ item: 'ripgrep', source: 'core' }],
+        },
+        entries: [{ path: 's.md', bytes: 2, status: 'unknown' }],
+      },
+      {
+        name: 'beta', extras: 1, files: 1, live: 'off', bundles: [],
+        effective: {
+          skills: [{ item: 'shared', source: 'core' }],
+          plugins: [{ item: '@scope/plug', source: 'core' }],
+          apt: [], env: [], requirements: [],
+          tools: [{ item: 'ripgrep', source: 'core' }],
+        },
+        entries: [{ path: 's.md', bytes: 2, status: 'unknown' }],
+      },
     ]);
     assert.deepEqual(bnd.counts, { rules: 0, skills: 5, plugins: 3, extensions: 0, projects: 2, bundles: 2, userFiles: 6 });
     assert.deepEqual(bnd.warnings, []);
@@ -5744,8 +5972,8 @@ try {
     }));
     const bw = scan10('bw10');
     assert.deepEqual(bw.bundles, [
-      { name: 'known', files: ['plugins.txt', 'skills.txt'], skills: ['real'], plugins: ['realplug'] },
-      { name: 'soft', files: ['plugins.txt', 'skills.txt'], skills: ['ghost-skill'], plugins: ['ghost-plug'] },
+      { name: 'known', files: ['plugins.txt', 'skills.txt'], skills: ['real'], plugins: ['realplug'], items: { apt: [], tools: [], env: [], requirements: [] } },
+      { name: 'soft', files: ['plugins.txt', 'skills.txt'], skills: ['ghost-skill'], plugins: ['ghost-plug'], items: { apt: [], tools: [], env: [], requirements: [] } },
     ]);
     assert.deepEqual(bw.warnings, [
       'workers/gamma/skills.txt:1: "!!!" is not a valid skill name',
@@ -6819,6 +7047,343 @@ try {
       }
     } finally {
       for (const [g, d] of Object.entries(saved80)) {
+        if (d) Object.defineProperty(globalThis, g, d);
+        else delete globalThis[g];
+      }
+    }
+  }
+
+  // 81. The bundles dashboard (specs/bundles.md "### Editing (ALAT-180)"): DOM-level checks
+  // over the three editing surfaces: the Bundles section, the per-project blocks, and the
+  // Shelf. Same headless boot as section 80, with two differences: the stub elements record
+  // their addEventListener listeners, so clicks, change events, and form submits actually
+  // fire, and the fetch stub records every POST /api/bundle body, so each action's exact
+  // payload is asserted. A second import boots app.js over a state without bundles, where
+  // none of the three surfaces may render.
+  {
+    const ids180 = new Map();
+    const globals180 = ['document', 'window', 'Node', 'navigator', 'matchMedia', 'localStorage', 'location', 'setInterval', 'fetch'];
+    const saved180 = Object.fromEntries(globals180.map((g) => [g, Object.getOwnPropertyDescriptor(globalThis, g)]));
+    class StubNode180 {}
+    class StubText180 extends StubNode180 {
+      constructor(text) { super(); this.text = text; }
+      get textContent() { return this.text; }
+    }
+    class StubEl180 extends StubNode180 {
+      constructor(tag) {
+        super();
+        this.tag = tag;
+        this.children = [];
+        this.attrs = {};
+        this.dataset = {};
+        this.style = { setProperty() {} };
+        this.hidden = false;
+        this.scrollTop = 0;
+        this._text = null;
+        this._disabled = false;
+        this.disabledFlips = [];
+        this.listeners = {};
+      }
+      get textContent() { return this._text != null ? this._text : this.children.map((c) => c.textContent).join(''); }
+      set textContent(v) { this._text = String(v); this.children.length = 0; }
+      get className() { return this.attrs.class || ''; }
+      set className(v) { this.attrs.class = v; }
+      get classList() { return { toggle() {}, remove() {}, add() {}, contains: () => false }; }
+      get disabled() { return this._disabled; }
+      set disabled(v) { this._disabled = v === true; this.disabledFlips.push(this._disabled); }
+      get value() { return this.attrs.value || ''; }
+      set value(v) { this.attrs.value = String(v); }
+      get firstChild() { return this.children[0]; }
+      get open() { return this.attrs.open !== undefined; }
+      set open(v) { if (v) this.attrs.open = ''; else delete this.attrs.open; }
+      get title() { return this.attrs.title || ''; }
+      set title(v) { this.attrs.title = v; }
+      setAttribute(k, v) { this.attrs[k] = v; }
+      removeAttribute(k) { delete this.attrs[k]; }
+      append(...kids) { for (const k of kids) if (k != null && k !== false) this.children.push(k); }
+      // Listeners are recorded per type; fire() invokes them, so the test drives the real handlers.
+      addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
+      fire(type, ev) { for (const fn of this.listeners[type] || []) fn(ev || { preventDefault() {} }); }
+      querySelector() { return new StubEl180('a'); }
+      querySelectorAll() { return []; }
+      focus() {}
+    }
+    const document180 = {
+      documentElement: new StubEl180('html'),
+      body: new StubEl180('body'),
+      createElement: (tag) => new StubEl180(tag),
+      createTextNode: (t) => new StubText180(String(t)),
+      getElementById: (id) => {
+        if (!ids180.has(id)) ids180.set(id, new StubEl180('div'));
+        return ids180.get(id);
+      },
+    };
+    const sha180 = 'c'.repeat(64);
+    const now180 = new Date().toISOString();
+    const pytest180 = 'pytest==7.4.0 --hash=sha256:' + '0'.repeat(64);
+    const state180 = {
+      source: { kind: 'repo', name: 'demo/data', ref: 'main', importedSha: sha180, importedAt: now180 },
+      updates: { updates: [], checkedAt: now180 },
+      inventory: {
+        rules: [],
+        warnings: [],
+        user: {
+          configFiles: [], others: [], extensions: [],
+          skills: [
+            { path: 'user/omp/agent/skills/shared/SKILL.md', name: 'shared', description: 'Installs everywhere.', origin: 'https://github.com/demo/shared', bundles: ['core'], shelf: false },
+            { path: 'user/omp/agent/skills/bundled/SKILL.md', name: 'bundled', description: 'Bundle-only skill.', origin: 'https://github.com/demo/bundled', bundles: ['gamedev-2d'], shelf: false },
+            { path: 'user/omp/agent/skills/shelfy/SKILL.md', name: 'shelfy', description: 'Named by one bundle.', origin: 'https://github.com/demo/shelfy', bundles: ['gamedev-2d'], shelf: false },
+            { path: 'user/omp/agent/skills/workeronly/SKILL.md', name: 'workeronly', description: 'Worker list only.', origin: 'https://github.com/demo/workeronly', bundles: [] },
+            { path: 'user/omp/agent/managed-skills/mshelf/SKILL.md', name: 'mshelf', description: 'Waiting on the shelf.', origin: 'https://github.com/demo/mshelf', bundles: [], shelf: true },
+          ],
+          plugins: [
+            { name: '@scope/plug', origin: 'demo/scope-plug', version: '1.4.0', bundles: ['core'] },
+            { name: 'plug-two', origin: 'demo/plug-two', version: '0.9.2', bundles: ['gamedev-2d'] },
+            { name: 'loneplug', origin: 'demo/loneplug', version: '2.0.1', bundles: [], shelf: true },
+          ],
+        },
+        bundles: [
+          { name: 'core', files: ['apt.txt', 'env.txt', 'plugins.txt', 'skills.txt', 'tools.json'], skills: ['shared'], plugins: ['@scope/plug'],
+            items: { apt: ['curl'], tools: ['ripgrep'], env: ['LOG_LEVEL', 'plain TIMEOUT'], requirements: [] } },
+          { name: 'gamedev-2d', files: ['apt.txt', 'plugins.txt', 'requirements.txt', 'skills.txt'], skills: ['bundled', 'shelfy'], plugins: ['plug-two'],
+            items: { apt: ['libsdl2'], tools: [], env: [], requirements: [pytest180] } },
+        ],
+        projects: {
+          contextFiles: [],
+          named: [
+            { name: 'alpha', extras: 0, files: 0, live: 'off', bundles: ['gamedev-2d'], entries: [], effective: {
+              skills: [
+                { item: 'shared', source: 'core' }, { item: 'bundled', source: 'gamedev-2d' },
+                { item: 'shelfy', source: 'gamedev-2d' }, { item: 'workeronly', source: 'workers/alpha' },
+              ],
+              plugins: [{ item: '@scope/plug', source: 'core' }, { item: 'plug-two', source: 'gamedev-2d' }],
+              apt: [{ item: 'curl', source: 'core' }, { item: 'libsdl2', source: 'gamedev-2d' }],
+              env: [], requirements: [], tools: [{ item: 'ripgrep', source: 'core' }],
+            } },
+            { name: 'beta', extras: 0, files: 0, live: 'off', bundles: [], entries: [], effective: {
+              skills: [{ item: 'shared', source: 'core' }],
+              plugins: [{ item: '@scope/plug', source: 'core' }],
+              apt: [{ item: 'curl', source: 'core' }],
+              env: [], requirements: [], tools: [{ item: 'ripgrep', source: 'core' }],
+            } },
+          ],
+        },
+      },
+    };
+    const files180 = [
+      { path: 'apt.txt', bytes: 40 },
+      { path: 'bundles/core/apt.txt', bytes: 24 },
+      { path: 'bundles/gamedev-2d/skills.txt', bytes: 32 },
+      { path: 'projects/projects.json', bytes: 512 },
+      { path: 'user/omp/agent/managed-skills/mshelf/SKILL.md', bytes: 300 },
+    ];
+    // The plain boot's state: the same repo with no bundles/, no shelf flags, and no
+    // per-project effective lists, so none of the three surfaces may render.
+    const plainState180 = {
+      source: state180.source,
+      updates: state180.updates,
+      inventory: {
+        rules: [], warnings: [],
+        user: {
+          configFiles: [], others: [], extensions: [],
+          skills: state180.inventory.user.skills.map((s) => ({ path: s.path, name: s.name, description: s.description, origin: s.origin })),
+          plugins: state180.inventory.user.plugins.map((p) => ({ name: p.name, origin: p.origin, version: p.version })),
+        },
+        bundles: [],
+        projects: {
+          contextFiles: [],
+          named: state180.inventory.projects.named.map((p) => ({ name: p.name, extras: p.extras, files: p.files, live: p.live, bundles: [], entries: [] })),
+        },
+      },
+    };
+    // Every POST /api/bundle body is recorded; failAt180 makes the POST with that 1-based
+    // ordinal answer the 400 shape, which the api() helper turns into a thrown Error with
+    // .status and the message from data.error.
+    const posts180 = [];
+    const gets180 = [];
+    let failAt180 = null;
+    const fetch180 = async (url, opts = {}) => {
+      const u = String(url);
+      const method = String(opts.method || 'GET').toUpperCase();
+      if (method === 'POST' && u.includes('/api/bundle')) {
+        posts180.push({ url: u, body: JSON.parse(opts.body) });
+        if (failAt180 !== null && posts180.length >= failAt180) {
+          failAt180 = null;
+          return { ok: false, status: 400, json: async () => ({ error: 'bundles/web: unknown skill "ghost"' }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ ok: true, commit: 'd'.repeat(64), pushed: true, state: state180 }) };
+      }
+      if (method === 'GET') gets180.push({ url: u });
+      const out = u.includes('/api/state') ? state180 : u.includes('/api/files') ? { files: files180 } : null;
+      return { ok: true, status: 200, json: async () => out };
+    };
+    const plainFetch180 = async (url) => {
+      const u = String(url);
+      const out = u.includes('/api/state') ? plainState180 : u.includes('/api/files') ? { files: files180 } : null;
+      return { ok: true, status: 200, json: async () => out };
+    };
+    try {
+      Object.assign(globalThis, {
+        document: document180,
+        window: { addEventListener() {} },
+        Node: StubNode180,
+        navigator: {},
+        matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+        localStorage: { getItem: () => null, setItem() {} },
+        location: { hash: '#/' },
+        setInterval: () => 0,
+      });
+      globalThis.fetch = fetch180;
+      await import('./web/app.js?alat180dom');
+      const galley180 = document180.getElementById('galley');
+      let ready180 = false;
+      for (let i = 0; i < 200 && !ready180; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        ready180 = galley180.children.length > 0;
+      }
+      assert.ok(ready180, 'the stubbed dashboard rendered the bundles overview');
+
+      const flat180 = (el, out = []) => { out.push(el); for (const c of el.children || []) flat180(c, out); return out; };
+      const part180 = (label, nodes) => nodes.find((e) => e.attrs && e.attrs['aria-label'] === label);
+      const block180 = (nodes, name) => nodes.filter((e) => e.attrs && e.attrs.class === 'project')
+        .find((b) => b.children[0].children[0].textContent === name);
+      const kindRows180 = (block, label) => {
+        const kb = block.children.find((c) => c.attrs && c.attrs.class === 'kind-block' && c.children[0].textContent === label);
+        return kb ? kb.children.find((c) => c.tag === 'ul').children.filter((c) => c.tag === 'li') : [];
+      };
+      const items180 = (block, label) => kindRows180(block, label).map((li) => li.children[0].textContent);
+      const aside180 = (block, label, item) => {
+        const li = kindRows180(block, label).find((r) => r.children[0].textContent === item);
+        return li ? li.children[1].textContent : null;
+      };
+      const settle180 = async (cond) => {
+        for (let i = 0; i < 500 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+        return cond();
+      };
+      // One action end to end: the POST body comes back, the success answer re-renders the
+      // sheet, and afterWrite re-fetched /api/files.
+      const doAction180 = async (act) => {
+        const n = posts180.length;
+        const g0 = gets180.filter((g) => g.url.includes('/api/files')).length;
+        const before = galley180.children[0];
+        act();
+        assert.ok(await settle180(() => posts180.length > n), 'the action POSTed /api/bundle');
+        assert.ok(await settle180(() => galley180.children[0] !== before), 'the success answer re-rendered the overview');
+        assert.ok(gets180.filter((g) => g.url.includes('/api/files')).length > g0, 'afterWrite re-fetched /api/files');
+        return posts180[n].body;
+      };
+
+      // 1. The Bundles part: both blocks with their kind labels, items, and file links.
+      const nodes1 = flat180(galley180.children[0]);
+      const totals1 = nodes1.find((e) => e.attrs && e.attrs.class === 'totals');
+      assert.ok(totals1 && totals1.textContent.includes('2 bundles'), 'the counts line shows the bundle count');
+      const bundlesPart1 = part180('Bundles', nodes1);
+      assert.ok(bundlesPart1, 'the Bundles part renders');
+      assert.equal(bundlesPart1.children.filter((c) => c.attrs && c.attrs.class === 'project').length, 2);
+      const core1 = block180(nodes1, 'core');
+      const gamedev1 = block180(nodes1, 'gamedev-2d');
+      assert.ok(core1 && gamedev1, 'both bundle blocks render');
+      assert.deepEqual(
+        gamedev1.children.filter((c) => c.attrs && c.attrs.class === 'kind-block').map((c) => c.children[0].textContent),
+        ['Skills', 'Plugins', 'Apt', 'Requirements']);
+      assert.deepEqual(items180(gamedev1, 'Skills'), ['bundled', 'shelfy']);
+      assert.deepEqual(items180(gamedev1, 'Plugins'), ['plug-two']);
+      assert.deepEqual(items180(gamedev1, 'Apt'), ['libsdl2']);
+      assert.deepEqual(items180(gamedev1, 'Requirements'), [pytest180]);
+      assert.deepEqual(items180(core1, 'Tools'), ['ripgrep']);
+      assert.deepEqual(items180(core1, 'Env'), ['LOG_LEVEL', 'plain TIMEOUT']);
+      const fileLinks1 = flat180(bundlesPart1).filter((e) => e.tag === 'a' && String(e.attrs.href || '').startsWith('#/file/bundles/'));
+      assert.ok(fileLinks1.length >= 9, 'every list-file name links into the editor');
+      assert.ok(fileLinks1.some((a) => a.attrs.href === '#/file/bundles/gamedev-2d/skills.txt'));
+
+      // 2. The Shelf part: exactly the shelf-flagged skill and plugin, each with picker and button.
+      const shelfPart2 = part180('Shelf', nodes1);
+      assert.ok(shelfPart2, 'the Shelf part renders');
+      const shelfRows2 = shelfPart2.children.find((c) => c.tag === 'ul').children.filter((c) => c.tag === 'li');
+      assert.deepEqual(shelfRows2.map((li) => li.children[0].textContent), ['mshelf', 'loneplug']);
+      assert.deepEqual(shelfRows2.map((li) => li.children.find((c) => c.tag === 'select').attrs['aria-label']),
+        ['Choose a bundle for mshelf', 'Choose a bundle for loneplug']);
+      assert.ok(shelfRows2.every((li) => li.children.some((c) => c.tag === 'button' && c.textContent === 'Add to bundle')));
+
+      // 3. The alpha block: an unassign control, a picker of the bundles it lacks, effective rows.
+      const alpha3 = block180(nodes1, 'alpha');
+      assert.ok(alpha3, 'the alpha project block renders');
+      assert.ok(flat180(alpha3).some((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Unassign gamedev-2d from alpha'));
+      const pick3 = flat180(alpha3).find((e) => e.tag === 'select' && e.attrs['aria-label'] === 'Choose a bundle for alpha');
+      const opts3 = pick3.children.filter((c) => c.tag === 'option');
+      assert.equal(opts3[0].textContent, 'Choose a bundle...');
+      const openNames3 = opts3.map((o) => o.attrs.value);
+      assert.ok(openNames3.includes('core'), 'core is still open for alpha');
+      assert.ok(!openNames3.includes('gamedev-2d'), 'a bundle the project carries is not offered again');
+      assert.equal(aside180(alpha3, 'Skills', 'shared'), 'from core');
+      assert.equal(aside180(alpha3, 'Skills', 'workeronly'), 'from workers/alpha');
+      assert.equal(aside180(alpha3, 'Apt', 'libsdl2'), 'from gamedev-2d');
+
+      // 4. Every control posts its exact body; each success re-renders and re-fetches the index.
+      // a. Move bundled from gamedev-2d to the shelf.
+      const gamedev4a = block180(flat180(galley180.children[0]), 'gamedev-2d');
+      const li4a = flat180(gamedev4a).find((e) => e.tag === 'li' && e.children.some((c) => c.attrs && c.attrs.class === 'item' && c.textContent === 'bundled'));
+      const controls4a = li4a.children.find((c) => c.attrs && c.attrs.class === 'row-controls').children;
+      controls4a.find((c) => c.tag === 'select').value = 'shelf';
+      assert.deepEqual(await doAction180(() => controls4a.find((c) => c.tag === 'button' && c.textContent === 'Move').fire('click')),
+        { action: 'move', kind: 'skill', name: 'bundled', from: 'gamedev-2d', to: 'shelf' });
+      // b. Add the shelf skill mshelf to core from its Shelf row.
+      const shelf4b = part180('Shelf', flat180(galley180.children[0]));
+      const row4b = flat180(shelf4b).find((e) => e.tag === 'li' && e.children[0].textContent === 'mshelf');
+      row4b.children.find((c) => c.tag === 'select').value = 'core';
+      assert.deepEqual(await doAction180(() => row4b.children.find((c) => c.tag === 'button' && c.textContent === 'Add to bundle').fire('click')),
+        { action: 'add', kind: 'skill', name: 'mshelf', bundle: 'core' });
+      // c. Create a bundle named web through the section's form.
+      const bundles4c = part180('Bundles', flat180(galley180.children[0]));
+      const form4c = bundles4c.children.find((c) => c.tag === 'form' && c.children.some((k) => k.attrs && k.attrs.id === 'new-bundle-name'));
+      form4c.children.find((k) => k.attrs && k.attrs.id === 'new-bundle-name').value = 'web';
+      assert.deepEqual(await doAction180(() => form4c.fire('submit')), { action: 'create', name: 'web' });
+      // d. Assign core to beta; choosing a bundle first enables the Assign button.
+      const beta4d = block180(flat180(galley180.children[0]), 'beta');
+      const pick4d = flat180(beta4d).find((e) => e.tag === 'select');
+      const assign4d = flat180(beta4d).find((e) => e.tag === 'button' && e.textContent === 'Assign');
+      pick4d.value = 'core';
+      pick4d.fire('change');
+      assert.equal(assign4d.disabled, false, 'choosing a bundle enables Assign');
+      assert.deepEqual(await doAction180(() => assign4d.fire('click')), { action: 'assign', project: 'beta', bundle: 'core' });
+      // e. Remove shelfy from gamedev-2d.
+      const gamedev4e = block180(flat180(galley180.children[0]), 'gamedev-2d');
+      const remove4e = flat180(gamedev4e).find((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Remove shelfy from gamedev-2d');
+      assert.deepEqual(await doAction180(() => remove4e.fire('click')),
+        { action: 'remove', bundle: 'gamedev-2d', kind: 'skill', name: 'shelfy' });
+
+      // 5. A refused action: the section status carries the message, the button unlocks again.
+      failAt180 = posts180.length + 1;
+      const gamedev5 = block180(flat180(galley180.children[0]), 'gamedev-2d');
+      const remove5 = flat180(gamedev5).find((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Remove bundled from gamedev-2d');
+      const n5 = posts180.length;
+      remove5.fire('click');
+      assert.ok(await settle180(() => posts180.length > n5), 'the refused action still POSTed');
+      assert.deepEqual(posts180[n5].body, { action: 'remove', bundle: 'gamedev-2d', kind: 'skill', name: 'bundled' });
+      assert.ok(await settle180(() => remove5.disabled === false), 'the pressed button is re-enabled');
+      assert.deepEqual(remove5.disabledFlips, [true, false]);
+      const bundles5 = part180('Bundles', flat180(galley180.children[0]));
+      const status5 = flat180(bundles5).find((e) => e.attrs && e.attrs.class === 'status error' && e.attrs.role === 'alert');
+      assert.ok(status5, 'the Bundles section status shows the refusal');
+      assert.equal(status5.className, 'status error');
+      assert.equal(status5.textContent, 'bundles/web: unknown skill "ghost"');
+
+      // 6. Without bundles in the state, none of the three surfaces renders.
+      const beforePlain6 = galley180.children[0];
+      globalThis.fetch = plainFetch180;
+      await import('./web/app.js?alat180plain');
+      assert.ok(await settle180(() => {
+        const s = galley180.children[0];
+        return s && s !== beforePlain6 && part180('Projects', flat180(s)) && !part180('Shelf', flat180(s));
+      }), 'the plain overview rendered');
+      const plain6 = flat180(galley180.children[0]);
+      assert.ok(!part180('Bundles', plain6) && !part180('Shelf', plain6), 'no Bundles or Shelf part without bundles');
+      assert.ok(!plain6.some((e) => e.textContent === 'New bundle name'), 'no create-bundle field without bundles');
+      assert.ok(plain6.every((e) => e.tag !== 'select'), 'no assign picker anywhere without bundles');
+      const plainBlocks6 = plain6.filter((e) => e.attrs && e.attrs.class === 'project');
+      assert.equal(plainBlocks6.length, 2, 'the project blocks still render read-only');
+    } finally {
+      for (const [g, d] of Object.entries(saved180)) {
         if (d) Object.defineProperty(globalThis, g, d);
         else delete globalThis[g];
       }

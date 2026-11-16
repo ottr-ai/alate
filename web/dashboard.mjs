@@ -7,7 +7,7 @@ import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { assertSourceInside, checkDestination, cloneCommand, dataHost, descriptionText, gitAuthEnv, githubHost, parseDataSpec, redactSecrets, serverGitEnv, SNAP_AGENTS_DIR } from '../lib/data.mjs';
-import { isBundlesMode, parseNameList, readBundleFolder } from '../lib/bundles.mjs';
+import { isBundlesMode, mergeLineSources, mergeNamedSources, mergeToolsSources, parseNameList, readBundleFolder } from '../lib/bundles.mjs';
 
 /** @typedef {import('node:sqlite').DatabaseSync} DashDb */
 /** @typedef {import('../lib/data.mjs').DataSpec} DataSpec */
@@ -15,9 +15,11 @@ import { isBundlesMode, parseNameList, readBundleFolder } from '../lib/bundles.m
 /** @typedef {{ path: string, bytes: number }} FileInfo */
 /** @typedef {{ name: string, origin: string, path: string, description: string, bundles: string[], shelf: boolean }} SkillInfo */
 /** @typedef {{ name: string, version?: string, origin?: string, bundles: string[], shelf: boolean }} PluginInfo */
-/** @typedef {{ name: string, files: string[], skills: string[], plugins: string[] }} BundleInfo */
+/** @typedef {{ name: string, files: string[], skills: string[], plugins: string[], items: { apt: string[], tools: string[], env: string[], requirements: string[] } }} BundleInfo */
 /** @typedef {{ path: string, bytes: number, status: string }} InventoryEntry */
-/** @typedef {{ name: string, extras: number, files: number, live: string, bundles: string[], entries: InventoryEntry[] }} NamedProject */
+/** @typedef {{ item: string, source: string }} NamedItem */
+/** @typedef {{ skills: NamedItem[], plugins: NamedItem[], apt: NamedItem[], env: NamedItem[], requirements: NamedItem[], tools: NamedItem[] }} EffectiveLists */
+/** @typedef {{ name: string, extras: number, files: number, live: string, bundles: string[], effective: EffectiveLists, entries: InventoryEntry[] }} NamedProject */
 /** @typedef {{ contextFiles: string[], named: NamedProject[] }} ProjectsInventory */
 /** @typedef {{ rules: RuleInfo[], user: { configFiles: FileInfo[], others: FileInfo[], skills: SkillInfo[], extensions: string[], plugins: PluginInfo[] }, projects: ProjectsInventory, bundles: BundleInfo[], counts: { rules: number, skills: number, plugins: number, extensions: number, projects: number, bundles: number, userFiles: number }, warnings: string[] }} Inventory */
 /** @typedef {{ added: string[], removed: string[], updated: string[] }} SectionChanges */
@@ -208,6 +210,16 @@ function scanInventory(dir, liveRoot = null) {
   const workerSkills = [];
   /** @type {string[]} */
   const workerPlugins = [];
+  // Raw list bytes per parsed bundle folder, for the per-project effective merges.
+  /** @type {Map<string, Map<string, Buffer>>} */
+  const bundleBytes = new Map();
+  // Directory names directly under bundles/, for the unknown-bundle warning.
+  /** @type {Set<string>} */
+  const bundleDirNames = new Set();
+  // Parsed name lists per worker folder; a project's own effective source
+  // (workers/_all is a shelf-naming source only and never merges into a project).
+  /** @type {Map<string, { skills: string[], plugins: string[] }>} */
+  const workerNameLists = new Map();
   if (bundlesMode) {
     const workersBase = join(dir, 'workers');
     if (existsSync(workersBase)) {
@@ -217,21 +229,24 @@ function scanInventory(dir, liveRoot = null) {
           if (!entry.isDirectory()) continue;
           const wdir = join(workersBase, entry.name);
           assertSourceInside(dir, wdir);
-          /** @param {'skills.txt' | 'plugins.txt'} file @param {'skill' | 'plugin'} kind @param {string[]} into */
-          const readWorkerNames = (file, kind, into) => {
+          /** Per-folder parsed lists, kept for a project's own effective source. @type {{ skills: string[], plugins: string[] }} */
+          const folderLists = { skills: [], plugins: [] };
+          workerNameLists.set(entry.name, folderLists);
+          /** @param {'skills.txt' | 'plugins.txt'} file @param {'skill' | 'plugin'} kind @param {string[]} into @param {string[]} folderInto */
+          const readWorkerNames = (file, kind, into, folderInto) => {
             const path = join(wdir, file);
             if (!existsSync(path)) return;
             assertSourceInside(dir, path);
             try {
-              for (const name of parseNameList(readFileSync(path), `workers/${entry.name}/${file}`, kind)) {
-                if (!into.includes(name)) into.push(name);
-              }
+              const parsed = parseNameList(readFileSync(path), `workers/${entry.name}/${file}`, kind);
+              for (const name of parsed) if (!into.includes(name)) into.push(name);
+              folderInto.push(...parsed);
             } catch (err) {
               warnings.push(/** @type {Error} */ (err).message);
             }
           };
-          readWorkerNames('skills.txt', 'skill', workerSkills);
-          readWorkerNames('plugins.txt', 'plugin', workerPlugins);
+          readWorkerNames('skills.txt', 'skill', workerSkills, folderLists.skills);
+          readWorkerNames('plugins.txt', 'plugin', workerPlugins, folderLists.plugins);
         }
       } catch {
         warnings.push('workers: link escapes the data repo; lists skipped');
@@ -239,6 +254,7 @@ function scanInventory(dir, liveRoot = null) {
     }
     const knownSkills = new Set(skills.map(s => s.name));
     for (const entry of readdirSync(join(dir, 'bundles'), { withFileTypes: true })) {
+      if (entry.isDirectory()) bundleDirNames.add(entry.name);
       let files;
       try {
         files = readBundleFolder(dir, entry.name);
@@ -264,7 +280,27 @@ function scanInventory(dir, liveRoot = null) {
       readNames('plugins.txt', 'plugin', pluginNames);
       for (const name of skillNames) if (!knownSkills.has(name)) warnings.push(`bundles/${entry.name}: unknown skill "${name}"`);
       for (const name of pluginNames) if (!seen.has(name)) warnings.push(`bundles/${entry.name}: unknown plugin "${name}"`);
-      bundles.push({ name: entry.name, files: [...files.keys()].sort(), skills: skillNames, plugins: pluginNames });
+      // The bundle's own list items, single source, in file order: verbatim
+      // lines for the three worker lists, entry names for tools.json.
+      /** Parsed lines of one worker list file. @param {string} file @returns {string[]} */
+      const fileItems = file => mergeLineSources([[`bundles/${entry.name}/${file}`, /** @type {Buffer} */ (files.get(file))]]).map(r => r.item);
+      /** @type {{ apt: string[], tools: string[], env: string[], requirements: string[] }} */
+      const items = {
+        apt: files.has('apt.txt') ? fileItems('apt.txt') : [],
+        tools: [],
+        env: files.has('env.txt') ? fileItems('env.txt') : [],
+        requirements: files.has('requirements.txt') ? fileItems('requirements.txt') : [],
+      };
+      if (files.has('tools.json')) {
+        try {
+          items.tools = mergeToolsSources([[`bundles/${entry.name}/tools.json`, /** @type {Buffer} */ (files.get('tools.json'))]]).map(r => r.item);
+        } catch (err) {
+          // a malformed array or a nameless entry: the message names the file, and the file yields []
+          warnings.push(/** @type {Error} */ (err).message);
+        }
+      }
+      bundles.push({ name: entry.name, files: [...files.keys()].sort(), skills: skillNames, plugins: pluginNames, items });
+      bundleBytes.set(entry.name, files);
     }
     // Sorted bundle order: the per-item bundles arrays and the section follow it,
     // and the listing stays stable across platforms' readdir orders.
@@ -285,6 +321,76 @@ function scanInventory(dir, liveRoot = null) {
     for (const s of skills) { s.bundles = []; s.shelf = false; }
     for (const p of plugins) { p.bundles = []; p.shelf = false; }
   }
+
+  // Per-project effective lists (specs/bundles.md merge order): core, then the
+  // project's bundles whose folder exists, then the project's own workers/<p>/
+  // lists. Every item keeps its first source; env.txt restatements win and keep
+  // their first position. Computed from the already-parsed bundle lists, so a
+  // broken file warns once, and the scan never throws.
+  /** @param {string} projectName @param {string[]} refs @returns {EffectiveLists} */
+  const projectEffective = (projectName, refs) => {
+    /** Sources in merge order: the label is `core`, the bundle name, or (own) `workers/<p>`. @type {[string, Map<string, Buffer>][]} */
+    const sources = [];
+    if (bundleBytes.has('core')) sources.push(['core', /** @type {Map<string, Buffer>} */ (bundleBytes.get('core'))]);
+    for (const b of refs) {
+      if (!bundleDirNames.has(b)) {
+        warnings.push(`projects.json: project "${projectName}" names unknown bundle "${b}" (no folder bundles/${b}/)`);
+        continue;
+      }
+      // A folder that exists but failed to parse already warned in the bundle scan; it contributes nothing.
+      if (bundleBytes.has(b)) sources.push([b, /** @type {Map<string, Buffer>} */ (bundleBytes.get(b))]);
+    }
+    // The own lists ride the worker scan's guards: a folder that scan could not
+    // read (its escape already warned) contributes nothing here.
+    const ownDir = workerNameLists.has(projectName) ? join(dir, 'workers', projectName) : null;
+    /** @param {string} file @returns {Buffer | null} */
+    const ownFile = file => {
+      if (!ownDir) return null;
+      const path = join(ownDir, file);
+      if (!existsSync(path)) return null;
+      try { assertSourceInside(dir, path); } catch { return null; }
+      return readFileSync(path);
+    };
+    /** Bundle and own bytes of one worker list file, in merge order. @param {string} file @returns {[string, Buffer][]} */
+    const lineParts = file => {
+      /** @type {[string, Buffer][]} */
+      const parts = [];
+      for (const [label, bundleFiles] of sources) if (bundleFiles.has(file)) parts.push([label, /** @type {Buffer} */ (bundleFiles.get(file))]);
+      const own = ownFile(file);
+      if (own !== null) parts.push([`workers/${projectName}`, own]);
+      return parts;
+    };
+    /** @type {[string, string[]][]} */
+    const skillParts = [];
+    /** @type {[string, string[]][]} */
+    const pluginParts = [];
+    /** @type {[string, string[]][]} */
+    const toolParts = [];
+    for (const [label] of sources) {
+      const b = bundles.find(x => x.name === label);
+      if (b) { skillParts.push([label, b.skills]); pluginParts.push([label, b.plugins]); toolParts.push([label, b.items.tools]); }
+    }
+    const ownLists = workerNameLists.get(projectName);
+    if (ownLists) {
+      skillParts.push([`workers/${projectName}`, ownLists.skills]);
+      pluginParts.push([`workers/${projectName}`, ownLists.plugins]);
+    }
+    const ownTools = ownFile('tools.json');
+    if (ownTools !== null) {
+      try { toolParts.push([`workers/${projectName}`, mergeToolsSources([[`workers/${projectName}/tools.json`, ownTools]]).map(r => r.item)]); }
+      catch (err) { warnings.push(/** @type {Error} */ (err).message); }
+    }
+    return {
+      skills: mergeNamedSources(skillParts),
+      plugins: mergeNamedSources(pluginParts),
+      apt: mergeLineSources(lineParts('apt.txt'), {}),
+      env: mergeLineSources(lineParts('env.txt'), { lastWins: true }),
+      requirements: mergeLineSources(lineParts('requirements.txt'), { keyOf: line => line.trim().split(/\s+/)[0].split('==')[0].toLowerCase() }),
+      tools: mergeNamedSources(toolParts),
+    };
+  };
+  /** @returns {EffectiveLists} */
+  const emptyEffective = () => ({ skills: [], plugins: [], apt: [], env: [], requirements: [], tools: [] });
 
   /** @type {ProjectsInventory} */
   const projects = { contextFiles: [], named: [] };
@@ -362,7 +468,8 @@ function scanInventory(dir, liveRoot = null) {
         }
       }
       entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-      projects.named.push({ name, extras: extras.length, files: snapRels.length, live, bundles: projectBundles, entries });
+      const effective = bundlesMode ? projectEffective(name, projectBundles) : emptyEffective();
+      projects.named.push({ name, extras: extras.length, files: snapRels.length, live, bundles: projectBundles, effective, entries });
     }
   } else if (existsSync(join(dir, 'projects'))) {
     warnings.push('projects/projects.json: missing or unparseable; showing what exists');
@@ -746,44 +853,45 @@ function identArgs(dir, env) {
   return id.status !== 0 || !id.stdout.trim() ? ['-c', 'user.name=alate', '-c', 'user.email=alate@localhost'] : [];
 }
 
-// Stage the one path, commit only that path (never other staged work), return the new sha.
-// A failure is a client-safe 400.
+// Stage every path of the save, commit only those paths (never other staged work),
+// return the new sha. A failure is a client-safe 400.
 /**
  * @param {string} dir
- * @param {string} rel
+ * @param {string[]} rels
  * @param {string} message
  * @param {NodeJS.ProcessEnv} env
  * @param {string | undefined} token
  * @returns {string}
  */
-function commitEdit(dir, rel, message, env, token) {
-  const add = runGit(dir, ['add', '-A', '--', rel], env);
+function commitEdit(dir, rels, message, env, token) {
+  const add = runGit(dir, ['add', '-A', '--', ...rels], env);
   if (add.status !== 0) fail(400, `git add failed: ${redactSecrets(add.stderr.trim(), token)}`);
-  // The pathspec keeps a path-kind edit from sweeping the operator's unrelated staged index
+  // The pathspecs keep a path-kind edit from sweeping the operator's unrelated staged index
   // into this commit and the push that follows it.
-  const commit = runGit(dir, [...identArgs(dir, env), 'commit', '-m', message, '--', rel], env);
+  const commit = runGit(dir, [...identArgs(dir, env), 'commit', '-m', message, '--', ...rels], env);
   if (commit.status !== 0) fail(400, `git commit failed: ${redactSecrets(commit.stderr.trim(), token)}`);
   const head = runGit(dir, ['rev-parse', 'HEAD'], env);
-  if (head.status !== 0) fail(400, `cannot read the new commit for ${rel}`);
+  if (head.status !== 0) fail(400, `cannot read the new commit for ${rels[0]}`);
   return head.stdout.trim();
 }
 
-// Repo source: fresh clone, verify against the clone, commit, push HEAD:<branch>, then import
-// the snapshot from that same clone so importedSha is the new commit. Temp dir always cleaned.
+// Repo source: fresh clone, verify each op against the clone, commit every path of the
+// save once, push HEAD:<branch>, then import the snapshot from that same clone so
+// importedSha is the new commit. Temp dir always cleaned.
 /**
  * @param {StateDef} state
  * @param {DashDb} db
  * @param {SourceInfo} src
- * @param {EditOp} op
+ * @param {EditOp[]} ops
  * @param {string | undefined} token
  * @returns {EditResult}
  */
-function editRepoSource(state, db, src, op, token) {
+function editRepoSource(state, db, src, ops, token) {
   const resolved = cloneRepo(src.spec, { name: src.name, ref: src.ref, host: src.host }, token);
   try {
-    applyToTree(resolved.dir, op.rel, op.base, op.bytes);
+    for (const op of ops) applyToTree(resolved.dir, op.rel, op.base, op.bytes);
     const env = gitAuthEnv(remoteUrl(src.name, src.host), token, repoGitBase());
-    const commit = commitEdit(resolved.dir, op.rel, op.message, env, token);
+    const commit = commitEdit(resolved.dir, ops.map(op => op.rel), ops[0].message, env, token);
     const branch = src.ref || runGit(resolved.dir, ['rev-parse', '--abbrev-ref', 'HEAD'], env).stdout.trim();
     const push = runGit(resolved.dir, ['push', 'origin', `HEAD:${branch}`], env);
     if (push.status !== 0) fail(502, `git push failed: ${redactSecrets(push.stderr.trim(), token)}`);
@@ -795,8 +903,9 @@ function editRepoSource(state, db, src, op, token) {
   }
 }
 
-// Path source: verify against disk, write, then commit and push in the user's own work tree
-// (its own hooks and repo config run untouched, never --no-verify). Global and system git
+// Path source: verify each op against disk, write, then commit every path of the save and
+// push in the user's own work tree (its own hooks and repo config run untouched, never
+// --no-verify). Global and system git
 // config stay off (serverGitEnv), so a global credential helper or identity does not apply.
 // The disk stays the truth: a failed commit or push still re-imports the snapshot before
 // the error is rethrown.
@@ -804,20 +913,30 @@ function editRepoSource(state, db, src, op, token) {
  * @param {StateDef} state
  * @param {DashDb} db
  * @param {SourceInfo} src
- * @param {EditOp} op
+ * @param {EditOp[]} ops
  * @param {string | undefined} token
  * @returns {EditResult}
  */
-function editPathSource(state, db, src, op, token) {
+function editPathSource(state, db, src, ops, token) {
   const dir = src.name;
   if (!existsSync(dir)) fail(400, `no local data repo at ${src.spec}`);
-  applyToTree(dir, op.rel, op.base, op.bytes);
+  let applied = 0;
+  try {
+    for (const op of ops) { applyToTree(dir, op.rel, op.base, op.bytes); applied++; }
+  } catch (err) {
+    if (applied > 0) {
+      // A later op refused after an earlier one already wrote: the disk changed while
+      // the save fails, so the stored snapshot follows the disk before the throw.
+      importSource(state, src.spec, src.kind, token, db);
+    }
+    throw err;
+  }
   let commit = '', pushed = false, warning;
   /** @type {StatusedError | null} */
   let failure = null;
   if (isGitWorkTree(dir)) {
     try {
-      commit = commitEdit(dir, op.rel, op.message, serverGitEnv(), token);
+      commit = commitEdit(dir, ops.map(op => op.rel), ops[0].message, serverGitEnv(), token);
       if (runGit(dir, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']).status !== 0) {
         warning = 'no upstream configured; the commit stayed local';
       } else {
@@ -860,9 +979,211 @@ function applyFileEdit(state, db, edit, token) {
     bytes: edit.delete ? null : Buffer.from(/** @type {string} */ (edit.content), 'utf8'),
     message: editMessage(edit.message, rel, !edit.delete && edit.base === null, edit.delete),
   };
+  return dispatchSave(state, db, [op], token);
+}
+
+// The editor's source dispatch, shared by the single-op file editor and the bundle
+// actions: a repo source edits a fresh clone and pushes, a path source edits the
+// operator's tree in place. ops is one save: every op applies, one commit carries all
+// the paths, one push follows.
+/**
+ * @param {StateDef} state
+ * @param {DashDb} db
+ * @param {EditOp[]} ops
+ * @param {string | undefined} token
+ * @returns {EditResult}
+ */
+function dispatchSave(state, db, ops, token) {
   return state.source.kind === 'repo'
-    ? editRepoSource(state, db, state.source, op, token)
-    : editPathSource(state, db, state.source, op, token);
+    ? editRepoSource(state, db, state.source, ops, token)
+    : editPathSource(state, db, state.source, ops, token);
+}
+
+// ---- Bundle actions (specs/bundles.md "Editing (ALAT-180)"): the bundle board's
+// ---- create/add/remove/move/assign/unassign writes through the editor's save path. ----
+
+// The name rules of lib/bundles.mjs (SKILL_NAME, PLUGIN_NAME), mirrored so a refused
+// name is exactly the one the installer refuses; the folder rule is the skill rule.
+/** @type {RegExp} */
+const bundleFolderName = /^[a-z0-9][a-z0-9-]*$/;
+/** @param {'skill' | 'plugin'} kind @returns {RegExp} */
+const bundleItemName = kind => (kind === 'skill' ? /^[a-z0-9][a-z0-9-]*$/ : /^(?:@[a-z0-9][a-z0-9-]*\/)?[a-z0-9][a-z0-9-]*$/);
+/** @param {'skill' | 'plugin'} kind @returns {string} */
+const bundleListFile = kind => (kind === 'skill' ? 'skills.txt' : 'plugins.txt');
+// Two-line comment header every created list file starts with.
+/** @param {'skill' | 'plugin'} kind @param {string} bundle @returns {string} */
+const bundleListHeader = (kind, bundle) => `# ${kind === 'skill' ? 'skills' : 'plugins'} of bundle ${bundle}\n# one name per line; # comments and blank lines are ignored\n`;
+// The unknown-name refusal, word for word what the install throws for the same list.
+/** @param {string} rel @param {'skill' | 'plugin'} kind @param {string} name @returns {string} */
+const unknownItemMessage = (rel, kind, name) => `${rel}: unknown ${kind} "${name}" (the data repo holds no ${kind === 'skill' ? 'skill folder' : 'plugin'} of that name)`;
+
+// Stored snapshot bytes of one path: the same row readStoredFile hashes, kept raw so the
+// bundle actions can parse and recompose list files. null when the snapshot lacks it.
+/** @param {DashDb} db @param {string} rel @returns {Buffer | null} */
+function storedBytes(db, rel) {
+  const row = /** @type {{ content: Buffer } | undefined} */ (db.prepare('SELECT content FROM files WHERE path = ?').get(rel));
+  return row ? Buffer.from(row.content) : null;
+}
+
+// Stored snapshot paths under bundles/<name>/ — the stored stand-in for the bundle folder
+// (git tracks no folders, so "the folder exists" means any of its files is stored).
+/** @param {DashDb} db @param {string} name @returns {string[]} */
+function storedBundleFiles(db, name) {
+  const prefix = `bundles/${name}/`;
+  return listStoredFiles(db).map(f => f.path).filter(p => p.startsWith(prefix));
+}
+
+// Text of a name list after appending name as its last non-empty line: existing lines
+// (comments and blanks included) keep their places, the trailing blank run stays at the
+// end, and the new line takes the file's dominant EOL. null text means the file does not
+// exist yet: the caller composes the header-and-name body instead.
+/** @param {string | null} text @param {string} name @returns {string} */
+function appendBundleName(text, name) {
+  if (text === null) return name;
+  const crlf = (text.match(/\r\n/g) ?? []).length;
+  const loneLf = (text.match(/(?<!\r)\n/g) ?? []).length;
+  const lines = text.split('\n');
+  let at = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].replace(/\r$/, '').trim() !== '') { at = i + 1; break; }
+  }
+  lines.splice(at, 0, crlf > loneLf ? `${name}\r` : name);
+  return lines.join('\n');
+}
+
+// Text of a name list with the first line naming name dropped. Nothing else is
+// normalized: split on \n, match on the parse rule's trimmed form, rejoin the original
+// line contents, so every surviving line keeps its exact bytes.
+/** @param {Buffer} bytes @param {string} name @returns {string} */
+function dropBundleName(bytes, name) {
+  const lines = bytes.toString('utf8').split('\n');
+  lines.splice(lines.findIndex(line => line.replace(/\r$/, '').trim() === name), 1);
+  return lines.join('\n');
+}
+
+// One bundle-board action end to end: validate the body against the stored snapshot,
+// compose the one save's ops, then run the editor dispatch (one commit, one push, the
+// editor's result shape). Every refusal throws Error with a client-safe .status and the
+// exact message below, before any write.
+/**
+ * @param {StateDef} state
+ * @param {DashDb} db
+ * @param {{ action?: unknown, name?: unknown, bundle?: unknown, kind?: unknown, from?: unknown, to?: unknown, project?: unknown }} body
+ * @param {string | undefined} token
+ * @param {{ skills: Set<string>, plugins: Set<string> }} known
+ * @returns {EditResult}
+ */
+function applyBundleAction(state, db, body, token, known) {
+  if (!state.source) fail(400, 'no data source configured');
+  /** @type {EditOp[]} */
+  const ops = [];
+  let message = '';
+  /** @param {string} rel @param {string | null} base @param {Buffer} bytes */
+  const stage = (rel, base, bytes) => ops.push({ rel, base, bytes, message });
+  /** @param {unknown} kind @returns {'skill' | 'plugin'} */
+  const listKind = kind => (kind === 'skill' || kind === 'plugin' ? kind : fail(400, 'kind must be "skill" or "plugin"'));
+  const action = body.action;
+  if (action === 'create') {
+    const name = typeof body.name === 'string' ? body.name : '';
+    if (!bundleFolderName.test(name)) fail(400, `bundles: "${name}" is not a valid bundle folder name`);
+    if (storedBytes(db, `bundles/${name}/skills.txt`) !== null) fail(409, `bundles/${name}: bundle already exists`);
+    message = `alate: add bundle ${name}`;
+    stage(`bundles/${name}/skills.txt`, null, Buffer.from(bundleListHeader('skill', name), 'utf8'));
+  } else if (action === 'add' || action === 'remove') {
+    const kind = listKind(body.kind);
+    const bundle = typeof body.bundle === 'string' ? body.bundle : '';
+    const name = typeof body.name === 'string' ? body.name : '';
+    const rel = `bundles/${bundle}/${bundleListFile(kind)}`;
+    if (!bundleFolderName.test(bundle)) fail(400, `bundles: "${bundle}" is not a valid bundle folder name`);
+    const bytes = storedBytes(db, rel);
+    if (bytes === null && storedBundleFiles(db, bundle).length === 0) fail(404, `bundles: bundle "${bundle}" has no folder under bundles/`);
+    // Format and known-ness gate an add; a remove only asks whether the list holds the name.
+    if (action === 'add') {
+      if (!bundleItemName(kind).test(name)) fail(400, `${rel}: "${name}" is not a valid ${kind} name`);
+      const knownSet = kind === 'skill' ? known.skills : known.plugins;
+      if (!knownSet.has(name)) fail(400, unknownItemMessage(rel, kind, name));
+    }
+    const listed = parseNameList(bytes ?? Buffer.alloc(0), rel, kind);
+    if (!listed.includes(name)) {
+      if (action === 'remove') fail(404, `${rel}: no ${kind} "${name}"`);
+      message = `alate: add ${kind} ${name} to bundle ${bundle}`;
+      // A list file that does not exist yet starts with the comment header; an existing
+      // one keeps its lines and takes the name as its last non-empty line.
+      stage(rel, bytes === null ? null : sha256(bytes), bytes === null
+        ? Buffer.from(`${bundleListHeader(kind, bundle)}${name}\n`, 'utf8')
+        : Buffer.from(appendBundleName(bytes.toString('utf8'), name), 'utf8'));
+    } else {
+      if (action === 'add') fail(409, `${rel}: already names ${kind} "${name}"`);
+      message = `alate: remove ${kind} ${name} from bundle ${bundle}`;
+      stage(rel, sha256(/** @type {Buffer} */ (bytes)), Buffer.from(dropBundleName(/** @type {Buffer} */ (bytes), name), 'utf8'));
+    }
+  } else if (action === 'move') {
+    const kind = listKind(body.kind);
+    const name = typeof body.name === 'string' ? body.name : '';
+    const from = typeof body.from === 'string' ? body.from : '';
+    const file = bundleListFile(kind);
+    const fromRel = `bundles/${from}/${file}`;
+    const fromBytes = storedBytes(db, fromRel);
+    if (!parseNameList(fromBytes ?? Buffer.alloc(0), fromRel, kind).includes(name)) fail(409, `${fromRel}: does not name ${kind} "${name}"`);
+    if (body.to === 'shelf') {
+      // The shelf: drop the name from every stored list of this kind that names it,
+      // wherever it sits; `from` only names the refusal when nothing lists the name.
+      const rels = listStoredFiles(db).map(f => f.path).filter(p => p.endsWith(`/${file}`) && p.startsWith('bundles/') && p.split('/').length === 3);
+      const hits = rels.filter(rel => parseNameList(/** @type {Buffer} */ (storedBytes(db, rel)), rel, kind).includes(name));
+      if (hits.length === 0) fail(404, `${fromRel}: no ${kind} "${name}"`);
+      message = `alate: move ${kind} ${name} from ${from} to shelf`;
+      for (const rel of hits) {
+        const bytes = /** @type {Buffer} */ (storedBytes(db, rel));
+        stage(rel, sha256(bytes), Buffer.from(dropBundleName(bytes, name), 'utf8'));
+      }
+    } else {
+      const to = typeof body.to === 'string' ? body.to : '';
+      const toRel = `bundles/${to}/${file}`;
+      const toBytes = storedBytes(db, toRel);
+      if (!bundleFolderName.test(to)) fail(400, `bundles: "${to}" is not a valid bundle folder name`);
+      if (toBytes === null && storedBundleFiles(db, to).length === 0) fail(404, `bundles: bundle "${to}" has no folder under bundles/`);
+      const knownSet = kind === 'skill' ? known.skills : known.plugins;
+      if (parseNameList(toBytes ?? Buffer.alloc(0), toRel, kind).includes(name)) fail(409, `${toRel}: already names ${kind} "${name}"`);
+      if (!knownSet.has(name)) fail(400, unknownItemMessage(toRel, kind, name));
+      message = `alate: move ${kind} ${name} from ${from} to ${to}`;
+      stage(fromRel, sha256(/** @type {Buffer} */ (fromBytes)), Buffer.from(dropBundleName(/** @type {Buffer} */ (fromBytes), name), 'utf8'));
+      stage(toRel, toBytes === null ? null : sha256(toBytes), toBytes === null
+        ? Buffer.from(`${bundleListHeader(kind, to)}${name}\n`, 'utf8')
+        : Buffer.from(appendBundleName(toBytes.toString('utf8'), name), 'utf8'));
+    }
+  } else if (action === 'assign' || action === 'unassign') {
+    const project = typeof body.project === 'string' ? body.project : '';
+    const bundle = typeof body.bundle === 'string' ? body.bundle : '';
+    const manifestRel = 'projects/projects.json';
+    const manifestBytes = storedBytes(db, manifestRel);
+    if (manifestBytes === null) fail(404, 'projects/projects.json not found');
+    let manifest;
+    try { manifest = JSON.parse(manifestBytes.toString('utf8')); } catch { fail(400, 'projects/projects.json: unparseable JSON'); }
+    const table = manifest !== null && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest.projects : null;
+    if (table === null || typeof table !== 'object' || Array.isArray(table)) fail(400, 'projects.json: projects must be an object');
+    if (!Object.hasOwn(table, project)) fail(404, `projects.json: no project "${project}"`);
+    if (storedBundleFiles(db, bundle).length === 0) fail(400, `projects.json: project "${project}" names unknown bundle "${bundle}" (no folder bundles/${bundle}/)`);
+    // Legacy array values become the object form; every other key and the parsed key
+    // order of both levels survive, because only the bundles array changes.
+    const value = table[project];
+    const entry = Array.isArray(value) ? { extras: [...value], bundles: [] } : (value !== null && typeof value === 'object' ? value : { extras: [], bundles: [] });
+    if (!Array.isArray(entry.bundles)) entry.bundles = [];
+    if (action === 'assign') {
+      if (entry.bundles.includes(bundle)) fail(409, `projects.json: project "${project}" already names bundle "${bundle}"`);
+      entry.bundles.push(bundle);
+      message = `alate: assign bundle ${bundle} to project ${project}`;
+    } else {
+      const current = /** @type {string[]} */ (entry.bundles);
+      if (!current.includes(bundle)) fail(409, `projects.json: project "${project}" does not name bundle "${bundle}"`);
+      entry.bundles = current.filter(b => b !== bundle);
+      message = `alate: unassign bundle ${bundle} from project ${project}`;
+    }
+    table[project] = entry;
+    stage(manifestRel, sha256(manifestBytes), Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'));
+  } else {
+    fail(400, 'unknown bundle action');
+  }
+  return dispatchSave(state, db, ops, token);
 }
 
 // First sha of `git ls-remote` for a dashboard repo source; '' when the check fails (client-safe).
@@ -883,4 +1204,4 @@ function remoteHead(name, ref, token, host = '') {
   return git.status === 0 && git.stdout ? git.stdout.split('\n')[0].trim().split(/\s+/)[0] : '';
 }
 
-export { scanInventory, importSource, isGitWorkTree, isWritableDir, loadState, remoteHead, snapshotData, readStoredFile, listStoredFiles, applyFileEdit, setTrustedPathSource, getTrustedPathSource };
+export { scanInventory, importSource, isGitWorkTree, isWritableDir, loadState, remoteHead, snapshotData, readStoredFile, listStoredFiles, applyFileEdit, applyBundleAction, setTrustedPathSource, getTrustedPathSource };

@@ -264,6 +264,97 @@ export function provisionFailureView(prov) {
   ];
 }
 
+// ---------- bundle editing (overview) ----------
+
+// The six list kinds of a bundle or a project's effective list, with their row
+// labels (specs/bundles.md, Dashboard section).
+const KINDS = [
+  ['skills', 'Skills'], ['plugins', 'Plugins'], ['apt', 'Apt'],
+  ['tools', 'Tools'], ['env', 'Env'], ['requirements', 'Requirements'],
+];
+const arrayOf = (v) => (Array.isArray(v) ? v : []);
+
+// Every bundle action rides the file editor's save path, so the answer carries
+// the editor's result shape. On success the note becomes the one-shot flash and
+// the overview re-renders from the new state; on failure the message lands in
+// the section's status line. There is no confirm() step: every action is one
+// git commit and reversible (specs/bundles.md, Editing section).
+const apiBundle = (body) => api('POST', '/api/bundle', body);
+
+async function runBundleAction(body, btn, status) {
+  if (status) { status.className = 'status'; status.textContent = 'Committing and pushing…'; }
+  if (btn) btn.disabled = true;
+  try {
+    const res = await apiBundle(body);
+    await afterWrite(res);
+    flash = pushNote(res);
+    render();
+  } catch (e) {
+    if (status) { status.className = 'status error'; status.textContent = e.message; }
+    if (btn) btn.disabled = false;
+  }
+}
+
+// One bundle block: title with the list-file count, the file names as links into
+// the editor, the items by kind with remove and move controls on the two name
+// lists, and an add form. The four worker lists stay list-only; their files are
+// the edit path (specs/bundles.md, Editing section).
+function bundleBlock(b, bundles, status) {
+  const name = b && b.name ? String(b.name) : '';
+  const bfiles = arrayOf(b && b.files);
+  const items = b && b.items && typeof b.items === 'object' ? b.items : {};
+  const lists = {
+    skills: arrayOf(b && b.skills), plugins: arrayOf(b && b.plugins),
+    apt: arrayOf(items.apt), tools: arrayOf(items.tools),
+    env: arrayOf(items.env), requirements: arrayOf(items.requirements),
+  };
+  const others = bundles.map((o) => (o && o.name ? String(o.name) : '')).filter((n) => n && n !== name);
+  const kindBlock = (kind, label) => {
+    const names = lists[kind];
+    if (!names.length) return null;
+    const named = kind === 'skills' || kind === 'plugins';
+    return h('div', { class: 'kind-block' },
+      h('h4', { class: 'kind-label', text: label }),
+      h('ul', { class: 'kind-list' }, names.map((raw) => {
+        const item = String(raw);
+        const li = h('li', null, h('span', { class: 'item', text: item }));
+        if (!named) return li;
+        const nameKind = kind === 'skills' ? 'skill' : 'plugin';
+        const move = h('select', { 'aria-label': 'Move ' + item + ' to' },
+          h('option', { value: 'shelf', text: 'shelf' }),
+          others.map((n) => h('option', { value: n, text: n })));
+        const moveBtn = h('button', { type: 'button', class: 'btn quiet', text: 'Move',
+          'aria-label': 'Move ' + item + ' from ' + name,
+          onclick: () => runBundleAction({ action: 'move', kind: nameKind, name: item, from: name, to: move.value }, moveBtn, status) });
+        const removeBtn = h('button', { type: 'button', class: 'btn danger', text: 'Remove',
+          'aria-label': 'Remove ' + item + ' from ' + name,
+          onclick: () => runBundleAction({ action: 'remove', bundle: name, kind: nameKind, name: item }, removeBtn, status) });
+        li.append(h('span', { class: 'row-controls' }, removeBtn, move, moveBtn));
+        return li;
+      })));
+  };
+  const addId = 'add-item-' + Math.random().toString(36).slice(2, 8);
+  const kindSel = h('select', { 'aria-label': 'Item kind' },
+    h('option', { value: 'skill', text: 'skill' }), h('option', { value: 'plugin', text: 'plugin' }));
+  const addItem = h('input', { type: 'text', id: addId, autocomplete: 'off', spellcheck: 'false', placeholder: 'skill-name' });
+  const addForm = h('form', { class: 'inline-form' },
+    h('label', { for: addId, text: 'Add item to ' + name }), kindSel, addItem,
+    h('button', { type: 'submit', class: 'btn quiet', text: 'Add' }));
+  addForm.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    runBundleAction({ action: 'add', bundle: name, kind: kindSel.value, name: addItem.value.trim() },
+      addForm.querySelector('button[type="submit"]'), status);
+  });
+  return h('div', { class: 'project' },
+    h('h3', null, h('span', { text: name }), h('span', { text: plural(bfiles.length, 'list file') })),
+    bfiles.length
+      ? h('p', { class: 'meta' }, 'Files: ',
+        ...bfiles.flatMap((f, i) => [i ? ', ' : '', h('a', { href: fileHref('bundles/' + name + '/' + String(f)), text: String(f) })]))
+      : h('p', { class: 'meta', text: 'No list files.' }),
+    KINDS.map(([kind, label]) => kindBlock(kind, label)),
+    addForm);
+}
+
 function overviewView() {
   const inv = state.inventory || {};
   const user = inv.user || { configFiles: [], others: [], skills: [], extensions: [], plugins: [] };
@@ -380,34 +471,93 @@ function overviewView() {
     user.plugins.length ? h('ul', { class: 'entries' }, user.plugins.map((p) => entry(link('user/omp/plugins/' + p.origin), p.name, p.version || '', namingAside('from ' + p.origin, p))))
       : h('p', { class: 'note', text: 'No plugins in this data repo.' })));
 
-  // Bundles: one row per bundle with its list-file count and item names. Without
-  // bundles content the section shows nothing (specs/bundles.md).
-  if (bundles.length) sheet.append(part('Bundles', String(bundles.length),
-    bundles.map((b) => {
-      const bfiles = Array.isArray(b.files) ? b.files : [];
-      const bskills = Array.isArray(b.skills) ? b.skills : [];
-      const bplugins = Array.isArray(b.plugins) ? b.plugins : [];
-      const items = [bskills.length ? 'Skills: ' + bskills.join(', ') : null, bplugins.length ? 'Plugins: ' + bplugins.join(', ') : null].filter(Boolean).join(' · ');
-      const detail = items ? 'Files: ' + bfiles.join(', ') + ' · ' + items : bfiles.length ? 'Files: ' + bfiles.join(', ') : 'No list files.';
-      return h('div', { class: 'project' },
-        h('h3', null, h('span', { text: b.name }), h('span', { text: plural(bfiles.length, 'list file') })),
-        h('p', { class: 'meta', text: detail }));
-    })));
+  // Bundles: the editing surface for the bundles/<name>/ list files. Each block
+  // links its files into the editor and lists its items by kind, with remove and
+  // move controls on the two name lists. Without bundles content the section
+  // shows nothing (specs/bundles.md).
+  if (bundles.length) {
+    const bundleStatus = h('p', { class: 'status', role: 'alert' });
+    const newInput = h('input', { type: 'text', id: 'new-bundle-name', autocomplete: 'off', spellcheck: 'false', placeholder: 'gamedev-2d' });
+    const createForm = h('form', { class: 'inline-form' },
+      h('label', { for: 'new-bundle-name', text: 'New bundle name' }), newInput,
+      h('button', { type: 'submit', class: 'btn', text: 'Create bundle' }), bundleStatus);
+    createForm.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      runBundleAction({ action: 'create', name: newInput.value.trim() },
+        createForm.querySelector('button[type="submit"]'), bundleStatus);
+    });
+    sheet.append(part('Bundles', String(bundles.length),
+      createForm, bundles.map((b) => bundleBlock(b, bundles, bundleStatus))));
 
+    // Shelf: every skill and plugin whose shelf flag is set, each with a picker
+    // that adds it to the chosen bundle. With no shelf items the section says so.
+    const shelfStatus = h('p', { class: 'status', role: 'alert' });
+    const names = bundles.map((b) => (b && b.name ? String(b.name) : '')).filter(Boolean);
+    const shelfItems = [
+      ...arrayOf(user.skills).filter((s) => s && s.shelf).map((s) => ({ name: String(s.name ?? ''), kind: 'skill' })),
+      ...arrayOf(user.plugins).filter((s) => s && s.shelf).map((s) => ({ name: String(s.name ?? ''), kind: 'plugin' })),
+    ];
+    sheet.append(part('Shelf', String(shelfItems.length),
+      shelfItems.length ? h('ul', { class: 'kind-list' }, shelfItems.map((it) => {
+        const pick = h('select', { 'aria-label': 'Choose a bundle for ' + it.name },
+          names.map((n) => h('option', { value: n, text: n })));
+        const addBtn = h('button', { type: 'button', class: 'btn quiet', text: 'Add to bundle',
+          onclick: () => runBundleAction({ action: 'add', bundle: pick.value, kind: it.kind, name: it.name }, addBtn, shelfStatus) });
+        return h('li', null, h('span', { class: 'item', text: it.name }), h('span', { class: 'aside', text: it.kind }), pick, addBtn);
+      }))
+      : h('p', { class: 'note', text: 'Nothing is on the shelf.' }),
+      shelfStatus));
+  }
+
+  const projectsStatus = h('p', { class: 'status', role: 'alert' });
   const projectBlocks = projects.named.map((p) => {
     const entries = Array.isArray(p.entries) ? p.entries : [];
     const drift = entries.filter((e) => DRIFT.has(e.status)).length;
     const live = p.live === 'gone' ? 'project folder missing on this machine' : p.live === 'off' ? 'not compared with this machine' : drift ? plural(drift, 'file') + ' differ from this machine' : 'in sync with this machine';
     const bundlesNote = Array.isArray(p.bundles) && p.bundles.length ? h('p', { class: 'meta', text: 'Bundles: ' + p.bundles.join(', ') }) : null;
+    // In bundles mode the block carries its bundles as unassignable rows, a picker
+    // of the bundles it does not carry yet, and the effective item list per kind
+    // with each item's source (specs/bundles.md, Dashboard section).
+    const extras = [];
+    if (bundles.length) {
+      const project = String(p.name);
+      const carried = arrayOf(p.bundles).map((b) => String(b));
+      const rows = carried.map((bn) => {
+        const btn = h('button', { type: 'button', class: 'btn danger', text: 'Unassign',
+          'aria-label': 'Unassign ' + bn + ' from ' + project,
+          onclick: () => runBundleAction({ action: 'unassign', project, bundle: bn }, btn, projectsStatus) });
+        return h('li', null, h('span', { class: 'item', text: bn }), btn);
+      });
+      const open = bundles.map((b) => (b && b.name ? String(b.name) : '')).filter((n) => n && !carried.includes(n));
+      const pick = h('select', { 'aria-label': 'Choose a bundle for ' + project },
+        h('option', { value: '', text: 'Choose a bundle...' }),
+        open.map((n) => h('option', { value: n, text: n })));
+      const assignBtn = h('button', { type: 'button', class: 'btn quiet', text: 'Assign', disabled: true,
+        onclick: () => runBundleAction({ action: 'assign', project, bundle: pick.value }, assignBtn, projectsStatus) });
+      pick.addEventListener('change', () => { assignBtn.disabled = !pick.value; });
+      rows.push(h('li', null, pick, assignBtn));
+      extras.push(h('ul', { class: 'kind-list' }, rows));
+      const eff = p.effective && typeof p.effective === 'object' ? p.effective : {};
+      for (const [kind, label] of KINDS) {
+        const list = arrayOf(eff[kind]);
+        if (!list.length) continue;
+        extras.push(h('div', { class: 'kind-block' },
+          h('h4', { class: 'kind-label', text: label }),
+          h('ul', { class: 'kind-list' }, list.map((it) => h('li', null,
+            h('span', { class: 'item', text: it && it.item != null ? String(it.item) : '' }),
+            h('span', { class: 'aside', text: it && it.source ? `from ${it.source}` : '' }))))));
+      }
+    }
     return h('div', { class: 'project' },
       h('h3', null, h('span', { text: p.name }), h('span', { class: drift || p.live === 'gone' ? 'alert' : '', text: live })),
-      bundlesNote,
+      ...(bundles.length ? extras : [bundlesNote]),
       entries.length ? h('ul', { class: 'entries' }, entries.map((e) => entry(link('projects/' + p.name + '/' + e.path), e.path, STATUS_COPY[e.status] || e.status, bytes(e.bytes), DRIFT.has(e.status))))
         : h('p', { class: 'note', text: 'No snapshot files.' }));
   });
   sheet.append(part('Projects', String(projects.named.length),
     projects.contextFiles.length ? h('p', { class: 'note', text: 'Context files captured per project: ' + projects.contextFiles.join(', ') + '.' }) : null,
-    ...(projectBlocks.length ? projectBlocks : [h('p', { class: 'note', text: 'No projects in projects/projects.json.' })])));
+    ...(projectBlocks.length ? projectBlocks : [h('p', { class: 'note', text: 'No projects in projects/projects.json.' })]),
+    ...(bundles.length ? [projectsStatus] : [])));
 
   // Every key that matched no row above (a worker list, the plugins item, or a
   // per-server key with no mcp.json row) is listed here with its status, failed ones

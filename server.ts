@@ -11,8 +11,9 @@ import type { AddressInfo } from 'node:net'
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
 import { childEnv, DEFAULT_GITHUB_HOST, keepTemp, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
-import { runCleanup, runEdit, runImport, runSnapshot } from './lib/server-worker.mjs'
+import { runBundleAction, runCleanup, runEdit, runImport, runSnapshot } from './lib/server-worker.mjs'
 import { getTrustedPathSource, isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead, setTrustedPathSource } from './web/dashboard.mjs'
+import type { StateDef } from './web/dashboard.mjs'
 import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
 import { ensureEnvProxy } from './lib/env-proxy.mjs'
 
@@ -25,7 +26,7 @@ const repoRoot = import.meta.dirname
 const CONFIG_FILE = flagValue('--config') ?? join(repoRoot, 'server-config.json')
 const CAP = 200000
 const SCRIPTS = ['sync.mjs', 'install-user.mjs', 'install-projects.mjs']
-const KNOWN_ROUTES = ['/health', '/config', '/provision', '/api/updates', '/api/updates/check', '/api/files', '/api/file']
+const KNOWN_ROUTES = ['/health', '/config', '/provision', '/api/updates', '/api/updates/check', '/api/files', '/api/file', '/api/bundle']
 const testChildEnvCapture = process.env.ALATE_TEST_CHILD_ENV
 // Test hook: a server that ignores SIGTERM exercises the test suite's teardown escalation;
 // only the process-group SIGKILL fallback stops it.
@@ -764,9 +765,12 @@ app.get('/api/file', { preHandler: dashGuard }, async (req, reply) => {
 
 interface FileEditBody { path?: unknown; content?: unknown; base?: unknown; message?: unknown }
 
-async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) {
+// Shared write path for the file editor and the bundle actions: one dashboard write at a
+// time, queued on importChain like the worker does, with the same snapshotChanged
+// re-check and deferred update check around every op. work runs on the chain and returns
+// the response payload; a failed op rethrows through clientError.
+async function queuedDashboardWrite(reply: FastifyReply, work: () => Promise<{ [key: string]: unknown }>): Promise<{ [key: string]: unknown } | FastifyReply> {
   if (running || writing) return reply.code(409).send({ error: running ? 'provision already running' : 'another file write is running' })
-  const body = (req.body ?? {}) as FileEditBody
   writing = true
   // Queue on importChain like the worker does: an edit that waits for an in-flight
   // import must run against the state that import stored, never the one it replaced.
@@ -774,23 +778,7 @@ async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) 
   const run = importChain.then(async () => {
     editing = true
     try {
-      const res = await runEdit({ dbFile, state: dashState, edit: { ...body, delete: del }, token: dashToken(), trustedDir: getTrustedPathSource() })
-      dashState = res.state
-      // Same refresh selectSource does after an import: the repo source now sits on the new commit.
-      dashState.update = dashState.source.kind === 'repo'
-        ? { checkedAt: new Date().toISOString(), remoteSha: dashState.source.importedSha, available: false }
-        : null
-      persistDash()
-      // Every committed edit changed the stored snapshot, path edits included; the
-      // stored update rows follow at once, never at the next timer tick.
-      void updateCheckAfterChange()
-      return {
-        ok: true,
-        commit: res.commit,
-        pushed: res.pushed,
-        ...(res.warning ? { warning: res.warning } : {}),
-        state: { ...dashState, updates: loadUpdates(db) },
-      }
+      return await work()
     } catch (err) {
       // editPathSource re-imports the user's tree before it throws, so a failed
       // commit or push still changed the stored snapshot.
@@ -813,8 +801,57 @@ async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) 
   } finally { writing = false }
 }
 
+// The write landed: point the repo source's update block at the new commit (the same
+// refresh selectSource does after an import), persist, and queue the snapshot-change
+// update check. Returns the editor's response payload shape.
+function writeResult(res: { state: StateDef; commit: string; pushed: boolean; warning?: string }): { [key: string]: unknown } {
+  dashState = res.state
+  dashState.update = dashState.source.kind === 'repo'
+    ? { checkedAt: new Date().toISOString(), remoteSha: dashState.source.importedSha, available: false }
+    : null
+  persistDash()
+  // Every committed edit changed the stored snapshot, path edits included; the
+  // stored update rows follow at once, never at the next timer tick.
+  void updateCheckAfterChange()
+  return {
+    ok: true,
+    commit: res.commit,
+    pushed: res.pushed,
+    ...(res.warning ? { warning: res.warning } : {}),
+    state: { ...dashState, updates: loadUpdates(db) },
+  }
+}
+
+async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) {
+  const body = (req.body ?? {}) as FileEditBody
+  return queuedDashboardWrite(reply, async () => {
+    const res = await runEdit({ dbFile, state: dashState, edit: { ...body, delete: del }, token: dashToken(), trustedDir: getTrustedPathSource() })
+    return writeResult(res)
+  })
+}
+
 app.put('/api/file', { bodyLimit: 2 * 1024 * 1024, preHandler: dashGuard }, async (req, reply) => fileEdit(req, reply, false))
 app.delete('/api/file', { bodyLimit: 2 * 1024 * 1024, preHandler: dashGuard }, async (req, reply) => fileEdit(req, reply, true))
+
+// Bundle board actions (specs/bundles.md "Editing (ALAT-180)"): every action validates
+// against the stored snapshot and writes through the editor's save path (one commit,
+// one push), so the response carries the editor's result shape. The known skill and
+// plugin universe comes from the inventory scan, the same names the install derives.
+type BundleActionBody = { action?: unknown; name?: unknown; bundle?: unknown; kind?: unknown; from?: unknown; to?: unknown; project?: unknown }
+
+app.post<{ Body: BundleActionBody | undefined }>('/api/bundle', { bodyLimit: 64 * 1024, preHandler: dashGuard }, async (req, reply) => {
+  const inventory = dashState.inventory
+  if (!dashState.source || !inventory) return reply.code(400).send({ error: 'no data source configured' })
+  const known = {
+    skills: new Set(inventory.user.skills.map(s => s.name)),
+    plugins: new Set(inventory.user.plugins.map(p => p.name)),
+  }
+  const body = (req.body ?? {}) as BundleActionBody
+  return queuedDashboardWrite(reply, async () => {
+    const res = await runBundleAction({ dbFile, state: dashState, body, token: dashToken(), trustedDir: getTrustedPathSource(), known })
+    return writeResult(res)
+  })
+})
 
 // Dashboard settings: stored GitHub key (write-only) and auto-update opt-in. Guarded like /api/import.
 app.get('/api/settings', { preHandler: dashGuard }, async () => ({ tokenSet: !!config.token, autoUpdate: config.autoUpdate }))

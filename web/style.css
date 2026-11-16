@@ -314,6 +314,7 @@ body.no-source .desk { grid-template-columns: minmax(0, 1fr); }
 .desc.clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
 .project { margin-top: 1.2rem; }
+.project + .project { border-top: 1px solid var(--rule); padding-top: 1.2rem; }
 .project h3 { display: flex; gap: 0.75rem; align-items: baseline; margin: 0 0 0.2rem; font: 600 1.05rem var(--serif); }
 .project h3 span { font: 400 0.75rem var(--mono); color: var(--ink-2); }
 .project h3 span.alert { color: var(--red); }
@@ -503,6 +504,57 @@ table.updates td.name { font: 500 0.8rem var(--mono); overflow-wrap: anywhere; m
 table.updates td.state { min-width: 10rem; }
 table.updates td.state.ready { color: var(--red); font-weight: 600; }
 table.updates td.err { color: var(--red); font-size: 0.8rem; min-width: 18rem; max-width: 26rem; overflow-wrap: anywhere; }
+
+/* ---------- overview: bundle editing, shelf, project bundle rows ---------- */
+
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  align-items: end;
+  margin: 0.6rem 0 0;
+}
+.inline-form > label { font: 600 0.82rem/1.4 var(--serif); color: var(--ink-2); padding-bottom: 0.35rem; flex: 0 0 11rem; }
+.inline-form input[type="text"] { flex: 0 1 14rem; }
+.inline-form .status { flex-basis: 100%; margin: 0; min-height: 1.4em; font-size: 0.9375rem; }
+
+.part > .status { margin: 0.4rem 0 0; min-height: 1.4em; font-size: 0.9375rem; }
+.status.error { color: var(--red); }
+
+select {
+  font: 400 0.875rem/1.4 var(--mono);
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--ink-2);
+  border-radius: 0;
+  padding: 0.5rem 0.1rem;
+  width: 11rem;
+  min-width: 0;
+  max-width: 100%;
+}
+select:hover { border-bottom-color: var(--ink); }
+
+.kind-list { list-style: none; margin: 0; padding: 0; }
+.kind-list > li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  align-items: baseline;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.kind-list .item { font: 500 0.82rem/1.6 var(--mono); overflow-wrap: anywhere; flex: 1 1 12rem; min-width: 0; }
+.kind-list .aside { font: 400 0.75rem var(--mono); color: var(--ink-2); text-align: right; white-space: nowrap; }
+.kind-list .btn { padding: 0.25rem 0.7rem; font-size: 0.8125rem; }
+.row-controls { display: flex; gap: 0.5rem; align-items: flex-end; }
+
+.kind-block { margin-top: 0.8rem; }
+.kind-label { margin: 0 0 0.15rem; font: 600 0.82rem var(--serif); color: var(--ink-2); }
+
+/* The focus underline restates after the scoped rules above, at equal specificity,
+   so it wins: the 1px growth is padding-compensated like the text inputs. */
+select:focus-visible { outline: none; border-bottom: 2px solid var(--blue); padding-bottom: calc(0.5rem - 1px); }
 
 /* ---------- small screens ---------- */
 
