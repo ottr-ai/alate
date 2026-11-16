@@ -32,9 +32,14 @@ Every item gets exactly one result:
 - `installed` — the item was written (or a worker list was refreshed).
 - `unchanged` — the item already held the exact target bytes.
 - `rejected: <rule> at <file:line>` — the item failed a content gate or the scan gate.
-  It is not installed, and a previously installed, record-matching copy is deleted
-  (same deletion rule as a snapshot-dropped path; a copy that changed on the machine
-  stays, with the existing note).
+  It is never installed. A content-gate rejection (skill root alias, no origin,
+  structure, hidden characters) deletes a previously installed, record-matching copy,
+  the same deletion rule as a snapshot-dropped path. A scan-gate rejection keeps the
+  previously installed, record-matching copy in place, keeps its record, and prints a
+  warning note: the installed bytes passed the scan gate when they installed, and an
+  environment artifact such as CRLF working-tree bytes against LF baseline
+  fingerprints must never delete a good install (ALAT-178). A copy that changed on
+  the machine stays with the existing note and loses its record, in both cases.
 - `no origin` — the origin gate has no recorded origin for the item. Same handling as
   `rejected`: left out, stale record-matching copy deleted. An uncovered MCP server is
   reported but does not exclude the `mcp.json` file itself, so one uncovered server
@@ -92,6 +97,9 @@ A refusal is per script; nothing is written by that script when it refuses:
 - a scanner that cannot run at all (spawn error, probe failure) — no verdict is
   possible, so the run refuses;
 - invalid `tools.json`, `env.txt`, `requirements.txt`;
+- a CR byte in a text file under a surviving snapshot skill dir that ships
+  `.skillspector-baseline.yaml` (a stale or CRLF-committed checkout would corrupt
+  every baseline-keyed verdict);
 - unreadable or structurally broken `upstreams.json` (the coverage gate itself is
   broken, so no origin verdict is possible);
 - destination alias guards, machine-changed copies (conflicts), unreadable source
@@ -143,16 +151,27 @@ failure; `provisionedSha` still moves only on `ok`.
    files only; a Markdown item outside a skill folder whose content gate fails
    is `rejected` and excluded;
 4. worker-list validation (fatal as before), conflicts (fatal as before);
-5. scan gate over the surviving skills: findings (exit 1) make that skill
+5. CRLF source guard before the scan, in both modes and before any write: a text
+   file (no NUL byte) under a surviving skill dir that ships
+   `.skillspector-baseline.yaml` must hold no CR byte. One hit refuses the whole run
+   (fatal, exit 1, nothing written or deleted), names up to 10 files, and prints the
+   fix: rewrite the files from HEAD in the data repo, or set `core.autocrlf=false`
+   there. A stale checkout (made before the repo's `.gitattributes`, with
+   `core.autocrlf=true`) holds CRLF working-tree bytes while `git status` is clean;
+   the shipped baselines fingerprint LF bytes, so every finding key would miss and
+   the gate would reject whole skills that are fine;
+6. scan gate over the surviving skills: findings (exit 1) make that skill
    `rejected`; a scan error (any other non-zero exit or a killed scan) makes that
    skill `rejected` with rule `scan error`; excluded skills are dropped from the
-   plan, the manifest, and
-   `conflicts` before any write, so an installed record-matching copy is deleted by
-   the existing deletion path;
-6. writes, deletions, manifest; layer mode scans the fresh layer before the manifest
+   plan, the manifest, and `conflicts` before any write, except that a
+   record-matching file of a scan-rejected skill keeps its record entry and stays
+   untouched with the warning note from the per-item result above. Its own snapshot
+   bytes never install. Layer mode is unchanged: the fresh layer drops a rejected
+   skill before the switch, and the live layer keeps running;
+7. writes, deletions, manifest; layer mode scans the fresh layer before the manifest
    is written, removes rejected skill dirs from the layer, and drops them from the
    manifest;
-7. the nested `sync.mjs` in layer mode gets `ALATE_PROVISION_RESULTS` pointing at
+8. the nested `sync.mjs` in layer mode gets `ALATE_PROVISION_RESULTS` pointing at
    `<results>.rules.json`; a fatal nested refusal aborts the layer; per-item nested
    failures merge into this run's items and keep the run failed.
 
@@ -180,8 +199,10 @@ failure; `provisionedSha` still moves only on `ok`.
 
 a. One bad skill among good ones: the good skills install, the bad one is reported
    with its rule and file, exit 1.
-b. An installed copy of a now-rejected skill is deleted; a machine-changed copy
-   stays with the existing note.
+b. An installed copy of a skill the scan rejects keeps its record-matching files,
+   its record, and a warning note; a machine-changed copy stays with the existing
+   note and loses its record. A skill a content gate rejects still loses its
+   installed record-matching copy.
 c. One uncovered origin does not stop the other items: the covered rule installs,
    the uncovered item is reported, exit 1.
 d. A missing scanner refuses the whole install-user run; nothing is written.
@@ -203,6 +224,11 @@ j. A case variant (`Skills/`), an 8.3 short name (`MANAGE~1/`), an ignorable-cod
    variant (`skil\u200Cls/`), and a trailing-dot variant (`skills./`) of a skill root are
    each reported `rejected`, are never scanned or installed, and the exact skill roots
    still install; exit 1, `fatal: false`.
+k. A data repo skill that ships a baseline and holds CRLF bytes in a text file
+   refuses the whole run before any write: exit non-zero, nothing installed or
+   deleted, the manifest and the installed copies unchanged, the message names the
+   files and the fix, and no scan runs. The same repo with LF bytes installs the
+   skill. A NUL-bearing (binary) file with CR bytes does not trip the guard.
 
 ## Non-goals
 
@@ -210,3 +236,9 @@ j. A case variant (`Skills/`), an 8.3 short name (`MANAGE~1/`), an ignorable-cod
 - No new npm dependency.
 - Project snapshots (`sync-projects.mjs`) keep their own behavior.
 - Negative scan caching stays absent: a rejected skill is rescanned on the next run.
+- The vendored shipped skills (`shipped/ottr/`) get no CRLF guard: they come from
+  this repo's own checkout, not from the data repo, and no recorded incident
+  involves them.
+- A kept installed copy of a scan-rejected skill may predate the scan gate (an
+  install by an older alate); retention changes nothing about bytes that are already
+  on the machine.

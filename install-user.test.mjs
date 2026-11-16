@@ -1195,7 +1195,9 @@ try {
     assert.ok(calls.some(c => c.includes(join(data, 'user/agents/skills/theirs'))), 'the agents skill snapshot was scanned while it existed');
 
     // A poisoned update rejects only the scanned skill: the clean items still install, the
-    // rejected skill is reported with its rule and file, and a clean pass stays cached.
+    // rejected skill is reported with its rule and file, a clean pass stays cached, and the
+    // installed record-matching copy of the rejected skill stays with its record and the
+    // warning note (ALAT-178: an environment artifact must never delete a good install).
     const recordBefore = got('.alate/installed.json');
     const callsBefore = readFileSync(callsLog, 'utf8');
     const passesBefore = readFileSync(join(home, '.alate', 'skillspector-pass.json'), 'utf8');
@@ -1214,9 +1216,10 @@ try {
     assert.ok(callsGrown.includes(join(data, 'user/omp/agent/skills/mine')), callsGrown);
     assert.equal(readFileSync(join(home, '.alate', 'skillspector-pass.json'), 'utf8'), passesBefore, 'a failed scan is never cached');
     assert.ok(!existsSync(join(home, '.omp/agent/skills/mine/EVIL.md')), 'the poisoned file never lands');
-    assert.ok(!existsSync(join(home, '.omp/agent/skills/mine')), 'the installed record-matching copy of the rejected skill is deleted');
+    assert.ok(existsSync(join(home, '.omp/agent/skills/mine/SKILL.md')), 'the installed record-matching copy of the rejected skill stays');
+    assert.ok(r.stdout.includes('scan rejected user/omp/agent/skills/mine, kept the previously installed version'), 'the kept skill carries the warning note');
     const recordAfter = JSON.parse(readFileSync(join(home, '.alate/installed.json'), 'utf8'));
-    assert.ok(!Object.keys(recordAfter).some(rel => rel.startsWith('omp/agent/skills/mine')), 'the manifest drops the rejected skill');
+    assert.ok(Object.keys(recordAfter).some(rel => rel.startsWith('omp/agent/skills/mine')), 'the manifest keeps the rejected skill record');
     assert.ok(Object.keys(JSON.parse(recordBefore)).some(rel => rel.startsWith('omp/agent/skills/mine')), 'the fixture had mine installed');
 
     // A copy that changed on the machine stays when its scan rejects it: the deletion rule
@@ -1300,6 +1303,68 @@ try {
     assert.equal(bCallsGrown.length, 1, 'only the scan-error skill is rescanned');
     assert.ok(bCallsGrown[0].includes(join(scanBData, 'user/omp/agent/skills/bad-base')), 'a scan-error skill is never cached');
     assert.ok(!existsSync(join(scanBHome, '.omp/agent/skills/bad-base')), 'the scan-error skill still never lands');
+
+    // CRLF guard (ALAT-178): a data-repo checkout made before the repo's .gitattributes
+    // holds CRLF working-tree bytes while git status is clean; the shipped baselines
+    // fingerprint LF bytes, so every finding key would miss, the gate would reject whole
+    // skills, and the install would reject — and once delete — their installed copies.
+    // The guard refuses the run before any write instead: exit non-zero, nothing installed
+    // or deleted, the message names the files and the fix, and no scan runs.
+    const crlfData = join(tmp, 'data-crlf');
+    const crlfHome = join(tmp, 'home-crlf');
+    const putC = (rel, text) => { mkdirSync(dirname(join(crlfData, 'user', rel)), { recursive: true }); writeFileSync(join(crlfData, 'user', rel), text); };
+    putC('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putC('omp/agent/skills/winy/SKILL.md', skillText('winy'));
+    putC('omp/agent/skills/winy/.skillspector-baseline.yaml', 'findings: []\n');
+    writeStub(0);
+    r = run(['--data', crlfData, '--skip-plugins'], crlfHome);
+    assert.equal(r.status, 0, r.stderr);
+    const crlfRecord = readFileSync(join(crlfHome, '.alate/installed.json'), 'utf8');
+    const crlfCallsBefore = readFileSync(callsLog, 'utf8');
+    putC('omp/agent/skills/winy/SKILL.md', skillText('winy').replace(/\n/g, '\r\n'));
+    putC('omp/agent/skills/winy/notes.txt', 'body\r\n');
+    r = run(['--data', crlfData, '--skip-plugins'], crlfHome);
+    assert.equal(r.status, 1, 'a CRLF checkout refuses the run');
+    assert.ok(r.stderr.includes('user/omp/agent/skills/winy/SKILL.md') && r.stderr.includes('user/omp/agent/skills/winy/notes.txt'), `the refusal names the CRLF files: ${r.stderr}`);
+    assert.ok(r.stderr.includes('git checkout -- .') && r.stderr.includes('core.autocrlf=false'), 'the refusal prints the fix');
+    assert.ok(!/\d+ installed/.test(r.stdout), 'nothing installs');
+    assert.ok(!/\d+ deleted/.test(r.stdout), 'nothing deletes');
+    assert.equal(readFileSync(callsLog, 'utf8'), crlfCallsBefore, 'the refusal comes before any scan');
+    assert.equal(readFileSync(join(crlfHome, '.alate/installed.json'), 'utf8'), crlfRecord, 'the manifest stays');
+    assert.ok(existsSync(join(crlfHome, '.omp/agent/skills/winy/SKILL.md')), 'the installed skill stays');
+    // The same repo with LF bytes installs the skill.
+    putC('omp/agent/skills/winy/SKILL.md', skillText('winy'));
+    putC('omp/agent/skills/winy/notes.txt', 'body\n');
+    r = run(['--data', crlfData, '--skip-plugins'], crlfHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /[1-9]\d* installed/, 'the LF files install');
+    // A NUL byte marks binary content: a CR inside it never trips the guard.
+    writeFileSync(join(crlfData, 'user/omp/agent/skills/winy/logo.bin'), Buffer.from([0x64, 0x0d, 0x00, 0x0a, 0x64]));
+    r = run(['--data', crlfData, '--skip-plugins'], crlfHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /[1-9]\d* installed/, 'the binary file installs beside the guard');
+
+    // Retention also covers a scan-rejected shipped skill: its installed copy and record
+    // stay with the warning note under the shipped key. A byte change forces the rescan
+    // that the rejection needs (a warm pass never rescans), restored in the finally.
+    const retroMd = join(scriptDir, 'shipped/ottr/.agents/skills/retro/SKILL.md');
+    const retroOriginal = readFileSync(retroMd, 'utf8');
+    try {
+      writeFileSync(retroMd, `${retroOriginal}\n`);
+      writeStub(1, 'SkillSpector v2.13.0', ['retro']);
+      r = run(['--data', data, '--skip-plugins'], home);
+      assert.equal(r.status, 1, 'a scan-rejected shipped skill fails the run');
+      assert.ok(r.stdout.includes('user/agents/skills/retro — rejected: SC2 at SKILL.md:7'), r.stdout);
+      assert.ok(existsSync(join(home, '.agents/skills/retro/SKILL.md')), 'the installed shipped copy stays');
+      assert.ok(r.stdout.includes('scan rejected user/agents/skills/retro, kept the previously installed version'), 'the shipped rejection carries the warning note');
+      const retroRecord = JSON.parse(readFileSync(join(home, '.alate/installed.json'), 'utf8'));
+      assert.ok(Object.keys(retroRecord).some(rel => rel.startsWith('agents/skills/retro/')), 'the shipped record stays');
+    } finally {
+      writeFileSync(retroMd, retroOriginal);
+      writeStub(0);
+    }
+    r = run(['--data', data, '--skip-plugins'], home);
+    assert.equal(r.status, 0, `the restored vendored tree scans clean again: ${r.stderr}`);
 
     // A missing scanner refuses too: fail closed, and the error names the pinned build.
     r = run(['--data', data, '--skip-plugins'], home, { ...process.env, SKILLSPECTOR_VENV: join(tmp, 'no-venv') });
@@ -1624,7 +1689,7 @@ try {
         assert.notEqual(attackEntry.key, BREAK_UI_P1_KEY, 'the rewrite has a new key');
         assert.ok(r.stdout.includes(`    Review entry: ${JSON.stringify({ ...attackEntry, reason: '<review note>' })}`), `the rejection prints the new entry: ${r.stdout}`);
         const installedMd = join(realHome, '.agents/skills/break-ui/SKILL.md');
-        assert.ok(!existsSync(installedMd), 'the attack bytes never install, and the reviewed copy is removed like that of every rejected skill');
+        assert.equal(readFileSync(installedMd, 'utf8'), BREAK_UI_SKILL_MD, 'the attack bytes never install; the reviewed copy stays (ALAT-178 retention)');
         writeFileSync(join(data, 'skillspector-reviews.json'), `${JSON.stringify({ version: 1, accepted: [
           ...JSON.parse(breakUiReviews.toString('utf8')).accepted,
           { ...attackEntry, reason: 'A reviewer accepted the rewritten line.' },
@@ -1836,7 +1901,7 @@ try {
     assert.ok(failTail.includes('user/omp/agent/skills/beta — rejected: SC2 at SKILL.md:7'), failTail);
     // The other eight skills still install and cache while beta alone is rejected.
     const cacheRecord = JSON.parse(readFileSync(join(cacheHome, '.alate/installed.json'), 'utf8'));
-    assert.ok(!Object.keys(cacheRecord).some(rel => rel.startsWith('omp/agent/skills/beta')), 'the rejected skill leaves the manifest');
+    assert.ok(Object.keys(cacheRecord).some(rel => rel.startsWith('omp/agent/skills/beta')), 'the manifest keeps the rejected skill record (ALAT-178 retention)');
     assert.ok(Object.keys(cacheRecord).filter(rel => rel.startsWith('omp/agent/skills/')).length >= 8, 'the other skills stay recorded');
     // A later clean run rescans beta (no negative caching) and installs it.
     writeStub(0);
@@ -1898,7 +1963,8 @@ try {
     assert.match(r.stdout, new RegExp(`Scanning 1 of ${1 + shippedCount} skill snapshot\\(s\\) \\(${shippedCount} cached\\)`), 'the changed target bytes miss the cache');
     assert.ok(r.stdout.includes('SkillSpector rejected') && r.stdout.includes(join(linkData, 'user/omp/agent/skills/mine')), r.stdout);
     assert.equal(readFileSync(join(linkHome, '.alate', 'skillspector-pass.json'), 'utf8'), linkPasses, 'a failed scan is never cached');
-    assert.ok(!existsSync(join(linkHome, '.omp/agent/skills/mine')), 'the poisoned skill is deleted like any rejected one');
+    assert.ok(existsSync(join(linkHome, '.omp/agent/skills/mine/SKILL.md')), 'the installed copy of the poisoned skill stays (ALAT-178 retention)');
+    assert.equal(readFileSync(join(linkHome, '.omp/agent/skills/mine/run.sh'), 'utf8'), 'echo ok\n', 'the kept copy holds the bytes the record vouches for, never the poisoned target');
     // Restore the clean state the version-pin blocks below count on.
     writeStub(0);
     writeFileSync(join(linkData, 'user/omp/agent/notes/run.sh'), 'echo ok\n');
@@ -1962,7 +2028,7 @@ try {
     assert.ok(r.stdout.includes('SkillSpector rejected') && r.stdout.includes(join(frameData, 'user/omp/agent/skills/mine')), r.stdout);
     assert.equal(readFileSync(join(frameHome, '.alate', 'skillspector-pass.json'), 'utf8'), framePasses, 'a failed scan is never cached');
     assert.ok(!existsSync(join(frameHome, '.omp/agent/skills/mine/z.sh')), 'the split-out file never lands');
-    assert.ok(!existsSync(join(frameHome, '.omp/agent/skills/mine')), 'the rejected skill is deleted like any rejected one');
+    assert.ok(existsSync(join(frameHome, '.omp/agent/skills/mine/a.bin')), 'the installed copy of the rejected skill stays (ALAT-178 retention)');
 
     // A pre-token entry misses exactly once: stripping the key's format token (the only
     // difference an older alate's pass file has) forces one rescan, and the rewritten pass
@@ -2149,7 +2215,7 @@ exit 0
     assert.equal(capCallsGrown.length, 1, `only the skill whose entries changed is rescanned: ${capCallsGrown.join('\n')}`);
     assert.ok(capCallsGrown[0].includes(join(capData, 'user/omp/agent/skills/capped')), capCallsGrown[0]);
     assert.ok(r.stdout.includes(capFailed), r.stdout);
-    assert.ok(!existsSync(join(capHome, '.omp/agent/skills/capped')), 'the installed copy of the rejected skill is removed');
+    assert.ok(existsSync(join(capHome, '.omp/agent/skills/capped/SKILL.md')), 'the installed copy of the rejected skill stays (ALAT-178 retention)');
 
     // (d) Only LOW and MEDIUM pass on the baseline alone; CRITICAL and a severity the gate does
     // not know need entries like HIGH does.
@@ -2177,8 +2243,8 @@ exit 0
 
     // (h) The key binds the flagged file's whole bytes: a reviewed HIGH acceptance installs, and
     // one changed byte elsewhere in that file, with a scanner report identical in every field,
-    // makes a new key. The old entry covers nothing, the rejection prints the new entry, and the
-    // installed copy is removed like that of every rejected skill.
+    // makes a new key. The old entry covers nothing, the rejection prints the new entry, and
+    // the installed copy of the rejected skill stays (ALAT-178 retention).
     const byteData = join(tmp, 'byte-data');
     const byteHome = join(tmp, 'byte-home');
     const byteReviews = join(byteData, 'skillspector-reviews.json');
@@ -2201,7 +2267,7 @@ exit 0
     assert.equal(r.status, 1, `the old entry does not cover the changed file: ${r.stdout}`);
     assert.ok(r.stdout.includes(`${skillItem('bytes')} — rejected: unreviewed baseline acceptance at scripts/run.sh:4`), r.stdout);
     assert.ok(r.stdout.includes(printedEntry(byteData, 'bytes', byteHigh)), `the rejection prints the entry with the new key: ${r.stdout}`);
-    assert.ok(!existsSync(join(byteHome, '.omp/agent/skills/bytes')), 'the installed copy of the rejected skill is removed');
+    assert.ok(existsSync(join(byteHome, '.omp/agent/skills/bytes/scripts/run.sh')), 'the installed copy of the rejected skill stays (ALAT-178 retention)');
 
     // (i) A finding whose flagged file is not a readable file inside the skill folder has no key:
     // a path that leaves the folder and a missing file are rejected with no possible entry, even

@@ -1138,6 +1138,12 @@ try {
   // the rejection cleanup below strips only what the rejected dir itself contributed.
   /** @type {Map<string, string>} */
   const relSource = new Map();
+  // Record fingerprints of files whose machine copy still matches what alate last
+  // installed: a scan-rejected skill keeps these files and their record entries
+  // (specs/provision-item-by-item.md), so a spurious rejection never deletes a good
+  // install through the deletion path below.
+  /** @type {Map<string, string>} */
+  const recordedFp = new Map();
   for (const rel of walk(userRoot)) {
     // A skill left out by a gate contributes nothing: no plan entry, no manifest record, no
     // conflict, so its installed copy is deleted later like any path the snapshot dropped.
@@ -1244,6 +1250,7 @@ try {
     // legacy form above (records a pre-strip alate wrote, entry included). A matched file was
     // not changed on the machine since the install, so the snapshot may replace it.
     const record = have !== null && (have === last[rel] || legacyFingerprint(rel, machineBytes) === last[rel]);
+    if (record) recordedFp.set(rel, /** @type {string} */ (last[rel]));
     // The item key rides on every plan entry, so the per-item results can aggregate by key.
     const itemKey = `user/${rel}`;
     if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null]);
@@ -1422,6 +1429,7 @@ try {
       const want = fingerprint(rel, srcBytes);
       const have = machineBytes !== null ? fingerprint(rel, machineBytes) : null;
       const record = have !== null && have === last[rel];
+      if (record) recordedFp.set(rel, last[rel]);
       const itemKey = `user/${rel}`;
       if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null]);
       else if (layerMode && have === want) plan.push(['installed', dest, srcBytes, itemKey, layerLabel(rel, srcBytes, have)]);
@@ -1453,6 +1461,40 @@ try {
   // current, and conflicts cleanup. Layer mode scans the installed layer after the writes
   // instead: the shipped skills ride in the layer, and the existing post-write cleanup
   // removes a rejected one.
+  // CRLF guard (ALAT-178), before the scan and before any write, in both modes: the
+  // scan verdicts bind bytes, and the shipped baselines fingerprint LF bytes. A stale
+  // checkout (made before the data repo's .gitattributes, with core.autocrlf=true) or
+  // a CRLF text file committed against it changes every finding key, so no baseline
+  // entry matches and the gate would reject whole skills that are fine. Refuse with
+  // the fix instead. Unreadable files stay out (the hash and scan gates report them),
+  // and a NUL byte marks binary content whose CR bytes are data, not line endings.
+  /** @type {string[]} */
+  const crlfFiles = [];
+  for (const dir of skillDirs) {
+    if (rejectedSkills.has(dir)) continue;
+    if (!existsSync(join(dir, SHIPPED_BASELINE))) continue;
+    for (const file of walk(dir)) {
+      let bytes;
+      try {
+        bytes = readFileSync(join(dir, file));
+      } catch {
+        continue;
+      }
+      if (bytes.includes(0) || !bytes.includes(13)) continue;
+      crlfFiles.push(`${skillKey(userRoot, dir)}/${file}`);
+    }
+  }
+  if (crlfFiles.length) {
+    crlfFiles.sort();
+    const named = crlfFiles.slice(0, 10);
+    throw new Error([
+      `refusing: ${crlfFiles.length} text file${crlfFiles.length === 1 ? '' : 's'} in baseline-shipping skills of ${data.dir} hold CR bytes (CRLF line endings).`,
+      'The scan baselines fingerprint LF bytes, so CRLF source bytes would reject skills that are fine.',
+      'Fix the data repo checkout, then run again: rewrite the files from HEAD (remove them and run git checkout -- . in the data repo), or set core.autocrlf=false there.',
+      ...named.map(f => `  ${f}`),
+      ...(crlfFiles.length > named.length ? [`  … and ${crlfFiles.length - named.length} more`] : []),
+    ].join('\n'));
+  }
   if (!layerMode && (skillDirs.length || shippedScanDirs.length)) {
     /** @param {string} dir @returns {string} */
     const itemKey = dir => shippedDirKey.get(dir) ?? skillKey(userRoot, dir);
@@ -1477,7 +1519,38 @@ try {
       return source !== undefined && rejectedSkills.has(source);
     };
     for (let i = plan.length - 1; i >= 0; i--) if (relRejected(plan[i][3].slice('user/'.length))) plan.splice(i, 1);
-    for (const rel of Object.keys(current)) if (relRejected(rel)) delete current[rel];
+    // A scan-rejected skill never installs its snapshot bytes, but its installed copy
+    // stays: a record-matching file keeps its record entry and a warning note, so a
+    // spurious rejection — a stale checkout's CRLF bytes against LF baseline
+    // fingerprints, a scanner regression — never deletes a good install. A file that
+    // changed on the machine keeps the existing path: it stays with its note and loses
+    // its record (specs/provision-item-by-item.md).
+    /** @type {Set<string>} */
+    const keptKeys = new Set();
+    for (const rel of Object.keys(current)) {
+      if (!relRejected(rel)) continue;
+      const fp = recordedFp.get(rel);
+      if (fp === undefined) {
+        delete current[rel];
+        continue;
+      }
+      current[rel] = fp;
+      const source = relSource.get(rel);
+      if (source === 'snapshot') {
+        // The rel belongs to the longest rejected snapshot prefix it sits under: skill
+        // dirs never nest today, but the ownership must not depend on that.
+        let best = '';
+        for (const dir of rejectedSkills) {
+          if (shippedDirKey.has(dir)) continue;
+          const p = relative(userRoot, dir).split(sep).join('/');
+          if ((rel === p || rel.startsWith(`${p}/`)) && p.length > best.length) best = p;
+        }
+        if (best) keptKeys.add(`user/${best}`);
+      } else if (source !== undefined) {
+        keptKeys.add(/** @type {string} */ (shippedDirKey.get(source)));
+      }
+    }
+    for (const key of keptKeys) notes.push(`scan rejected ${key}, kept the previously installed version`);
     conflicts = conflicts.filter(dest => {
       const rel = relative(home, dest).split(sep).join('/');
       return !relRejected(rel.startsWith('.') ? rel.slice(1) : rel);
