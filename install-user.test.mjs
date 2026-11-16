@@ -1344,23 +1344,77 @@ try {
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /[1-9]\d* installed/, 'the binary file installs beside the guard');
 
+    // Retention covers a rejected skill whole, not partial: a recorded file the rejected
+    // snapshot drops never enters the rejected walk's `current`, so only the record
+    // resurrection keeps it from the deletion path (send-back 1: the run must not print
+    // "kept" while the dropped file's record-matching copy is deleted).
+    const dropData = join(tmp, 'data-drop');
+    const dropHome = join(tmp, 'home-drop');
+    const putD = (rel, text) => { mkdirSync(dirname(join(dropData, 'user', rel)), { recursive: true }); writeFileSync(join(dropData, 'user', rel), text); };
+    putD('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putD('omp/agent/skills/dropy/SKILL.md', skillText('dropy'));
+    putD('omp/agent/skills/dropy/extra.sh', 'echo v1\n');
+    writeStub(0);
+    r = run(['--data', dropData, '--skip-plugins'], dropHome);
+    assert.equal(r.status, 0, r.stderr);
+    rmSync(join(dropData, 'user/omp/agent/skills/dropy/extra.sh'));
+    putD('omp/agent/skills/dropy/SKILL.md', skillText('dropy', '# dropy, v2\n'));
+    writeStub(1, 'SkillSpector v2.13.0', ['dropy']);
+    r = run(['--data', dropData, '--skip-plugins'], dropHome);
+    assert.equal(r.status, 1, 'the rejection fails the run');
+    assert.ok(existsSync(join(dropHome, '.omp/agent/skills/dropy/SKILL.md')), 'the installed SKILL.md stays');
+    assert.ok(existsSync(join(dropHome, '.omp/agent/skills/dropy/extra.sh')), 'the installed file the rejected snapshot drops stays');
+    assert.ok(r.stdout.includes('scan rejected user/omp/agent/skills/dropy, kept the previously installed version'), 'the kept skill carries the warning note');
+    assert.ok(!/[1-9]\d* deleted/.test(r.stdout), 'nothing deletes');
+    const dropRecord = JSON.parse(readFileSync(join(dropHome, '.alate/installed.json'), 'utf8'));
+    assert.ok(dropRecord['omp/agent/skills/dropy/SKILL.md'] && dropRecord['omp/agent/skills/dropy/extra.sh'], 'the record keeps both files');
+    // A dropped file that changed on the machine keeps the existing path: it stays with
+    // the existing note and loses its record.
+    writeFileSync(join(dropHome, '.omp/agent/skills/dropy/extra.sh'), 'echo edited\n');
+    r = run(['--data', dropData, '--skip-plugins'], dropHome);
+    assert.equal(r.status, 1, 'the rejection repeats');
+    assert.equal(readFileSync(join(dropHome, '.omp/agent/skills/dropy/extra.sh'), 'utf8'), 'echo edited\n', 'a changed dropped file stays');
+    assert.ok(r.stdout.includes('changed here, kept:'), 'the changed dropped file carries the existing note');
+    const dropRecord2 = JSON.parse(readFileSync(join(dropHome, '.alate/installed.json'), 'utf8'));
+    assert.ok(!dropRecord2['omp/agent/skills/dropy/extra.sh'], 'the changed dropped file loses its record');
+    assert.ok(dropRecord2['omp/agent/skills/dropy/SKILL.md'], 'the record-matching file keeps its record');
+    // The fixed checkout installs the next version whole (--force: the machine-edited
+    // dropped file is a plain conflict without it, machine state wins as always).
+    putD('omp/agent/skills/dropy/extra.sh', 'echo v2\n');
+    writeStub(0);
+    r = run(['--data', dropData, '--skip-plugins', '--force'], dropHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(join(dropHome, '.omp/agent/skills/dropy/extra.sh'), 'utf8'), 'echo v2\n', 'the fixed checkout installs the dropped file');
+
     // Retention also covers a scan-rejected shipped skill: its installed copy and record
-    // stay with the warning note under the shipped key. A byte change forces the rescan
-    // that the rejection needs (a warm pass never rescans), restored in the finally.
-    const retroMd = join(scriptDir, 'shipped/ottr/.agents/skills/retro/SKILL.md');
+    // stay with the warning note under the shipped key, and the copy is whole — an
+    // installed file the rejected vendored tree drops stays too (send-back 1). A byte
+    // change forces the rescan that the rejection needs (a warm pass never rescans);
+    // the fixture restores the vendored tree exactly.
+    const retroDir = join(scriptDir, 'shipped/ottr/.agents/skills/retro');
+    const retroMd = join(retroDir, 'SKILL.md');
     const retroOriginal = readFileSync(retroMd, 'utf8');
+    const retroExtra = join(retroDir, 'extra.sh');
+    writeFileSync(retroExtra, 'echo shipped-v1\n');
+    writeStub(0);
+    r = run(['--data', data, '--skip-plugins'], home);
+    assert.equal(r.status, 0, `the vendored extra file installs: ${r.stderr}`);
     try {
+      rmSync(retroExtra);
       writeFileSync(retroMd, `${retroOriginal}\n`);
       writeStub(1, 'SkillSpector v2.13.0', ['retro']);
       r = run(['--data', data, '--skip-plugins'], home);
       assert.equal(r.status, 1, 'a scan-rejected shipped skill fails the run');
       assert.ok(r.stdout.includes('user/agents/skills/retro — rejected: SC2 at SKILL.md:7'), r.stdout);
       assert.ok(existsSync(join(home, '.agents/skills/retro/SKILL.md')), 'the installed shipped copy stays');
+      assert.ok(existsSync(join(home, '.agents/skills/retro/extra.sh')), 'the installed shipped file the rejected tree drops stays');
       assert.ok(r.stdout.includes('scan rejected user/agents/skills/retro, kept the previously installed version'), 'the shipped rejection carries the warning note');
+      assert.ok(!/[1-9]\d* deleted/.test(r.stdout), 'nothing deletes');
       const retroRecord = JSON.parse(readFileSync(join(home, '.alate/installed.json'), 'utf8'));
-      assert.ok(Object.keys(retroRecord).some(rel => rel.startsWith('agents/skills/retro/')), 'the shipped record stays');
+      assert.ok(retroRecord['agents/skills/retro/SKILL.md'] && retroRecord['agents/skills/retro/extra.sh'], 'the shipped record keeps both files');
     } finally {
       writeFileSync(retroMd, retroOriginal);
+      rmSync(retroExtra, { force: true });
       writeStub(0);
     }
     r = run(['--data', data, '--skip-plugins'], home);

@@ -1499,9 +1499,15 @@ try {
     /** @param {string} dir @returns {string} */
     const itemKey = dir => shippedDirKey.get(dir) ?? skillKey(userRoot, dir);
     const scan = await runScan([...skillDirs.filter(dir => !rejectedSkills.has(dir)), ...shippedScanDirs], itemKey, reviews);
+    // Retention applies to scan-gate rejections only (specs/provision-item-by-item.md):
+    // a skill a pre-walk gate rejected (alias, no origin, structure, hidden characters)
+    // keeps today's deletion rule, so the retention paths below must not see it.
+    /** @type {Set<string>} */
+    const scanRejected = new Set();
     for (const [dir, info] of scan.rejected) {
       addScanRejection(itemKey(dir), info);
       rejectedSkills.add(dir);
+      scanRejected.add(dir);
     }
     // Drop every rel inside a rejected skill from the plan, the manifest, and the conflicts.
     // A rejection strips only the entries its own dir contributed (relSource): a rejected
@@ -1520,11 +1526,29 @@ try {
     };
     for (let i = plan.length - 1; i >= 0; i--) if (relRejected(plan[i][3].slice('user/'.length))) plan.splice(i, 1);
     // A scan-rejected skill never installs its snapshot bytes, but its installed copy
-    // stays: a record-matching file keeps its record entry and a warning note, so a
+    // stays whole: a record-matching file keeps its record entry and a warning note, so a
     // spurious rejection — a stale checkout's CRLF bytes against LF baseline
     // fingerprints, a scanner regression — never deletes a good install. A file that
     // changed on the machine keeps the existing path: it stays with its note and loses
     // its record (specs/provision-item-by-item.md).
+    // Ownership helpers: the rel-space prefix of a rejected skill (snapshot spelling for
+    // snapshot dirs, the shipped key's for vendored dirs) and the longest rejected prefix
+    // a rel sits under. Skill dirs never nest today, but the ownership must not depend
+    // on that.
+    /** @param {string} dir @returns {string} */
+    const rejectedPrefix = dir => {
+      const key = shippedDirKey.get(dir);
+      return key !== undefined ? key.slice('user/'.length) : relative(userRoot, dir).split(sep).join('/');
+    };
+    /** @param {string} rel @returns {string | null} */
+    const owningRejectedKey = rel => {
+      let best = '';
+      for (const dir of scanRejected) {
+        const p = rejectedPrefix(dir);
+        if ((rel === p || rel.startsWith(`${p}/`)) && p.length > best.length) best = p;
+      }
+      return best ? `user/${best}` : null;
+    };
     /** @type {Set<string>} */
     const keptKeys = new Set();
     for (const rel of Object.keys(current)) {
@@ -1537,18 +1561,28 @@ try {
       current[rel] = fp;
       const source = relSource.get(rel);
       if (source === 'snapshot') {
-        // The rel belongs to the longest rejected snapshot prefix it sits under: skill
-        // dirs never nest today, but the ownership must not depend on that.
-        let best = '';
-        for (const dir of rejectedSkills) {
-          if (shippedDirKey.has(dir)) continue;
-          const p = relative(userRoot, dir).split(sep).join('/');
-          if ((rel === p || rel.startsWith(`${p}/`)) && p.length > best.length) best = p;
-        }
-        if (best) keptKeys.add(`user/${best}`);
+        const owner = owningRejectedKey(rel);
+        if (owner !== null) keptKeys.add(owner);
       } else if (source !== undefined) {
         keptKeys.add(/** @type {string} */ (shippedDirKey.get(source)));
       }
+    }
+    // The copy is whole, never partial: a recorded file the rejected snapshot or vendored
+    // tree no longer ships never entered `current`, so without this the deletion path
+    // below would take it while the run reports the old version kept. Resurrect every
+    // recorded rel under a rejected prefix whose machine copy still matches its record,
+    // through the same alias guard and single no-follow read the deletion path uses, so
+    // a planted link refuses instead of being followed.
+    for (const [rel, fp] of Object.entries(last)) {
+      if (typeof fp !== 'string' || Object.hasOwn(current, rel)) continue;
+      const owner = owningRejectedKey(rel);
+      if (owner === null) continue;
+      const dest = join(home, '.' + rel);
+      checkDestination(home, dest);
+      const bytes = readMachineFile(home, dest);
+      if (bytes === null || machineFingerprint(rel, bytes) !== fp) continue;
+      current[rel] = fp;
+      keptKeys.add(owner);
     }
     for (const key of keptKeys) notes.push(`scan rejected ${key}, kept the previously installed version`);
     conflicts = conflicts.filter(dest => {

@@ -35,11 +35,13 @@ Every item gets exactly one result:
   It is never installed. A content-gate rejection (skill root alias, no origin,
   structure, hidden characters) deletes a previously installed, record-matching copy,
   the same deletion rule as a snapshot-dropped path. A scan-gate rejection keeps the
-  previously installed, record-matching copy in place, keeps its record, and prints a
-  warning note: the installed bytes passed the scan gate when they installed, and an
-  environment artifact such as CRLF working-tree bytes against LF baseline
-  fingerprints must never delete a good install (ALAT-178). A copy that changed on
-  the machine stays with the existing note and loses its record, in both cases.
+  previously installed, record-matching copy in place — the whole copy: recorded
+  files the rejected snapshot or vendored tree no longer ships stay too — keeps its
+  record, and prints a warning note: the installed bytes passed the scan gate when
+  they installed, and an environment artifact such as CRLF working-tree bytes against
+  LF baseline fingerprints must never delete a good install (ALAT-178). A copy that
+  changed on the machine stays with the existing note and loses its record, in both
+  cases.
 - `no origin` — the origin gate has no recorded origin for the item. Same handling as
   `rejected`: left out, stale record-matching copy deleted. An uncovered MCP server is
   reported but does not exclude the `mcp.json` file itself, so one uncovered server
@@ -163,11 +165,14 @@ failure; `provisionedSha` still moves only on `ok`.
 6. scan gate over the surviving skills: findings (exit 1) make that skill
    `rejected`; a scan error (any other non-zero exit or a killed scan) makes that
    skill `rejected` with rule `scan error`; excluded skills are dropped from the
-   plan, the manifest, and `conflicts` before any write, except that a
+   plan, the manifest, and `conflicts` before any write, except that every
    record-matching file of a scan-rejected skill keeps its record entry and stays
-   untouched with the warning note from the per-item result above. Its own snapshot
-   bytes never install. Layer mode is unchanged: the fresh layer drops a rejected
-   skill before the switch, and the live layer keeps running;
+   untouched with the warning note from the per-item result above — including a
+   recorded file the rejected snapshot or vendored tree no longer ships, which is
+   resurrected into the manifest so the deletion path never takes it (the copy is
+   whole, never partial). Its own snapshot bytes never install. Layer mode is
+   unchanged: the fresh layer drops a rejected skill before the switch, and the live
+   layer keeps running;
 7. writes, deletions, manifest; layer mode scans the fresh layer before the manifest
    is written, removes rejected skill dirs from the layer, and drops them from the
    manifest;
@@ -199,10 +204,11 @@ failure; `provisionedSha` still moves only on `ok`.
 
 a. One bad skill among good ones: the good skills install, the bad one is reported
    with its rule and file, exit 1.
-b. An installed copy of a skill the scan rejects keeps its record-matching files,
-   its record, and a warning note; a machine-changed copy stays with the existing
-   note and loses its record. A skill a content gate rejects still loses its
-   installed record-matching copy.
+b. An installed copy of a skill the scan rejects keeps its record-matching files
+   (including a recorded file the rejected snapshot drops), its record, and a
+   warning note; a machine-changed dropped file stays with the existing note and
+   loses its record. A skill a content gate rejects still loses its installed
+   record-matching copy.
 c. One uncovered origin does not stop the other items: the covered rule installs,
    the uncovered item is reported, exit 1.
 d. A missing scanner refuses the whole install-user run; nothing is written.
