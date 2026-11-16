@@ -17,7 +17,7 @@ A data repo can group skills, plugins, and worker lists per project. A bundle is
 
 A project value in `projects/projects.json` can be an object with optional `extras` and `bundles` arrays. The legacy extras-array value stays valid and means no bundles. A bundle named `core` applies to every project. For each project, alate merges core, then the project's `bundles` in array order, then the project's own `workers/<p>/` lists. An item named twice counts once.
 
-Core skills install into the home skill roots. Non-core bundle skills install into `.ottr/project-skills/<project>/`. The merged plugin names install into `.ottr/plugins/<project>.txt`. A skill or plugin that no bundle names installs nowhere and stays on the shelf. Bundles mode is active when `bundles/` exists as a directory. This fixture holds no `bundles/` folder, so it installs as today.
+Core skills install into the home skill roots. Non-core bundle skills install into `.ottr/project-skills/<project>/`. The merged plugin names install into `.ottr/plugins/<project>.txt`; the file exists for every project in bundles mode, and an empty set installs an empty file. A skill or plugin that no bundle names installs nowhere and stays on the shelf. Bundles mode is active when `bundles/` exists as a directory. This fixture holds no `bundles/` folder, so it installs as today.
 
 ## Shipped skills
 

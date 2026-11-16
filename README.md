@@ -117,14 +117,14 @@ For each project, alate merges the lists in this order:
 2. The project's `bundles` array, in array order.
 3. The project's own `workers/<p>/` lists.
 
-An item named twice counts once, at its first name. The merge dedups each file type: `apt.txt` on the package name, `requirements.txt` on the name before `==`, `tools.json` on the entry `name`, and `env.txt` on the name.
+An item named twice counts once, at its first name. The merge dedups each file type: `apt.txt` on the package name, `requirements.txt` on the name before `==` (the first pin wins), `tools.json` on the entry `name`, and `env.txt` on the name — a name that a later list states again takes the later line, so a `plain` modifier in a later list survives.
 
 ### What installs where
 
 - A skill named by `core` installs into the home skill roots, as today. A skill that `core` names and a bundle also names installs once, in the home roots.
 - A skill that `core` does not name, and that the project's bundles or its own `workers/<p>/skills.txt` names, installs into `.ottr/project-skills/<project>/`. A project with no non-core skills gets no per-project folder.
 - The merged worker lists install into `.ottr/workers/<project>/`, as today.
-- The merged per-project plugin names install into `.ottr/plugins/<project>.txt`. The home plugin install from the captured lockfile stays as today.
+- The merged per-project plugin names install into `.ottr/plugins/<project>.txt`. The file exists for every project in bundles mode; an empty merged set installs an empty file, because the board scopes a project's plugins only when the file exists. The home plugin install from the captured lockfile stays as today.
 - The vendored shipped skills install globally, as today.
 
 ### The shelf

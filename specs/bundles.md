@@ -1,6 +1,6 @@
 # Bundles: per-project skills, plugins and worker lists
 
-Status: draft (ALAT-179 P2). Research evidence holds for omp 18.15.0 and the Ottr
+Status: draft. Research evidence holds for omp 18.15.0 and the Ottr
 board of 2026-11-16.
 
 ## Problem
@@ -171,16 +171,18 @@ once, at its first name:
 
 Per file type:
 
-- `apt.txt`, `requirements.txt`, `skills.txt`, `plugins.txt`: line lists; a
-  later duplicate line of an already-merged item drops. `apt.txt` keeps the
-  existing line form (comments, blank lines); dedup keys on the package name
-  (the first token). `requirements.txt` dedups on the package name before `==`.
+- `apt.txt`: line list; the first line of a package name wins; dedup keys on
+  the package name (the first token). `requirements.txt` dedups on the package
+  name before `==`, and the first pin wins: a later list cannot move an
+  already-planned pin. `skills.txt` and `plugins.txt`: name lists; the first
+  occurrence wins.
 - `tools.json`: JSON arrays of tool entries; dedup on the entry `name`; the
   first occurrence in merge order wins whole. The merged array re-validates
   with the existing `tools.json` validator.
-- `env.txt`: name lists; dedup on the name. `env.txt` carries names, never
-  values (the existing validator rejects values), so no value conflict exists;
-  the "later list wins" rule has no observable effect beyond dedup.
+- `env.txt`: name lists, each optionally with the `plain` modifier. The later
+  list wins per name: a name seen again in a later list replaces the earlier
+  line, keeping the earlier line's position, so the later form (modifier
+  included) survives.
 - Merged worker lists install to `.ottr/workers/<project>/<file>` as today, so
   Ottr's turn readers need no change. The fleet folder `workers/_all/` keeps
   today's behavior: Ottr merges it at turn time, outside this merge.
@@ -205,11 +207,15 @@ Per file type:
 - **Plugins.** `plugins.txt` names plugins the data repo already holds (names in
   `user/omp/plugins/package.json` dependencies, `omp-plugins.lock.json`, or
   `installed_plugins.json`). The merged per-project name list installs to
-  `<home>/.ottr/plugins/<project>.txt`. The home plugin install from the
-  captured lockfile stays as today (no lockfile surgery); scoping happens
-  because the Ottr overlay lists only the project's plugins when the file
-  exists. Boundary: an interactive omp run outside Ottr has no project, so it
-  keeps loading the home's plugins; this card scopes Ottr turns.
+  `<home>/.ottr/plugins/<project>.txt`. The file exists for every project in
+  bundles mode; an empty merged set installs an empty file, because the
+  consumer scopes a project's plugins only when the file exists — a missing
+  file would fall back to every plugin of the home, other bundles' plugins
+  included. The home plugin install from the captured lockfile stays as today
+  (no lockfile surgery); scoping happens because the Ottr overlay lists only
+  the project's plugins when the file exists. Boundary: an interactive omp run
+  outside Ottr has no project, so it keeps loading the home's plugins; this
+  card scopes Ottr turns.
 - The existing shipped-skill suppression stays: a snapshot skill of a shipped
   name (anywhere in the repo, shelf included) still skips the shipped copy.
 

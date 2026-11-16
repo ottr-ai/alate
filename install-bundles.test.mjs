@@ -89,7 +89,8 @@ const fixture = (opts = {}) => {
     const gamedevSkills = opts.unknownSkill ? 'gamedev-skill\nno-such-skill\n' : opts.dropBundleSkill === 'gamedev-2d' ? '' : 'gamedev-skill\n';
     const gamedevPlugins = opts.unknownPlugin ? '@scope/no-such-plugin\n' : '@scope/web-b\n';
     put(dataDir, 'bundles/core/skills.txt', 'core-skill\n');
-    put(dataDir, 'bundles/core/plugins.txt', 'pony-a\n');
+    // Core names no plugin: beta (no bundles) must then get an empty, present
+    // plugin list, never the home-wide fallback.
     put(dataDir, 'bundles/core/apt.txt', '# shared first\npkg-one\n');
     put(dataDir, 'bundles/gamedev-2d/skills.txt', gamedevSkills);
     put(dataDir, 'bundles/gamedev-2d/plugins.txt', gamedevPlugins);
@@ -129,9 +130,13 @@ try {
     assert.equal(got(homeDir, '.ottr/workers/alpha/apt.txt'), 'pkg-one\npkg-two\npkg-three\n');
     assert.equal(got(homeDir, '.ottr/workers/beta/apt.txt'), 'pkg-one\n');
     assert.equal(got(homeDir, '.ottr/workers/_all/apt.txt'), 'fleet-pkg\n');
-    // Per-project plugin lists merge core, bundle, own.
-    assert.equal(got(homeDir, '.ottr/plugins/alpha.txt'), 'pony-a\n@scope/web-b\n');
-    assert.equal(got(homeDir, '.ottr/plugins/beta.txt'), 'pony-a\n');
+    // Per-project plugin lists merge core, bundle, own. Core names no plugin,
+    // so beta's set is empty — and its file must still exist (empty), because
+    // the consumer scopes plugins only when the file exists: a missing file
+    // would fall back to every plugin of the home, the gamedev plugin
+    // included.
+    assert.equal(got(homeDir, '.ottr/plugins/alpha.txt'), '@scope/web-b\n');
+    assert.equal(got(homeDir, '.ottr/plugins/beta.txt'), '', 'beta plans no plugin, so its list file exists and is empty');
     // Shelf skills are still scanned like today (the stub logged their scan call).
     const calls = readFileSync(callsLog, 'utf8');
     assert.match(calls, /scan .*shelf-skill/, 'the shelf skill is scanned like today');
@@ -147,7 +152,7 @@ try {
     assert.equal(r.status, 0, `run after the bundle drops the skill: ${r.stderr}`);
     assert.ok(!existsSync(join(homeDir, '.ottr/project-skills/alpha/gamedev-skill')), 'a skill that left its bundle is deleted from the project folder');
     assert.ok(existsSync(join(homeDir, '.ottr/workers/alpha/apt.txt')), 'the merged worker list survives while its sources stand');
-    assert.equal(got(homeDir, '.ottr/plugins/alpha.txt'), 'pony-a\n@scope/web-b\n', 'the plugin list is unchanged by the skill drop');
+    assert.equal(got(homeDir, '.ottr/plugins/alpha.txt'), '@scope/web-b\n', 'the plugin list is unchanged by the skill drop');
 
     // Unknown skill name in a bundle: refusal before any write.
     ({ homeDir, run } = fixture({ unknownSkill: true }));

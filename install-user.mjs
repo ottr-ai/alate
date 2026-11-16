@@ -1539,9 +1539,12 @@ try {
   };
   if (bundlesPlan) {
     for (const project of bundlesPlan.projects) {
-      const names = project.lists.get('plugins');
-      if (!names?.length) continue;
-      planRecordedFile(`ottr/plugins/${project.name}.txt`, Buffer.from(`${names.join('\n')}\n`));
+      const names = project.lists.get('plugins') ?? [];
+      // The file exists for every project in bundles mode, empty list
+      // included: the consumer scopes a project's plugins only when the file
+      // exists, so a missing file would fall back to every plugin of the
+      // home. An empty file names no plugin.
+      planRecordedFile(`ottr/plugins/${project.name}.txt`, Buffer.from(names.length ? `${names.join('\n')}\n` : ''));
     }
   }
   // Ottr ships its agent skills in its own checkout, alate vendors the whole tree at one
