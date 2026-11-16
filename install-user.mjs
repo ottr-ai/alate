@@ -759,6 +759,20 @@ const runScan = async (skillDirs, keyOf, reviews) => {
   return { rejected };
 };
 
+// Resolves one tools.json source's per-OS data for this platform (specs/canonical-form.md):
+// os filters drop or keep entries, per-OS values resolve, and the os field strips, so the
+// resolved bytes pass the five-key validator shape. Returns null when every entry drops
+// for this platform. A per-OS rule break throws the whole-run refusal the validators
+// produce, naming this source path and the entry — the same shape the raw validators use.
+/** @param {Buffer} src @param {string} path @returns {Buffer | null} */
+const resolveToolsSource = (src, path) => {
+  try {
+    return renderToolsJson(src, process.platform);
+  } catch (err) {
+    throw new Error(`${path}: ${/** @type {Error} */ (err).message.replace(/^tools\.json: /, '')}`);
+  }
+};
+
 /** @param {Buffer} bytes @param {string} path @returns {void} */
 const validateTools = (bytes, path) => {
   /** @type {WorkerTool[]} */
@@ -1460,10 +1474,12 @@ try {
   if (bundlesPlan) {
     // Bundles mode plans the merged worker lists per project (specs/bundles.md merge
     // order); workers/_all keeps today's verbatim path. Every contributing source — each
-    // bundle folder file and each project's own file — validates before any write, and the
-    // merged bytes re-validate the same way, so a failure names its source with the
-    // existing wording. A project that plans no bytes for a file type installs nothing:
-    // the unshipped-file deletion below removes a stale copy.
+    // bundle folder file and each project's own file — validates before any write, and
+    // the merged bytes re-validate the same way, so a failure names its source with the
+    // existing wording. A tools.json source validates its per-OS-resolved bytes (the raw
+    // form carries os fields and per-OS value objects the validator's five-key shape
+    // refuses); the other list sources validate raw. A project that plans no bytes for a
+    // file type installs nothing: the unshipped-file deletion below removes a stale copy.
     const bundlesRoot = join(data.dir, 'bundles');
     assertSourceInside(data.dir, bundlesRoot);
     for (const bundle of readdirSync(bundlesRoot, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name)) {
@@ -1472,7 +1488,10 @@ try {
         if (!existsSync(srcPath)) continue;
         assertSourceInside(bundlesRoot, srcPath);
         const src = readFileSync(srcPath);
-        if (file === 'tools.json') validateTools(src, `bundles/${bundle}/${file}`);
+        if (file === 'tools.json') {
+          const resolved = resolveToolsSource(src, `bundles/${bundle}/${file}`);
+          if (resolved !== null) validateTools(resolved, `bundles/${bundle}/${file}`);
+        }
         else if (file === 'env.txt') validateEnv(src, `bundles/${bundle}/${file}`);
         else if (file === 'requirements.txt') validateRequirements(src, `bundles/${bundle}/${file}`);
       }
@@ -1485,7 +1504,10 @@ try {
           if (!existsSync(srcPath)) continue;
           assertSourceInside(workersRoot, srcPath);
           const src = readFileSync(srcPath);
-          if (file === 'tools.json') validateTools(src, `workers/${name}/${file}`);
+          if (file === 'tools.json') {
+            const resolved = resolveToolsSource(src, `workers/${name}/${file}`);
+            if (resolved !== null) validateTools(resolved, `workers/${name}/${file}`);
+          }
           else if (file === 'env.txt') validateEnv(src, `workers/${name}/${file}`);
           else if (file === 'requirements.txt') validateRequirements(src, `workers/${name}/${file}`);
         }
@@ -1514,13 +1536,9 @@ try {
         // platform, every other list renders the target form, and a per-OS rule break
         // refuses the whole run before any write.
         if (file === 'tools.json') {
-          try {
-            const rendered = renderToolsJson(src, process.platform);
-            if (rendered === null) continue;
-            src = rendered;
-          } catch (err) {
-            throw new Error(`${srcPath}: ${/** @type {Error} */ (err).message.replace(/^tools\.json: /, '')}`);
-          }
+          const resolved = resolveToolsSource(src, srcPath);
+          if (resolved === null) continue;
+          src = resolved;
         } else {
           src = renderForTarget(`workers/_all/${file}`, src);
         }
@@ -1546,13 +1564,9 @@ try {
         // for this platform ships nothing, so a stale installed copy goes the way any
         // unshipped list does.
         if (file === 'tools.json') {
-          try {
-            const rendered = renderToolsJson(src, process.platform);
-            if (rendered === null) continue;
-            src = rendered;
-          } catch (err) {
-            throw new Error(`${srcPath}: ${/** @type {Error} */ (err).message.replace(/^tools\.json: /, '')}`);
-          }
+          const resolved = resolveToolsSource(src, srcPath);
+          if (resolved === null) continue;
+          src = resolved;
         } else {
           src = renderForTarget(`workers/${project}/${file}`, src);
         }

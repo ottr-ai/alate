@@ -107,7 +107,11 @@ No file is ever duplicated per OS.
 
 - A `tools.json` entry may carry an optional `os` array of platform names
   (`linux`, `win32`, `darwin`). Install drops the entry (and the field) when the
-  target platform is not in the list.
+  target platform is not in the list. The entry may sit in any worker-list source:
+  a bundle folder, a project's own `workers/<p>/` file, the `workers/_all/` fleet
+  folder, or a verbatim non-bundles list. Every check (the source pre-check and the
+  merged-result check) validates the resolved bytes, so a raw `os` shape never
+  refuses a run that resolution would accept.
 - A `tools.json` value may be an object keyed by platform names, for example
   `{"linux": "npx", "win32": "npx.cmd"}`. Install resolves it to the target's value
   and drops the wrapper. This covers the one value-level difference alate knows

@@ -75,7 +75,7 @@ const PROJECTS_JSON = JSON.stringify({
 /**
  * Builds a fresh fixture pair and returns the run helper. opts.flip holds
  * scenario mutations keyed by a short name.
- * @param {{ bundles?: boolean, unknownSkill?: boolean, unknownBundle?: boolean, unknownPlugin?: boolean, dropBundleSkill?: string }} [opts]
+ * @param {{ bundles?: boolean, unknownSkill?: boolean, unknownBundle?: boolean, unknownPlugin?: boolean, dropBundleSkill?: string, badOs?: boolean, missingOs?: boolean }} [opts]
  */
 const fixture = (opts = {}) => {
   const n = readdirSync(tmp).length;
@@ -95,9 +95,42 @@ const fixture = (opts = {}) => {
     put(dataDir, 'bundles/gamedev-2d/skills.txt', gamedevSkills);
     put(dataDir, 'bundles/gamedev-2d/plugins.txt', gamedevPlugins);
     put(dataDir, 'bundles/gamedev-2d/apt.txt', 'pkg-two\npkg-one\n');
+    // Per-OS data in a bundle source (specs/canonical-form.md): os filters and per-OS
+    // values resolve at install, so the raw bytes never refuse the run.
+    if (opts.badOs) {
+      put(dataDir, 'bundles/gamedev-2d/tools.json', JSON.stringify([
+        { name: 'broken-tool', os: ['sunos'], url: 'https://example/b.tar.gz', sha256: 'c'.repeat(64), unpack: 'none' },
+      ]));
+    } else if (opts.missingOs) {
+      // A per-OS value whose keys are all platform names but that lacks this host's
+      // key: the marker resolves structurally, and the missing target key refuses.
+      put(dataDir, 'bundles/gamedev-2d/tools.json', JSON.stringify([
+        { name: 'broken-tool', url: { win32: 'https://example/b.zip' }, sha256: 'c'.repeat(64), unpack: 'none' },
+      ]));
+    } else {
+      put(dataDir, 'bundles/gamedev-2d/tools.json', JSON.stringify([
+        {
+          name: 'bundle-tool',
+          url: { linux: 'https://example/bundle-linux.tar.gz', win32: 'https://example/bundle-win.zip' },
+          sha256: 'c'.repeat(64),
+          unpack: 'zip',
+          bin: { linux: 'bundle', win32: 'bundle.exe' },
+        },
+        { name: 'bundle-win-only', os: ['win32'], url: 'https://example/bw.exe', sha256: 'd'.repeat(64), unpack: 'none' },
+      ]));
+    }
   }
   put(dataDir, 'workers/alpha/skills.txt', 'gamedev-skill\n');
   put(dataDir, 'workers/alpha/apt.txt', 'pkg-three\n');
+  put(dataDir, 'workers/alpha/tools.json', JSON.stringify([
+    {
+      name: 'own-tool',
+      url: { linux: 'https://example/own-linux.tar.gz', win32: 'https://example/own-win.zip' },
+      sha256: 'e'.repeat(64),
+      unpack: 'zip',
+      bin: { linux: 'own', win32: 'own.exe' },
+    },
+  ]));
   put(dataDir, 'workers/_all/apt.txt', 'fleet-pkg\n');
   // The _all fleet lists hold the canonical form too (specs/canonical-form.md): the CRLF
   // fixture bytes and the per-OS tools.json must land rendered and resolved.
@@ -156,6 +189,26 @@ try {
         bin: onWin ? 'fleet.exe' : 'fleet',
       },
     ], 'the _all tools.json resolves per-OS values and drops os-filtered entries');
+    // Per-OS data in bundles-mode sources (specs/canonical-form.md): a bundle folder's
+    // tools.json and a project's own tools.json resolve at merge, in merge order
+    // (core, bundle, own), so the raw os shapes never refuse the run.
+    assert.deepEqual(JSON.parse(got(homeDir, '.ottr/workers/alpha/tools.json')), [
+      {
+        name: 'bundle-tool',
+        url: onWin ? 'https://example/bundle-win.zip' : 'https://example/bundle-linux.tar.gz',
+        sha256: 'c'.repeat(64),
+        unpack: 'zip',
+        bin: onWin ? 'bundle.exe' : 'bundle',
+      },
+      {
+        name: 'own-tool',
+        url: onWin ? 'https://example/own-win.zip' : 'https://example/own-linux.tar.gz',
+        sha256: 'e'.repeat(64),
+        unpack: 'zip',
+        bin: onWin ? 'own.exe' : 'own',
+      },
+    ], 'the merged alpha tools.json resolves every source and drops os-filtered entries');
+    assert.ok(!existsSync(join(homeDir, '.ottr/workers/beta/tools.json')), 'a project with no tools sources plans no tools file');
     // Per-project plugin lists merge core, bundle, own. Core names no plugin,
     // so beta's set is empty — and its file must still exist (empty), because
     // the consumer scopes plugins only when the file exists: a missing file
@@ -199,6 +252,21 @@ try {
     r = run([]);
     assert.equal(r.status, 1, 'an unknown bundle reference refuses the run');
     assert.match(r.stderr, /project "alpha".*ghost-bundle/, r.stderr);
+    assert.ok(!existsSync(join(homeDir, '.omp')), 'the refusal writes nothing into the home');
+
+    // A per-OS rule break in a bundle's tools.json: refusal naming the source and the
+    // entry, before any write (the resolved-form pre-check, not a raw five-key refusal).
+    ({ homeDir, run } = fixture({ badOs: true }));
+    r = run([]);
+    assert.equal(r.status, 1, 'an unknown platform in a bundle tools.json refuses the run');
+    assert.match(r.stderr, /bundles\/gamedev-2d\/tools\.json.*broken-tool.*sunos/, r.stderr);
+    assert.ok(!existsSync(join(homeDir, '.omp')), 'the refusal writes nothing into the home');
+
+    // A per-OS value without this platform's key refuses the same way.
+    ({ homeDir, run } = fixture({ missingOs: true }));
+    r = run([]);
+    assert.equal(r.status, 1, 'a per-OS value without the target key refuses the run');
+    assert.match(r.stderr, /bundles\/gamedev-2d\/tools\.json.*broken-tool/, r.stderr);
     assert.ok(!existsSync(join(homeDir, '.omp')), 'the refusal writes nothing into the home');
 
     // Migration: no bundles/ dir installs as today, with the legacy manifest form.
