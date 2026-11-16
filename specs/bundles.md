@@ -91,6 +91,18 @@ channel is `skills.customDirectories`. So:
   from the home roots as today, bundle skills load only for their projects, and
   a shelf skill or plugin loads for no project.
 
+Live proof of the mechanism on omp 18.15.0, 2026-11-16, in temp homes: two
+skill folders with distinct body lines, one per project, and a `--config`
+overlay per project that lists only that project's folder. A turn with
+project A's overlay printed A's body line; a turn with project B's overlay
+printed B's; a turn with no overlay printed neither. The argv matched the
+board's shape (`--no-extensions --no-lsp` plus the overlay). Two incidental
+findings for the consumer card: `--no-tools` disables skill loading, so it
+must stay out of the argv; and a shared home accumulates a
+`skill-descriptions.db` cache across runs, so a listing can name a skill from
+an earlier run's overlay even when its body is gone (the body isolation above
+always held; fresh homes per run give clean listings).
+
 This card ships the alate side: resolution, install, dashboard, docs, and the
 spec. The acceptance tests judge the installed trees, not a live session.
 
