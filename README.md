@@ -197,7 +197,7 @@ home-guard.test.mjs brackets the chain: the early record snapshots the home's `.
 
 `npm test` runs this chain's checks after an `npm ci`.
 
-CI runs this chain on every push. `release.yml` builds a multi-arch Docker image and publishes it to `ghcr.io/ottr-ai/alate` on each GitHub release, tagged `latest`, `vX.Y.Z` and `X.Y.Z`, and `vX.Y` and `X.Y`.
+CI runs this chain on every push. `release.yml` builds a multi-arch Docker image and publishes it to `ghcr.io/ottr-ai/alate` on each GitHub release, tagged `latest`, `vX.Y.Z` and `X.Y.Z`.
 
 ## License
 
