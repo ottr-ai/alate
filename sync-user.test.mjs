@@ -602,13 +602,15 @@ try {
       for (const fin of ['', '\n']) {
         const tag = `${where}/${crlf ? 'crlf' : 'lf'}/final-newline=${fin !== ''}`;
         const machine = eol(lines.join('\n'), crlf) + (fin ? eol('\n', crlf) : '');
-        // The snapshot is the source with the block lines removed: the last kept line keeps
-        // its own line end, so only a trailing block that ate it gets a terminator back.
+        // The snapshot is the source with the block lines removed, canonicalized to LF
+        // first (specs/canonical-form.md): the last kept line keeps its own line end, so
+        // only a trailing block that ate it gets a terminator back. A CRLF machine copy
+        // stores the same LF bytes.
         const keepTerminator = where === 'end' || fin !== '';
         put('.omp/agent/config.yml', machine);
         let r2 = run();
         assert.equal(r2.status, 0, `${tag}: ${r2.stderr}`);
-        assert.equal(snap('omp/agent/config.yml'), eol(`user: y\nz: w${keepTerminator ? '\n' : ''}`, crlf),
+        assert.equal(snap('omp/agent/config.yml'), `user: y\nz: w${keepTerminator ? '\n' : ''}`,
           `${tag}: capture keeps the last kept line's terminator`);
         // A machine that holds exactly that file installs the snapshot as unchanged.
         const target = join(tmp, `home-${where}-${crlf ? 'crlf' : 'lf'}-${fin ? 'nl' : 'nonl'}`);
@@ -744,9 +746,10 @@ try {
   r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', shellhome, '--data', dataShell], { encoding: 'utf8' });
   assert.equal(r2.status, 0, r2.stderr);
   assert.equal(snapShell('omp/agent/config.yml'), clean, 'block style strips to the same portable text');
-  // A CRLF config (the Windows norm) strips too: kept lines keep their '\r', host keys leave.
-  // A fresh data dir, so the snapshot bytes are written from this run: the shared data dir
-  // would count the CRLF text as unchanged (normText is CRLF-stable) and keep the LF copy.
+  // A CRLF config (the Windows norm) strips too, after canonicalization: the capture
+  // stores LF, so host keys leave and the kept lines lose their '\r'. A fresh data dir
+  // keeps this run's writes readable even though the canonicalized bytes now equal the
+  // shared dir's LF copy (normText is CRLF-stable).
   const dataCrlf = join(tmp, 'data-crlf');
   mkdirSync(dataCrlf);
   writeFileSync(join(shellhome, '.omp/agent/config.yml'),
@@ -754,7 +757,8 @@ try {
     'skills:\r\n  customDirectories: [C:/Users/dev/omp-skills]\r\n  theme: portable\r\n');
   r2 = spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', shellhome, '--data', dataCrlf], { encoding: 'utf8' });
   assert.equal(r2.status, 0, r2.stderr);
-  assert.equal(readFileSync(join(dataCrlf, 'user/omp/agent/config.yml'), 'utf8'), clean.replaceAll('\n', '\r\n'), 'CRLF strips to the CRLF portable text');
+  assert.ok(r2.stdout.includes('note: user/omp/agent/config.yml: normalized CRLF line endings to LF'), r2.stdout);
+  assert.equal(readFileSync(join(dataCrlf, 'user/omp/agent/config.yml'), 'utf8'), clean, 'CRLF strips to the canonical LF portable text');
   // The gate still judges the portable text: syntax the strip does not remove refuses, and
   // the machine shell entry next to it cannot smuggle the capture past the scan.
   writeFileSync(join(shellhome, '.omp/agent/config.yml'),
@@ -984,6 +988,63 @@ try {
   assert.equal(r2.status, 0, r2.stderr);
   assert.ok(readFileSync(join(dataStoredOutside, 'user/omp/agent/mcp.json')).equals(outsideBytes),
     'a path outside the known roots stores byte for byte');
+
+  // Canonical form (specs/canonical-form.md): capture writes LF text for every captured
+  // file (.cmd included; binary passes through), and the note names each file whose bytes
+  // the normalization changed.
+  {
+    const cHome = join(tmp, 'home-canonical');
+    const cData = join(tmp, 'data-canonical');
+    mkdirSync(join(cHome, '.omp/agent/skills/local'), { recursive: true });
+    mkdirSync(join(cHome, '.omp/agent/extensions'), { recursive: true });
+    mkdirSync(cData); // a capture refuses a missing data dir
+    const cRun = () => spawnSync(process.execPath, [join(repo, 'sync-user.mjs'), '--home', cHome, '--data', cData], { encoding: 'utf8' });
+    const cSnap = rel => readFileSync(join(cData, 'user', rel));
+    const cSkillLf = skillText('local');
+    const cSkillCrlf = cSkillLf.replaceAll('\n', '\r\n');
+    writeFileSync(join(cHome, '.omp/agent/skills/local/SKILL.md'), cSkillCrlf);
+    // cmd.exe wants CRLF batch files, but the canonical store is LF for *.cmd too:
+    // CRLF rendering happens at install, never at capture.
+    writeFileSync(join(cHome, '.omp/agent/extensions/probe.cmd'), '@echo off\r\necho hi\r\n');
+    const cBinary = Buffer.from([0x4d, 0x5a, 0x00, 0x90, 0x00, 0x0a, 0x62, 0x79, 0x74, 0x65, 0x73]);
+    writeFileSync(join(cHome, '.omp/agent/extensions/probe.bin'), cBinary);
+    let c = cRun();
+    assert.equal(c.status, 0, c.stderr);
+    assert.equal(cSnap('omp/agent/skills/local/SKILL.md').toString(), cSkillLf, 'a CRLF skill captures to LF bytes');
+    assert.ok(c.stdout.includes('note: user/omp/agent/skills/local/SKILL.md: normalized CRLF line endings to LF'), c.stdout);
+    assert.equal(cSnap('omp/agent/extensions/probe.cmd').toString(), '@echo off\necho hi\n', 'a CRLF .cmd captures to LF bytes');
+    assert.ok(c.stdout.includes('note: user/omp/agent/extensions/probe.cmd: normalized CRLF line endings to LF'), c.stdout);
+    assert.ok(cSnap('omp/agent/extensions/probe.bin').equals(cBinary), 'a binary file stores byte-identical');
+    assert.ok(!c.stdout.includes('probe.bin: normalized'), 'a binary file gets no normalization note');
+    assert.match(c.stdout, /3 added, 0 updated, 0 unchanged/);
+    // Second capture of the unchanged home: fingerprints are CRLF-insensitive, so the run
+    // writes nothing. The note still names the machine bytes — the home keeps its CRLF
+    // copy (the capture never writes the home), so normalization runs on every capture
+    // until a provision brings the canonical bytes down.
+    const cStored = cSnap('omp/agent/skills/local/SKILL.md');
+    c = cRun();
+    assert.equal(c.status, 0, c.stderr);
+    assert.match(c.stdout, /0 added, 0 updated, 3 unchanged/);
+    assert.ok(cSnap('omp/agent/skills/local/SKILL.md').equals(cStored), 'the second capture writes nothing');
+    // A provisioned home holds the canonical bytes: no file changes, and the notes go quiet.
+    writeFileSync(join(cHome, '.omp/agent/skills/local/SKILL.md'), cSkillLf);
+    writeFileSync(join(cHome, '.omp/agent/extensions/probe.cmd'), '@echo off\necho hi\n');
+    c = cRun();
+    assert.equal(c.status, 0, c.stderr);
+    assert.match(c.stdout, /0 added, 0 updated, 3 unchanged/);
+    assert.ok(!c.stdout.includes(': normalized CRLF line endings to LF'), 'canonical machine bytes need no note');
+    assert.ok(cSnap('omp/agent/skills/local/SKILL.md').equals(cStored), 'the canonical home writes nothing');
+    // Repo churn pin: the committed snapshot holds LF and the machine copy holds the same
+    // text as CRLF. Fingerprints are CRLF-insensitive, so the capture reports unchanged;
+    // the note still names the machine bytes (normalization runs before the baseline
+    // decision), and the data file stays LF on disk.
+    writeFileSync(join(cHome, '.omp/agent/skills/local/SKILL.md'), cSkillCrlf);
+    c = cRun();
+    assert.equal(c.status, 0, c.stderr);
+    assert.match(c.stdout, /0 added, 0 updated, 3 unchanged/);
+    assert.ok(c.stdout.includes('note: user/omp/agent/skills/local/SKILL.md: normalized CRLF line endings to LF'), c.stdout);
+    assert.ok(cSnap('omp/agent/skills/local/SKILL.md').equals(cStored), 'the LF snapshot stays untouched');
+  }
 
   // Property checks (fuzz tier via forAll in lib/data.mjs). Gate: 200 runs, fixed seed
   // 42; PROP_RUNS=<n> re-seeds randomly for the review deep tier.

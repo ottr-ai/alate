@@ -5,7 +5,7 @@
 // need to know about this repo; the snapshots here are refreshed copies, never hand-edited.
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
-import { parseArgs, resolveDataDir, checkDestination, assertSourceInside, safeRel, fingerprint, readBaselines, writeBaselines } from './lib/data.mjs';
+import { canonicalizeBytes, parseArgs, resolveDataDir, checkDestination, assertSourceInside, safeRel, fingerprint, readBaselines, writeBaselines } from './lib/data.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
 /** @typedef {string[] | { extras?: string[], bundles?: string[] }} ProjectValue */
@@ -100,7 +100,12 @@ for (const [name, extras] of validated) {
     assertSourceInside(src, from); // throws if the source file escapes its project
     const to = join(data.dir, 'projects', name, rel);
     checkDestination(data.dir, to);
-    plan.push({ key: `${name}/${rel}`, from, to, bytes: readFileSync(from), old: existsSync(to) ? readFileSync(to) : null });
+    // Canonical form (specs/canonical-form.md): the data repo never stores machine bytes,
+    // so text is normalized to LF before the gates run; binary passes through untouched.
+    const raw = readFileSync(from);
+    const canon = canonicalizeBytes(`${name}/${rel}`, raw);
+    if (canon.changed) notes.push(`projects/${name}/${rel}: normalized CRLF line endings to LF`);
+    plan.push({ key: `${name}/${rel}`, from, to, bytes: canon.bytes, old: existsSync(to) ? readFileSync(to) : null });
   }
   for (const rel of have) {
     if (!existsSync(join(src, rel))) notes.push(`${rel} is gone in ${name}; delete projects/${name}/${rel} by hand if stale`);

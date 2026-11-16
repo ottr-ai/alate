@@ -1,0 +1,8 @@
+# One canonical form (specs/canonical-form.md in the alate checkout): text is LF
+# everywhere; *.cmd/*.bat check out CRLF on every OS (cmd.exe wants CRLF batch
+# files); images are raw bytes.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.png binary
+*.gif binary

@@ -1185,6 +1185,120 @@ try {
   rmSync(join(data, 'workers/_all'), { recursive: true, force: true });
   writeFileSync(join(data, 'workers/web/apt.txt'), 'libnss3\nfonts-liberation\n');
 
+  // Canonical install bytes (specs/canonical-form.md): the install renders the target form,
+  // so a CRLF text snapshot installs LF, a CRLF .cmd snapshot installs CRLF (cmd.exe wants
+  // CRLF batch files on every OS), and a binary snapshot installs byte-identical.
+  const canonData = join(tmp, 'canon-data');
+  const canonPut = (rel, content) => {
+    mkdirSync(join(canonData, 'user', rel, '..'), { recursive: true });
+    writeFileSync(join(canonData, 'user', rel), content);
+  };
+  canonPut('omp/agent/skills/canon/SKILL.md', skillText('canon').replaceAll('\n', '\r\n'));
+  canonPut('omp/agent/skills/canon/run.cmd', '@echo off\r\necho hello\r\n');
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
+  canonPut('omp/agent/skills/canon/logo.png', pngBytes);
+  const canonHome = join(tmp, 'canon-home');
+  r = run(['--data', canonData, '--skip-plugins'], canonHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(canonHome, '.omp/agent/skills/canon/SKILL.md'), 'utf8'), skillText('canon'),
+    'a CRLF text snapshot installs LF');
+  assert.equal(readFileSync(join(canonHome, '.omp/agent/skills/canon/run.cmd'), 'utf8'), '@echo off\r\necho hello\r\n',
+    'a CRLF .cmd snapshot installs CRLF');
+  assert.deepEqual(readFileSync(join(canonHome, '.omp/agent/skills/canon/logo.png')), pngBytes,
+    'a binary snapshot installs byte-identical');
+
+  // Modes come from the data repo's git index, never the filesystem (specs/canonical-form.md):
+  // an index-executable source installs 0755; filesystem exec bits alone (bind-mount noise)
+  // install 0644.
+  const modeData = join(tmp, 'mode-data');
+  const modePut = rel => {
+    mkdirSync(dirname(join(modeData, 'user', rel)), { recursive: true });
+    writeFileSync(join(modeData, 'user', rel), rel.endsWith('.md') ? skillText('modey') : '#!/bin/sh\necho modey\n');
+  };
+  modePut('omp/agent/skills/modey/SKILL.md');
+  modePut('omp/agent/skills/modey/hook.sh');
+  modePut('omp/agent/bin/tool.sh');
+  const git = (...a) => spawnSync('git', ['-C', modeData, ...a], { encoding: 'utf8', env: sandbox() });
+  git('init');
+  git('config', 'user.email', 'alate@localhost');
+  git('config', 'user.name', 'alate');
+  git('add', '-A');
+  git('update-index', '--chmod=+x', 'user/omp/agent/bin/tool.sh');
+  assert.equal(git('ls-files', '--stage', 'user/omp/agent/bin/tool.sh').stdout.split(' ')[0], '100755',
+    'the fixture marks the tool executable in the index');
+  assert.equal(git('ls-files', '--stage', 'user/omp/agent/skills/modey/hook.sh').stdout.split(' ')[0], '100644',
+    'the fixture keeps the hook non-executable in the index');
+  chmodSync(join(modeData, 'user/omp/agent/skills/modey/hook.sh'), 0o777);
+  const modeHome = join(tmp, 'mode-home');
+  r = run(['--data', modeData, '--skip-plugins'], modeHome);
+  assert.equal(r.status, 0, r.stderr);
+  const modeOf = (h, rel) => statSync(join(h, rel)).mode & 0o777;
+  assert.equal(modeOf(modeHome, '.omp/agent/bin/tool.sh'), 0o755, 'an index 100755 file installs 0755');
+  assert.equal(modeOf(modeHome, '.omp/agent/skills/modey/hook.sh'), 0o644, 'a filesystem 0777 source installs 0644 from its index mode');
+
+  // The verdict cache keys the rendered bytes (specs/canonical-form.md): the same logical
+  // skill in a CRLF checkout and an LF checkout produces the same key, so the second install
+  // rescans nothing and still installs LF.
+  if (scanned) {
+    const eolData = eol => {
+      const dir = join(tmp, `eol-${eol === '\r\n' ? 'crlf' : 'lf'}-data`);
+      mkdirSync(join(dir, 'user/omp/agent/skills/stable'), { recursive: true });
+      writeFileSync(join(dir, 'user/omp/agent/skills/stable/SKILL.md'), skillText('stable').replaceAll('\n', eol));
+      return dir;
+    };
+    const stableHome = join(tmp, 'stable-home');
+    const scanCount = () => readFileSync(callsLog, 'utf8').trim().split('\n').filter(Boolean).length;
+    r = run(['--data', eolData('\r\n'), '--skip-plugins'], stableHome);
+    assert.equal(r.status, 0, r.stderr);
+    const afterCrlf = scanCount();
+    assert.ok(afterCrlf > 0, 'the first install scans');
+    r = run(['--data', eolData('\n'), '--skip-plugins'], stableHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(scanCount(), afterCrlf, 'the same logical bytes in the other checkout form rescan nothing');
+    assert.equal(readFileSync(join(stableHome, '.omp/agent/skills/stable/SKILL.md'), 'utf8'), skillText('stable'),
+      'the LF checkout installs LF bytes');
+  }
+
+  // Per-OS tools.json data (specs/canonical-form.md, "Per-OS differences as data"): the os
+  // filter and the per-OS value object resolve for the install platform, the resolved list is
+  // byte-stable across installs, a list whose every entry drops installs nothing (and deletes
+  // a stale copy), and an unknown platform refuses the run whole, naming file and entry.
+  const otherPlatform = process.platform === 'win32' ? 'darwin' : 'win32';
+  const osUrl = { linux: 'https://example.com/rg-linux.tar.gz', win32: 'https://example.com/rg-win.zip', darwin: 'https://example.com/rg-mac.tar.gz' };
+  const plainUrl = { linux: 'https://example.com/plain-linux', win32: 'https://example.com/plain-win.exe', darwin: 'https://example.com/plain-mac' };
+  putWorker('web', 'tools.json', toolsJson([
+    { name: 'peros', os: ['linux', 'win32', 'darwin'], url: osUrl, sha256: SHA, unpack: 'zip', bin: 'rg' },
+    { name: 'droponly', os: [otherPlatform], url: 'https://example.com/other', sha256: SHA.split('').reverse().join(''), unpack: 'none' },
+    { name: 'plain', url: plainUrl, sha256: SHA, unpack: 'none' },
+  ]));
+  const osHome = join(tmp, 'os-tools-home');
+  r = run(['--data', data, '--skip-plugins'], osHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(osHome, '.ottr/workers/web/tools.json'), 'utf8'), toolsJson([
+    { name: 'peros', url: osUrl[process.platform], sha256: SHA, unpack: 'zip', bin: 'rg' },
+    { name: 'plain', url: plainUrl[process.platform], sha256: SHA, unpack: 'none' },
+  ]), 'the os filter and the per-OS values resolve for the install platform');
+  r = run(['--data', data, '--skip-plugins'], osHome);
+  assert.match(r.stdout, /0 installed, \d+ unchanged/, 'the resolved list is byte-stable across installs');
+  writeFileSync(join(data, 'workers/web/tools.json'), toolsJson([
+    { name: 'dropper', os: [otherPlatform], url: 'https://example.com/other', sha256: SHA, unpack: 'none' },
+  ]));
+  r = run(['--data', data, '--skip-plugins'], osHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /deleted  \.ottr[/\\]workers[/\\]web[/\\]tools\.json/,
+    'a list whose every entry drops installs nothing and deletes the stale copy');
+  assert.ok(!existsSync(join(osHome, '.ottr/workers/web/tools.json')));
+  writeFileSync(join(data, 'workers/web/tools.json'), toolsJson([
+    { name: 'broken', os: ['sunos'], url: 'https://example.com/other', sha256: SHA, unpack: 'none' },
+  ]));
+  const brokenOsHome = join(tmp, 'os-tools-bad-home');
+  r = run(['--data', data, '--skip-plugins'], brokenOsHome);
+  assert.equal(r.status, 1, 'an unknown platform refuses the run whole');
+  assert.ok(r.stderr.includes(join(data, 'workers/web/tools.json')), `the refusal names the worker file: ${r.stderr}`);
+  assert.ok(r.stderr.includes('entry "broken"'), `the refusal names the entry: ${r.stderr}`);
+  assert.ok(!existsSync(join(brokenOsHome, '.ottr')), 'the refusal writes nothing');
+  rmSync(join(data, 'workers/web/tools.json'));
+
   // The SkillSpector gate. Every run above already went through the exit-0 stub, so
   // the calls log proves clean snapshots are scanned (both skill roots) and then install as before.
   if (scanned) {
@@ -2242,16 +2356,18 @@ exit 0
     const windyTarget = winTargets.find(dir => dir.endsWith('windy'));
     assert.ok(windyTarget, 'the 0777 skill is scanned');
     assert.ok(!windyTarget.startsWith(winData), `the 0777 skill scans through a staging copy, not the data folder: ${windyTarget}`);
-    const calmTarget = winTargets.find(dir => dir.startsWith(winData));
-    assert.equal(calmTarget, join(winData, 'user/omp/agent/skills/calm'), 'the clean-modes skill scans in place');
+    // Unconditional staging (specs/canonical-form.md): the clean-modes skill scans its staged
+    // rendered copy too, so the scanner never sees mount modes or checkout line endings.
+    const calmTarget = winTargets.find(dir => dir.endsWith('calm') && !dir.startsWith(winData));
+    assert.ok(calmTarget, 'the clean-modes skill scans through a staging copy as well');
     const winScans = readFileSync(winBaselineLog, 'utf8').trim().split('\n').map(line => {
       const match = line.match(/^baseline=(\S+) (.*)$/);
       return { baseline: match[1], dir: match[2] };
     });
     const windyScan = winScans.find(scan => scan.dir.endsWith('windy'));
     assert.ok(windyScan && windyScan.baseline === 'yes', `the staged copy carries the shipped baseline: ${JSON.stringify(windyScan)}`);
-    const calmScan = winScans.find(scan => scan.dir === join(winData, 'user/omp/agent/skills/calm'));
-    assert.ok(calmScan && calmScan.baseline === 'yes', 'the in-place scan still sees the baseline');
+    const calmScan = winScans.find(scan => scan.dir === calmTarget);
+    assert.ok(calmScan && calmScan.baseline === 'yes', 'the staged copy still carries the shipped baseline');
     assert.ok(!existsSync(dirname(windyTarget)), 'the staging copy is removed after the run');
     const winWarmBefore = readFileSync(callsLog, 'utf8');
     r = run(['--data', winData, '--skip-plugins'], winHome);

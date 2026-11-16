@@ -8,7 +8,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertSourceInside, CAPTURE_ROOTS, checkDestination, fingerprint, parseArgs, readBaselines, resolveDataDir, toStoredForm, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeBaselines, yamlProblems } from './lib/data.mjs';
+import { assertSourceInside, CAPTURE_ROOTS, canonicalizeBytes, checkDestination, fingerprint, parseArgs, readBaselines, resolveDataDir, toStoredForm, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeBaselines, yamlProblems } from './lib/data.mjs';
 import { SHIPPED_SKILLS_DIR, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
@@ -349,6 +349,13 @@ for (const item of ITEMS) {
         for (const note of stored.notes) console.log('note: ~/' + note);
         bytes = stored.bytes;
       }
+      // Canonical form (specs/canonical-form.md): every captured file stores LF text and
+      // binary passes through, so a sync from any OS writes equal bytes and the gates
+      // judge canonical text. After toStoredForm (the JSON path move) and before the
+      // gates on purpose; the note names the machine bytes, not the write decision.
+      const canon = canonicalizeBytes(rel, bytes);
+      if (canon.changed) console.log(`note: user/${rel.replace(/^\./, '')}: normalized CRLF line endings to LF`);
+      bytes = canon.bytes;
       let text = bytes.toString('utf8');
       if (configItem !== undefined && configItem.endsWith('.yml')) {
         // Machine-only content leaves FIRST: deployment settings stay on the target, the

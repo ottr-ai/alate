@@ -224,6 +224,43 @@ try {
     assert.equal(readFileSync(state3, 'utf8'), 'not json', 'a corrupt baseline file is left as-is');
   }
 
+  // Canonical capture (specs/canonical-form.md): CRLF machine text lands as LF in the data
+  // repo with a note line, a .cmd captures LF too (install renders CRLF for it), binary
+  // bytes pass through identically, and a re-capture of canonical output is unchanged.
+  {
+    const dataC = join(tmp, 'dataC');
+    const wsC = join(tmp, 'wsC');
+    mkdirSync(join(dataC, 'projects'), { recursive: true });
+    mkdirSync(join(wsC, 'epsilon'), { recursive: true });
+    writeFileSync(join(dataC, 'projects/projects.json'), JSON.stringify({ contextFiles: ['AGENTS.md'], projects: { epsilon: ['run.cmd', 'blob.bin'] } }, null, 2) + '\n');
+    const runC = () => spawnSync(process.execPath, [join(repo, 'sync-projects.mjs'), '--root', wsC, '--data', dataC], { encoding: 'utf8' });
+    put(wsC, 'epsilon/AGENTS.md', '# epsilon\r\nrules\r\n');
+    put(wsC, 'epsilon/run.cmd', '@echo off\r\necho hi\r\n');
+    const bin = Buffer.from([0x4f, 0x00, 0xde, 0xad, 0x0d, 0x0a, 0x0d, 0x0a, 0xbe, 0xef]); // NUL: binary, holds CRLF
+    put(wsC, 'epsilon/blob.bin', bin);
+    let rC = runC();
+    assert.equal(rC.status, 0, rC.stderr);
+    assert.match(rC.stdout, /note: projects\/epsilon\/AGENTS\.md: normalized CRLF line endings to LF/);
+    assert.match(rC.stdout, /note: projects\/epsilon\/run\.cmd: normalized CRLF line endings to LF/);
+    assert.equal(readFileSync(join(dataC, 'projects', 'epsilon', 'AGENTS.md'), 'utf8'), '# epsilon\nrules\n');
+    assert.equal(readFileSync(join(dataC, 'projects', 'epsilon', 'run.cmd'), 'utf8'), '@echo off\necho hi\n', 'a .cmd snapshot holds LF in the data repo');
+    assert.ok(readFileSync(join(dataC, 'projects', 'epsilon', 'blob.bin')).equals(bin), 'a binary file captures byte-identical');
+    rC = runC();
+    assert.equal(rC.status, 0, rC.stderr);
+    assert.match(rC.stdout, /0 added, 0 updated, 3 unchanged/, `canonical output churned a re-capture: ${rC.stdout}`);
+    // The machine copy still holds CRLF (capture never rewrites machine files), so every
+    // capture normalizes it again and the note is honest on each run.
+    assert.match(rC.stdout, /note: projects\/epsilon\/AGENTS\.md: normalized CRLF line endings to LF/);
+    assert.ok(readFileSync(join(dataC, 'projects', 'epsilon', 'blob.bin')).equals(bin), 'a binary re-capture stays byte-identical');
+    // Once the machine copies themselves hold canonical bytes, the notes go away.
+    put(wsC, 'epsilon/AGENTS.md', '# epsilon\nrules\n');
+    put(wsC, 'epsilon/run.cmd', '@echo off\necho hi\n');
+    rC = runC();
+    assert.equal(rC.status, 0, rC.stderr);
+    assert.doesNotMatch(rC.stdout, /normalized CRLF line endings/, 'a canonical machine copy emits no normalization note');
+    assert.match(rC.stdout, /0 added, 0 updated, 3 unchanged/);
+  }
+
   // safeRel pins: separator normalization, and every refusal with its exact label prefix.
   assert.equal(safeRel('a\\b.txt', 'L'), 'a/b.txt', 'backslashes normalize to /');
   assert.equal(safeRel('a b:c/d.txt', 'L'), 'a b:c/d.txt', 'a drive-like pair past the start is plain text');

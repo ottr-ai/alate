@@ -45,8 +45,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { assertDirIdentity, assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, dirIdentity, fingerprint, forTarget, makeDirInside, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, SKILL_ROOT_NAMES, skillProblems, skillRootAlias, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeFileInside, writeProvisionResults, yamlProblems } from './lib/data.mjs';
-import { isBundlesMode, parseManifestProjects, resolveBundlePlan } from './lib/bundles.mjs';
+import { assertDirIdentity, assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, dirIdentity, fingerprint, forTarget, indexExecPaths, makeDirInside, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, renderForTarget, resolveDataDir, ruleProblems, sameContent, SKILL_ROOT_NAMES, skillProblems, skillRootAlias, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeFileInside, writeProvisionResults, yamlProblems } from './lib/data.mjs';
+import { isBundlesMode, parseManifestProjects, renderToolsJson, resolveBundlePlan } from './lib/bundles.mjs';
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
@@ -55,7 +55,11 @@ import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.m
 /** @typedef {{ skill: string, rule: string, file: string, key: string, reason: string }} ReviewEntry */
 /** @typedef {{ id?: unknown, severity?: unknown, pattern?: unknown, category?: unknown, explanation?: unknown, match_fingerprint?: unknown, location?: { file?: unknown, start_line?: unknown } | null }} ScanFinding */
 /** @typedef {{ name: string, url: string, sha256: string, unpack: string, bin?: string }} WorkerTool */
-/** @typedef {['unchanged', string, null, string, string | null] | ['installed', string, Buffer, string, string | null]} PlanEntry */
+/** @typedef {['unchanged', string, null, string, string | null, string | null] | ['installed', string, Buffer, string, string | null, string | null]} PlanEntry */
+// The sixth entry slot is repoRel: the source path in the data repo (forward slashes) whose
+// git-index mode decides the installed file's mode (specs/canonical-form.md). Null for
+// content with no single index source (vendored shipped skills, merged plugin lists), which
+// installs 0644.
 
 const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--data', '--repo', '--home', '--commit'], ['--force', '--skip-plugins', '--layer']));
 // The imported commit names the layer id in layer mode: the server passes it for a repo
@@ -95,6 +99,10 @@ const layerHome = layerMode ? resolveHome(home) : home;
 const trustHome = resolveHome(home);
 const data = resolveDataDir(args, { allowClone: true });
 const userRoot = join(data.dir, 'user');
+// File modes come from the data repo's git index, never the filesystem (specs/canonical-form.md):
+// execPaths holds the source paths the index marks 100755; a data dir that is not a git
+// checkout installs 0644 everywhere.
+const execPaths = indexExecPaths(data.dir) ?? new Set();
 // The alate checkout itself: the vendored shipped skills and their review file live under it.
 const toolRoot = dirname(fileURLToPath(import.meta.url));
 // Lifecycle scripts are off unless the data repo opts in: a `plugins-allow-scripts` marker
@@ -269,10 +277,11 @@ const collectSkillDirs = (dir, aliases = []) => {
 // refuses. A skill whose own bytes cannot be hashed is rejected as unreadable rather than
 // scanned. A scan costs ~15 s per
 // skill, which made a 57-skill deploy seed wait ~14 minutes even when one file changed, so
-// the gate re-scans only what changed: it hashes the exact bytes of each skill folder itself
+// the gate re-scans only what changed: it hashes the target-form rendered bytes of each
+// skill folder itself
 // (never a hash the data repo ships — .skill-lock.json is data, not proof), one framed digest
-// per entry (rel\0size\0sha256 of the bytes; a symlink contributes its resolved target bytes,
-// the bytes the install copies), and keys a verdict on a format token, that hash, the
+// per entry (rel\0size\0sha256 of the rendered bytes; a symlink contributes its resolved target
+// bytes, rendered like every file), and keys a verdict on a format token, that hash, the
 // scanner build (pin and probed version), the full scan arguments, and the sorted keys of the
 // review entries for that skill item (a changed entry rescans only its skill); it runs
 // the remaining scans concurrently, at most min(8, availableParallelism()) at a time. Only
@@ -284,10 +293,12 @@ const SCAN_ARGS = ['--no-llm', '--fail-on-findings', '--use-shipped-baseline', '
 const scanCachePath = join(home, '.alate', 'skillspector-pass.json');
 
 // The key must bind the bytes the install copies, so each file entry is framed as
-// rel\0size\0sha256(bytes): no entry's bytes can fuse into a neighbor's stream, and a
-// re-split of one stream into two files cannot reproduce the key. A symlink hashes its
-// resolved target bytes (readFileSync follows the link) — the exact bytes the install walk
-// copies — never the link text. The format token prefixed to every key makes entries an
+// rel\0size\0sha256(rendered bytes): no entry's bytes can fuse into a neighbor's stream, and a
+// re-split of one stream into two files cannot reproduce the key. The bytes hash in the
+// target form (specs/canonical-form.md), so a CRLF checkout and an LF checkout of the same
+// logical skill key the same verdict. A symlink hashes its resolved target bytes
+// (readFileSync follows the link), rendered like every file — the exact bytes the install
+// writes — never the link text. The format token prefixed to every key makes entries an
 // older alate wrote miss once and rescan instead of surviving a framing change.
 const SCAN_CACHE_FORMAT = 'skill-pass-fmt-3';
 /** @param {string} dir @returns {string} */
@@ -302,10 +313,11 @@ const hashSkillDir = dir => {
         hash.update(`d\0${rel}\0`);
         visit(child);
       } else {
-        // A symlink hashes the bytes its target resolves to, exactly what the install walk
-        // copies; the link text proves nothing. An unreadable entry throws and refuses the
-        // install, fail-closed like the gate itself.
-        const bytes = readFileSync(child);
+        // A symlink hashes the bytes its target resolves to, exactly what the install writes;
+        // the link text proves nothing. The bytes hash in the target form (renderForTarget),
+        // the bytes the install lands. An unreadable entry throws and refuses the install,
+        // fail-closed like the gate itself.
+        const bytes = renderForTarget(rel, readFileSync(child));
         hash.update(`f\0${rel}\0${bytes.length}\0${createHash('sha256').update(bytes).digest('hex')}\0`);
       }
     }
@@ -346,41 +358,39 @@ const recordPass = passes => {
   }
 };
 
-// A Windows host bind-mounts the data repo with every file marked executable (the
-// board-seed `docker run --rm -v <data-repo>:/data:ro board-seed --data /data` shape), and
-// the pinned scanner reads any file whose mode carries an exec bit as executable content.
-// A shipped `.skillspector-baseline.yaml` is also a dot-path, which the scanner treats as a
-// hidden artifact, so it reports the baseline as a concealed executable (SC9, HIGH) and the
-// install drops every skill that ships a baseline. The mount can be read-only, so the gate
-// cannot clean the mode in place: a skill folder whose explicitly selected baseline carries
-// an exec bit is scanned through a byte-identical staging copy whose files carry clean
-// modes. The scanner then reads executability from file suffix and content magic only,
-// never from mount noise, and the shipped baseline still applies — the staged bytes are the
-// snapshot's bytes, so the verdict cache keys (bytes only) hold and a warm cache never
-// stages at all.
+// The scan gate judges every skill through a staged copy (specs/canonical-form.md): the
+// staging writes each file's target-form rendered bytes with clean modes, so the scanner
+// never sees mount noise or CRLF checkout bytes — it reads executability from file suffix
+// and content magic only, and the bytes it judges are exactly the bytes the install lands.
+// Two histories meet here. A Windows host bind-mounts the data repo with every file marked
+// executable (the board-seed `docker run --rm -v <data-repo>:/data:ro board-seed --data
+// /data` shape), and the pinned scanner reads any file whose mode carries an exec bit as
+// executable content; a shipped `.skillspector-baseline.yaml` is also a dot-path, which the
+// scanner treats as a hidden artifact, so it reported the baseline as a concealed executable
+// (SC9, HIGH) and the install dropped every skill that ships a baseline. The mount can be
+// read-only, so the gate cannot clean the mode in place. The staged copy settles both: the
+// shipped baseline still applies, and the verdict cache keys the staged bytes, so a warm
+// cache never stages at all. The CRLF source guard below the plan stays as defense in depth
+// for stale checkouts.
 const SHIPPED_BASELINE = '.skillspector-baseline.yaml';
-/** @param {string} dir @returns {boolean} */
-const scanNeedsStaging = dir => {
-  try {
-    return (statSync(join(dir, SHIPPED_BASELINE)).mode & 0o111) !== 0;
-  } catch {
-    // No baseline (or an unreadable one): nothing to normalize; the scan judges the folder
-    // as it is, and the hash gate already rejects an unreadable snapshot.
-    return false;
-  }
-};
 /** @param {string} dir @param {string} root @param {number} index @returns {string} */
 const stageScanCopy = (dir, root, index) => {
-  const dest = join(root, `${String(index).padStart(3, '0')}-${basename(dir)}`);
+  // The staged tree nests under the staged root at the source's own path (the Windows drive
+  // prefix loses its colon), so a scan line still names the skill's origin and the folder's
+  // basename survives for the per-skill verdicts, while the index parent keeps same-named
+  // skills apart.
+  const nested = process.platform === 'win32' ? dir.replace(':', '') : dir;
+  const dest = join(root, String(index).padStart(3, '0'), nested);
   /** @param {string} from @param {string} to */
   const copy = (from, to) => {
     mkdirSync(to, { recursive: true });
     for (const entry of readdirSync(from, { withFileTypes: true })) {
       const child = join(from, entry.name);
       if (entry.isDirectory()) copy(child, join(to, entry.name));
-      // Bytes only: a fresh file carries a clean mode, and a symlink contributes its
-      // resolved target bytes — exactly what hashSkillDir keyed and the install walk copies.
-      else writeFileSync(join(to, entry.name), readFileSync(child));
+      // Bytes only, in the target form: a fresh file carries a clean mode, and a symlink
+      // contributes its resolved target bytes, rendered like every file — exactly what
+      // hashSkillDir keyed and the install writes.
+      else writeFileSync(join(to, entry.name), renderForTarget(relative(dir, child), readFileSync(child)));
     }
   };
   copy(dir, dest);
@@ -688,15 +698,14 @@ const runScan = async (skillDirs, keyOf, reviews) => {
   // and refuses the whole run.
   let fatal = /** @type {Error | null} */ (null);
   let next = 0;
-  // Staged scan copies for folders whose shipped baseline carries exec bits (the Windows
-  // bind-mount shape); created lazily, so a clean mount never pays for one, and removed
-  // before this function returns, whatever the scans decided.
+  // Staged scan copies: every scanned skill scans a staged copy of its rendered bytes with
+  // clean modes (specs/canonical-form.md); created lazily, so a warm cache never pays for
+  // one, and removed before this function returns, whatever the scans decided.
   /** @type {string | null} */
   let stageRoot = null;
   let staged = 0;
   /** @param {string} dir @returns {string} */
   const scanTargetFor = dir => {
-    if (!scanNeedsStaging(dir)) return dir;
     if (stageRoot === null) stageRoot = mkdtempSync(join(tmpdir(), 'alate-scan-'));
     return stageScanCopy(dir, stageRoot, staged++);
   };
@@ -1239,6 +1248,10 @@ try {
     const virtual = source !== 'snapshot';
     relSource.set(planRel, source);
     const dest = join(writeRoot, '.' + planRel);
+    // The installed mode comes from the git index (specs/canonical-form.md): a home rel's
+    // index source is 'user/<planRel>'; a virtual per-project rel derives its own source
+    // path, so a bundle-sourced file takes its own index mode.
+    const repoRel = virtual ? relative(data.dir, srcPath).split(sep).join('/') : `user/${planRel}`;
     // Every destination is preflighted before any content is read or written, so a
     // symlink, hardlink, or directory at dest refuses the whole restore up front —
     // --force overrides the conflict refusal, never this alias guard.
@@ -1284,6 +1297,11 @@ try {
     const machineYaml = planRel === 'omp/agent/config.yml' && machineBytes !== null
       ? machineBytes.toString('utf8') : null;
     const deployed = machineYaml === null ? null : splitDeploymentBlocks(machineYaml);
+    // Target form (specs/canonical-form.md): LF text, CRLF for *.cmd/*.bat, binary bytes
+    // untouched. Renders after the JSON re-rooting, the config gate, and the layer remap,
+    // so the fingerprint, the record, and every compare and write below see the exact bytes
+    // the install lands.
+    snapshot = renderForTarget(planRel, snapshot);
     const want = fingerprint(planRel, snapshot);
     let src = snapshot;
     if (deployed?.dropped.length) {
@@ -1292,6 +1310,8 @@ try {
       // snapshot that does not end in a newline still gets the blocks on a new line.
       const kept = base.kept[base.kept.length - 1] === '' ? base.kept.slice(0, -1) : base.kept;
       src = Buffer.from([...kept, ...deployed.dropped].join('\n'), 'utf8');
+      // Machine lines may hold CR tails; the installed bytes hold the target form too.
+      src = renderForTarget(planRel, src);
       // The machine's blocks ride into the installed file, so the whole text passes the
       // config gate (the snapshot alone passed it above); its messages carry line numbers
       // only, never block content.
@@ -1335,8 +1355,8 @@ try {
     if (record) recordedFp.set(planRel, /** @type {string} */ (last[planRel]));
     // The item key rides on every plan entry, so the per-item results can aggregate by key.
     const itemKey = `user/${planRel}`;
-    if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null]);
-    else if (layerMode && haveLayer === want) plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer)]);
+    if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null, repoRel]);
+    else if (layerMode && haveLayer === want) plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer), repoRel]);
     else if (layerMode && machineBytes !== null && !record) {
       // A machine change beyond the deployment blocks is never a refusal in layer mode:
       // machine state wins and rides into the new layer, --force takes the snapshot instead.
@@ -1345,11 +1365,11 @@ try {
       // over them, so a turn-edited copy must never ride into the new layer. The snapshot
       // wins, --force or not; a deliberate change goes through a data-repo commit.
       if (pluginInstallFile(planRel)) {
-        plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer)]);
+        plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer), repoRel]);
         notes.push(`plugin install file takes the snapshot, machine change ignored: ${readDest}`);
       }
       else if (force) {
-        plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer)]);
+        plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer), repoRel]);
         notes.push(`machine change overridden by --force: ${readDest}`);
       } else {
         // A kept file can hold paths re-rooted into the live layer at its install, so they
@@ -1362,7 +1382,7 @@ try {
         // copy the syntax gate refuses gives way to the snapshot, which passed it above.
         const gated = planRel === 'omp/agent/config.yml' ? gatedConfig(keptBytes.toString('utf8')) : null;
         if (gated?.problems.length) {
-          plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer)]);
+          plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer), repoRel]);
           notes.push(`machine copy takes the snapshot, its YAML syntax is unsupported (${describeProblem(gated.problems[0]).rule}): ${readDest}`);
         } else {
           if (gated) {
@@ -1370,12 +1390,12 @@ try {
             keptBytes = Buffer.from(gated.text, 'utf8');
           }
           if (/\.(?:json|ya?ml)$/.test(planRel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, /** @type {string} */ (newLayerDir)), 'utf8');
-          plan.push(['installed', dest, keptBytes, itemKey, layerLabel(planRel, keptBytes, haveLayer)]);
+          plan.push(['installed', dest, keptBytes, itemKey, layerLabel(planRel, keptBytes, haveLayer), repoRel]);
           notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
         }
       }
     }
-    else if (have === null || record || force) plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer)]);
+    else if (have === null || record || force) plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer), repoRel]);
     else conflicts.push(dest);
     current[planRel] = want;
   };
@@ -1431,8 +1451,11 @@ try {
     const liveCopy = join(readRoot, '.ottr', 'workers', project, file);
     const liveBytes = readMachineFile(readRoot, liveCopy);
     const haveWorker = liveBytes !== null && sameContent('', liveBytes, src);
-    plan.push(haveWorker && !layerMode ? ['unchanged', dest, null, `workers/${project}/${file}`, null]
-      : ['installed', dest, src, `workers/${project}/${file}`, layerMode ? (haveWorker ? 'unchanged' : liveBytes !== null ? 'updated' : 'added') : null]);
+    // The index source of a worker list is the same path the capture writes back
+    // (workers/<project>/<file>), merged bundle output included.
+    const repoRel = `workers/${project}/${file}`;
+    plan.push(haveWorker && !layerMode ? ['unchanged', dest, null, repoRel, null, repoRel]
+      : ['installed', dest, src, repoRel, layerMode ? (haveWorker ? 'unchanged' : liveBytes !== null ? 'updated' : 'added') : null, repoRel]);
   };
   if (bundlesPlan) {
     // Bundles mode plans the merged worker lists per project (specs/bundles.md merge
@@ -1499,7 +1522,25 @@ try {
         const srcPath = join(workersRoot, project, file);
         if (!existsSync(srcPath)) continue;
         assertSourceInside(workersRoot, srcPath);
-        const src = readFileSync(srcPath);
+        let src = /** @type {Buffer} */ (readFileSync(srcPath));
+        // Per-OS data and the target form (specs/canonical-form.md): tools.json resolves its
+        // os filters and per-OS values for this platform, and every other list renders LF, so
+        // apt.txt and env.txt install LF from any checkout form. A per-OS rule break refuses
+        // the whole run before any write, naming this worker file and the entry — the same
+        // whole-run refusal the validators below produce. A tools.json whose entries all drop
+        // for this platform ships nothing, so a stale installed copy goes the way any
+        // unshipped list does.
+        if (file === 'tools.json') {
+          try {
+            const rendered = renderToolsJson(src, process.platform);
+            if (rendered === null) continue;
+            src = rendered;
+          } catch (err) {
+            throw new Error(`${srcPath}: ${/** @type {Error} */ (err).message.replace(/^tools\.json: /, '')}`);
+          }
+        } else {
+          src = renderForTarget(`workers/${project}/${file}`, src);
+        }
         if (file === 'tools.json') validateTools(src, srcPath);
         else if (file === 'env.txt') validateEnv(src, srcPath);
         else if (file === 'requirements.txt') validateRequirements(src, srcPath);
@@ -1522,18 +1563,18 @@ try {
     const haveLayer = layerMachineFingerprint(rel, machineBytes, readRoot);
     const record = have !== null && have === last[rel];
     const itemKey = `user/${rel}`;
-    if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null]);
-    else if (layerMode && haveLayer === want) plan.push(['installed', dest, bytes, itemKey, layerLabel(rel, bytes, haveLayer)]);
+    if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null, null]);
+    else if (layerMode && haveLayer === want) plan.push(['installed', dest, bytes, itemKey, layerLabel(rel, bytes, haveLayer), null]);
     else if (layerMode && machineBytes !== null && !record) {
       if (force) {
-        plan.push(['installed', dest, bytes, itemKey, layerLabel(rel, bytes, haveLayer)]);
+        plan.push(['installed', dest, bytes, itemKey, layerLabel(rel, bytes, haveLayer), null]);
         notes.push(`machine change overridden by --force: ${readDest}`);
       } else {
-        plan.push(['installed', dest, machineBytes, itemKey, layerLabel(rel, machineBytes, haveLayer)]);
+        plan.push(['installed', dest, machineBytes, itemKey, layerLabel(rel, machineBytes, haveLayer), null]);
         notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
       }
     }
-    else if (have === null || record || force) plan.push(['installed', dest, bytes, itemKey, layerLabel(rel, bytes, haveLayer)]);
+    else if (have === null || record || force) plan.push(['installed', dest, bytes, itemKey, layerLabel(rel, bytes, haveLayer), null]);
     else conflicts.push(dest);
     current[rel] = want;
   };
@@ -1650,20 +1691,21 @@ try {
       const record = have !== null && have === last[rel];
       if (record) recordedFp.set(rel, last[rel]);
       const itemKey = `user/${rel}`;
-      if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null]);
-      else if (layerMode && have === want) plan.push(['installed', dest, srcBytes, itemKey, layerLabel(rel, srcBytes, have)]);
+      // Vendored shipped bytes have no data-repo index entry: they install 0644.
+      if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null, null]);
+      else if (layerMode && have === want) plan.push(['installed', dest, srcBytes, itemKey, layerLabel(rel, srcBytes, have), null]);
       else if (layerMode && machineBytes !== null && !record) {
         // Same machine-state rules as snapshot skills: layer mode keeps the machine copy,
         // --force takes the shipped bytes.
         if (force) {
-          plan.push(['installed', dest, srcBytes, itemKey, layerLabel(rel, srcBytes, have)]);
+          plan.push(['installed', dest, srcBytes, itemKey, layerLabel(rel, srcBytes, have), null]);
           notes.push(`machine change overridden by --force: ${readDest}`);
         } else {
-          plan.push(['installed', dest, machineBytes, itemKey, layerLabel(rel, machineBytes, have)]);
+          plan.push(['installed', dest, machineBytes, itemKey, layerLabel(rel, machineBytes, have), null]);
           notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
         }
       }
-      else if (have === null || record || force) plan.push(['installed', dest, srcBytes, itemKey, layerLabel(rel, srcBytes, have)]);
+      else if (have === null || record || force) plan.push(['installed', dest, srcBytes, itemKey, layerLabel(rel, srcBytes, have), null]);
       else conflicts.push(dest);
       current[rel] = want;
     }
@@ -1961,9 +2003,13 @@ try {
     // Layer mode counts the labels against the live layer; every plan entry still writes,
     // because the fresh layer needs the bytes even when the live layer already holds them.
     const labels = { added: 0, updated: 0, unchanged: 0 };
-    for (const [kind, dest, bytes, , label] of plan) {
+    for (const [kind, dest, bytes, , label, repoRel] of plan) {
       if (!layerMode && kind === 'unchanged') { unchanged++; continue; }
-      writeFileInside(layerHome, dest, /** @type {Buffer} */ (bytes), false, layerPin);
+      // The installed mode comes from the git index, never the filesystem (specs/
+      // canonical-form.md): an index-executable source installs 0755, everything else 0644 —
+      // bind-mount exec noise included. A null repoRel (vendored shipped skills, merged
+      // plugin lists) installs 0644.
+      writeFileInside(layerHome, dest, /** @type {Buffer} */ (bytes), false, layerPin, repoRel !== null && execPaths.has(repoRel) ? 0o755 : 0o644);
       installed++;
       // A layer-mode plan entry always carries a label string; null is the in-place shape.
       if (layerMode) labels[/** @type {'added' | 'updated' | 'unchanged'} */ (label)]++;

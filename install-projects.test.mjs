@@ -1,7 +1,7 @@
 // Self-check for install-projects.mjs: node install-projects.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -215,6 +215,70 @@ try {
       { item: 'projects/beta/new.md', status: 'added', rule: null, at: null },
     ],
   });
+
+  // Canonical form (specs/canonical-form.md): install renders the snapshot for the target —
+  // LF text, CRLF .cmd — and takes file modes from the data repo's git index, never the
+  // filesystem.
+  {
+    const dataC = join(tmp, 'data-canonical');
+    const wsC = join(tmp, 'ws-canonical');
+    mkdirSync(join(dataC, 'projects'), { recursive: true });
+    mkdirSync(join(wsC, 'zeta'), { recursive: true });
+    mkdirSync(join(wsC, 'eta'), { recursive: true });
+    put(dataC, 'projects/projects.json', JSON.stringify({ contextFiles: ['AGENTS.md'], projects: { zeta: [], eta: ['go.cmd'] } }, null, 2) + '\n');
+    const runIn = (dataDir, wsDir) => spawnSync(process.execPath, [script, '--data', dataDir, '--root', wsDir], { encoding: 'utf8' });
+    // A CRLF-committed snapshot installs LF text; a .cmd snapshot renders CRLF on every
+    // target (cmd.exe wants CRLF batch files), and a CRLF-in-repo copy must not CRCRLF.
+    put(dataC, 'projects/zeta/AGENTS.md', '# zeta\r\nrules\r\n');
+    put(dataC, 'projects/eta/go.cmd', '@echo off\r\necho hi\r\n');
+    let rC = runIn(dataC, wsC);
+    assert.equal(rC.status, 0, rC.stderr);
+    assert.equal(readFileSync(join(wsC, 'zeta', 'AGENTS.md'), 'utf8'), '# zeta\nrules\n', 'a CRLF snapshot installs LF text');
+    const cmdBytes = readFileSync(join(wsC, 'eta', 'go.cmd'));
+    assert.equal(cmdBytes.toString('utf8'), '@echo off\r\necho hi\r\n', 'a .cmd snapshot installs CRLF');
+    assert.ok(!cmdBytes.includes('\r\r'), 'a CRLF .cmd snapshot never renders CRCRLF');
+    // The rendered bytes are byte-stable: a re-install from the same snapshot is unchanged.
+    rC = runIn(dataC, wsC);
+    assert.equal(rC.status, 0, rC.stderr);
+    assert.match(rC.stdout, /0 added, 0 updated, 2 unchanged/, `re-install churned: ${rC.stdout}`);
+
+    const modeOf = p => statSync(p).mode & 0o777;
+    const dataG = join(tmp, 'data-git');
+    const wsG = join(tmp, 'ws-git');
+    mkdirSync(join(dataG, 'projects', 'theta'), { recursive: true });
+    mkdirSync(join(wsG, 'theta'), { recursive: true });
+    put(dataG, 'projects/projects.json', JSON.stringify({ contextFiles: [], projects: { theta: ['run.sh', 'notes.txt'] } }, null, 2) + '\n');
+    put(dataG, 'projects/theta/run.sh', '#!/bin/sh\necho hi\n');
+    put(dataG, 'projects/theta/notes.txt', 'notes\n');
+    const git = (...a) => spawnSync('git', a, { cwd: dataG, encoding: 'utf8' });
+    assert.equal(git('init', '-q').status, 0, 'git init is required for the index-mode case');
+    assert.equal(git('add', '.').status, 0);
+    assert.equal(git('update-index', '--chmod=+x', 'projects/theta/run.sh').status, 0, 'index chmod is required for the exec case');
+    assert.equal(git('-c', 'user.name=test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'snapshots').status, 0, 'git commit is required for the index-mode case');
+    // Pin the umask so the exact-mode assertions are deterministic on any dev machine;
+    // spawned children inherit it.
+    const oldUmask = process.umask(0o022);
+    try {
+      const rG = runIn(dataG, wsG);
+      assert.equal(rG.status, 0, rG.stderr);
+      assert.equal(modeOf(join(wsG, 'theta', 'run.sh')), 0o755, 'an index-100755 snapshot installs 0755');
+      assert.equal(modeOf(join(wsG, 'theta', 'notes.txt')), 0o644, 'an index-100644 snapshot installs 0644');
+
+      // A data dir that is not a git checkout gives 0644 everywhere; a filesystem exec bit
+      // on the source (bind-mount noise included) is never taken.
+      const dataN = join(tmp, 'data-nogit');
+      const wsN = join(tmp, 'ws-nogit');
+      mkdirSync(join(dataN, 'projects', 'iota'), { recursive: true });
+      mkdirSync(join(wsN, 'iota'), { recursive: true });
+      put(dataN, 'projects/projects.json', JSON.stringify({ contextFiles: [], projects: { iota: ['run.sh'] } }, null, 2) + '\n');
+      writeFileSync(join(dataN, 'projects', 'iota', 'run.sh'), '#!/bin/sh\necho hi\n', { mode: 0o777 });
+      const rN = runIn(dataN, wsN);
+      assert.equal(rN.status, 0, rN.stderr);
+      assert.equal(modeOf(join(wsN, 'iota', 'run.sh')), 0o644, 'a non-git data dir installs 0644');
+    } finally {
+      process.umask(oldUmask);
+    }
+  }
 
   console.log('install-projects.mjs ok');
 } finally {

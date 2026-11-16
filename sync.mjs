@@ -20,7 +20,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkS
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { assertDirIdentity, assertSourceInside, checkDestination, cleanupData, describeProblem, die, fingerprint, makeDirInside, NOT_RULES, originGate, parseArgs, PROVISION_ENV, resolveDataDir, ruleProblems, writeFileInside, writeProvisionResults } from './lib/data.mjs';
+import { assertDirIdentity, assertSourceInside, canonicalizeBytes, checkDestination, cleanupData, describeProblem, die, fingerprint, makeDirInside, NOT_RULES, originGate, parseArgs, PROVISION_ENV, renderForTarget, resolveDataDir, ruleProblems, writeFileInside, writeProvisionResults } from './lib/data.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
 /** @typedef {{ item: string, status: 'installed' | 'unchanged' | 'added' | 'updated' | 'rejected' | 'no-origin', rule: string | null, at: string | null, report?: string }} ProvisionItem */
@@ -65,7 +65,9 @@ try {
     if (!entry.isFile() || !isMd(entry.name)) continue;
     const file = join(data.dir, entry.name);
     assertSourceInside(data.dir, file);
-    const bytes = readFileSync(file);
+    // Canonical read (specs/canonical-form.md): normalize the checkout's bytes (the data
+    // dir may hold CRLF), then render for the target — rules are .md, so this yields LF.
+    const bytes = renderForTarget(entry.name, canonicalizeBytes(entry.name, readFileSync(file)).bytes);
     // AGENTS.md is agent context too, so it gets the hidden-character scan, never the rule frontmatter gate.
     const problems = ruleProblems(entry.name, bytes.toString('utf8'), { frontmatter: !NOT_RULES.has(entry.name) });
     if (problems.length) {

@@ -554,6 +554,23 @@ try {
   assert.match(r.stdout, /0 updated, 0 added, 0 unchanged, 1 deleted in /, 'the changed dropped rule counts as deleted');
   assert.ok(existsSync(join(liveDir, 'r.md')), 'the compare dir keeps its copy');
 
+  // --- canonical form: rule bytes normalize at the read (specs/canonical-form.md) ---
+  const data3 = join(tmp, 'data3');
+  mkdirSync(data3, { recursive: true });
+  const put3 = (name, text) => writeFileSync(join(data3, name), text);
+  put3('crlf.md', rule.replaceAll('\n', '\r\n'));
+  put3('cr.md', rule.replace('Body', 'Bo\rdy')); // a lone CR, no LF beside it
+  const canonDir = freshTarget('rules-canon');
+  r = run(canonDir, ['--data', data3]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(installed(canonDir, 'crlf.md'), rule, 'a CRLF rule file installs LF');
+  assert.equal(installed(canonDir, 'cr.md'), rule.replace('Body', 'Bo\rdy'), 'a lone CR survives the read (git parity)');
+  const canonRecord = JSON.parse(readFileSync(join(canonDir, '.alate-installed.json'), 'utf8'));
+  assert.equal(canonRecord['crlf.md'], fingerprint('crlf.md', Buffer.from(rule)), 'the record fingerprints canonical bytes');
+  r = run(canonDir, ['--data', data3]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^2 unchanged/m, 'canonical bytes are byte-stable across installs');
+
   if (process.platform === 'win32') {
     const link = join(tmp, 'rules-link');
     symlinkSync(data, link, 'junction');

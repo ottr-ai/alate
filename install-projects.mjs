@@ -16,7 +16,7 @@
 // stays out per item, a copy this path installed before is removed, and the run exits 1.
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { assertSourceInside, checkDestination, describeProblem, fingerprint, parseArgs, PROVISION_ENV, readBaselines, resolveDataDir, ruleProblems, safeRel, writeBaselines, writeProvisionResults } from './lib/data.mjs';
+import { assertSourceInside, canonicalizeBytes, checkDestination, describeProblem, fingerprint, indexExecPaths, parseArgs, PROVISION_ENV, readBaselines, renderForTarget, resolveDataDir, ruleProblems, safeRel, writeBaselines, writeProvisionResults } from './lib/data.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
 /** @typedef {string[] | { extras?: string[], bundles?: string[] }} ProjectValue */
@@ -105,7 +105,10 @@ function install(root, manifestPath) {
       const dest = join(liveDir, ...rel.split('/'));
       if (existsSync(dest)) assertSourceInside(liveDir, dest);
       checkDestination(liveDir, dest);
-      const snapBytes = readFileSync(snapFile);
+      // Canonical form (specs/canonical-form.md): the data dir may be a CRLF checkout, so the
+      // snapshot bytes are canonicalized first, then rendered for the target; the fingerprint,
+      // the Markdown gate, and the write all see the rendered bytes.
+      const snapBytes = renderForTarget(rel, canonicalizeBytes(rel, readFileSync(snapFile)).bytes);
       const machine = existsSync(dest) ? readFileSync(dest) : null;
       const key = `${name}/${rel}`;
       const fpSnap = fingerprint(key, snapBytes);
@@ -161,6 +164,10 @@ function install(root, manifestPath) {
 
   // ponytail: preflight is not a transaction: one copy may land before a later write fails;
   // rerun after fixing the cause. Upgrade to staging+rename if atomicity matters.
+  // Modes come from the data repo's git index, never the filesystem (specs/canonical-form.md):
+  // an index-executable snapshot installs 0755, everything else 0644; a data dir that is not
+  // a git checkout (or a missing git) gives 0644 everywhere. Keys already hold forward slashes.
+  const execPaths = indexExecPaths(data.dir) ?? new Set();
   let added = 0, updated = 0, unchanged = 0;
   /** @type {Record<string, string>} */
   const updates = {};
@@ -170,7 +177,7 @@ function install(root, manifestPath) {
       if ((baselines?.[p.key] ?? null) !== p.fpSnap) updates[p.key] = p.fpSnap;
     } else {
       mkdirSync(dirname(p.dest), { recursive: true });
-      writeFileSync(p.dest, p.snapBytes);
+      writeFileSync(p.dest, p.snapBytes, { mode: execPaths.has(`projects/${p.key}`) ? 0o755 : 0o644 });
       updates[p.key] = p.fpSnap;
       console.log(p.log);
       if (p.status === 'added') added++; else updated++;
