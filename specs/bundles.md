@@ -173,7 +173,8 @@ Per file type:
 
 - `apt.txt`: line list; the first line of a package name wins; dedup keys on
   the package name (the first token). `requirements.txt` dedups on the package
-  name before `==`, and the first pin wins: a later list cannot move an
+  name before `==`, lowercased exactly like the requirements validator's
+  duplicate rule, and the first pin wins: a later list cannot move an
   already-planned pin. `skills.txt` and `plugins.txt`: name lists; the first
   occurrence wins.
 - `tools.json`: JSON arrays of tool entries; dedup on the entry `name`; the

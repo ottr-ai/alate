@@ -117,7 +117,7 @@ For each project, alate merges the lists in this order:
 2. The project's `bundles` array, in array order.
 3. The project's own `workers/<p>/` lists.
 
-An item named twice counts once, at its first name. The merge dedups each file type: `apt.txt` on the package name, `requirements.txt` on the name before `==` (the first pin wins), `tools.json` on the entry `name`, and `env.txt` on the name — a name that a later list states again takes the later line, so a `plain` modifier in a later list survives.
+An item named twice counts once, at its first name. The merge dedups each file type: `apt.txt` on the package name, `requirements.txt` on the name before `==` (lowercased, so `PyYAML` and `pyyaml` count as one package, and the first pin wins), `tools.json` on the entry `name`, and `env.txt` on the name — a name that a later list states again takes the later line, so a `plain` modifier in a later list survives.
 
 ### What installs where
 
