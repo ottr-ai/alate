@@ -12,7 +12,7 @@ import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
 import { childEnv, DEFAULT_GITHUB_HOST, keepTemp, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
 import { runCleanup, runEdit, runImport, runSnapshot } from './lib/server-worker.mjs'
-import { isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead } from './web/dashboard.mjs'
+import { getTrustedPathSource, isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead, setTrustedPathSource } from './web/dashboard.mjs'
 import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
 import { ensureEnvProxy } from './lib/env-proxy.mjs'
 
@@ -774,7 +774,7 @@ async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) 
   const run = importChain.then(async () => {
     editing = true
     try {
-      const res = await runEdit({ dbFile, state: dashState, edit: { ...body, delete: del }, token: dashToken() })
+      const res = await runEdit({ dbFile, state: dashState, edit: { ...body, delete: del }, token: dashToken(), trustedDir: getTrustedPathSource() })
       dashState = res.state
       // Same refresh selectSource does after an import: the repo source now sits on the new commit.
       dashState.update = dashState.source.kind === 'repo'
@@ -874,12 +874,19 @@ updateTimer.unref()
 
 // A persisted database is the source of truth and also permits offline startup.
 if (dashState.source) {
+  // The git children of the boot source may cross a uid boundary (a compose /data bind
+  // mount owned by another user): mark it before any request can switch the source.
+  if (dashState.source.kind === 'path') setTrustedPathSource(dashState.source.name)
   config.repo = dashState.source.kind === 'repo' ? dashState.source.spec : null
   config.path = dashState.source.kind === 'path' ? dashState.source.name : null
   saveConfig(config)
 } else {
+  const repoBoot = flagValue('--repo') || config.repo
   const source = flagValue('--repo') ?? config.repo ?? flagValue('--data') ?? config.path
-  if (source) await selectSource(source, flagValue('--repo') || config.repo ? 'repo' : undefined)
+  if (source) {
+    if (!repoBoot) setTrustedPathSource(source)
+    await selectSource(source, repoBoot ? 'repo' : undefined)
+  }
 }
 dashCheck().catch(err => console.error(`dashboard check failed: ${redactSecrets((err as Error).message, dashToken())}`))
 void updateCheck()

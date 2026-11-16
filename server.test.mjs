@@ -5350,6 +5350,10 @@ try {
       mkdirSync(flagsForeign, { recursive: true });
       assert.equal(git(['init', flagsForeign]).status, 0);
       assert.equal(spawnSync('chown', ['-R', '65534', flagsForeign]).status, 0);
+      // Without the operator-configured trust the ownership check stays on: a foreign
+      // repo that only a runtime request chose stays inert, so its hooks never run.
+      assert.equal(dash.isGitWorkTree(flagsForeign), false, 'a foreign-owned folder stays refused without the boot-config trust');
+      dash.setTrustedPathSource(flagsForeign);
       assert.equal(dash.isGitWorkTree(flagsForeign), true, 'a foreign-owned git folder is still a work tree');
     }
 
@@ -7156,15 +7160,15 @@ try {
   }
 
   {
-    // A path source owned by another user stays a git repo for the server (fix list
-    // 2026-11-16 #63): a compose /data bind mount owned by uid 1000 runs a root server,
-    // and git refuses every child in that folder with "dubious ownership" until runGit
-    // passes safe.directory for it. Root runs the real refusal (chown to 65534); a
-    // non-root runner (CI) cannot chown, so a git shim on the server's PATH refuses the
-    // same way unless the argv carries safe.directory for the guarded folder. Windows
-    // has neither chown nor sh and runs the plain folder.
-    const ownCfg = join(tmp, 'server-config-own-edit.json');
-    writeFileSync(ownCfg, JSON.stringify({ apiKey: null }));
+    // A path source that the operator configures as the boot source stays a git repo for
+    // the server (fix list 2026-11-16 #63): a compose /data bind mount owned by uid 1000
+    // runs a root server, and git refuses every child in that folder with "dubious
+    // ownership" until runGit passes safe.directory for it. The trust is scoped to that
+    // boot source: the same foreign-owned folder imported at runtime by a dashboard
+    // request must stay refused, so its hooks can never run. Root runs the real refusal
+    // (chown to 65534); a non-root runner (CI) cannot chown, so a git shim on the
+    // server's PATH refuses the same way unless the argv carries safe.directory for the
+    // guarded folder. Windows has neither chown nor sh and runs the plain folder.
     const ownSeed = join(tmp, 'own-edit-seed');
     const ownBare = join(tmp, 'own-edit-bare.git');
     const ownSource = join(tmp, 'own-edit-source');
@@ -7220,17 +7224,22 @@ try {
         ownEnv = { ...testServerEnv, PATH: `${shimDir}${delimiter}${testServerEnv.PATH}` };
       }
     }
+    // Case A: the operator-configured boot source. The config names the foreign-owned
+    // folder, so the server marks it as the trusted path source at startup.
+    const ownCfg = join(tmp, 'server-config-own-edit.json');
+    writeFileSync(ownCfg, JSON.stringify({ apiKey: null, path: ownSource }));
     const ownSrv = spawnServer(['--port', '0', '--config', ownCfg, '--db', join(tmp, 'state-own-edit.db')], ownEnv);
     try {
       const { apiKey: ownKey, base: ownBase } = await awaitStartup(ownSrv);
       const ownAuth = { 'Content-Type': 'application/json', Authorization: `Bearer ${ownKey}` };
       const ownGet = async route => fetch(new URL(route, ownBase), { headers: { Authorization: `Bearer ${ownKey}` } });
       const ownPut = async b => fetch(new URL('/api/file', ownBase), { method: 'PUT', headers: ownAuth, body: JSON.stringify(b) });
-      const ir = await fetch(new URL(`${ownBase}/api/import`), { method: 'POST', headers: ownAuth, body: JSON.stringify({ source: ownSource }) });
-      assert.equal(ir.status, 200, JSON.stringify(await ir.json()));
+      // The boot import selects the configured source; /health carries the write flags only
+      // once that source is set, so wait for the flag itself.
+      await waitFor(async () => (await (await ownGet('/health')).json()).git !== null, 20_000);
       const health = await (await ownGet('/health')).json();
-      assert.equal(health.git, true, 'a foreign-owned path source still reports git true');
-      assert.equal(health.writable, true, 'the foreign-owned path source reports writable');
+      assert.equal(health.git, true, 'the boot-configured foreign-owned source reports git true');
+      assert.equal(health.writable, true, 'the boot-configured foreign-owned source reports writable');
       const notes = await (await ownGet('/api/file?path=notes.md')).json();
       const er = await ownPut({ path: 'notes.md', content: `${notes.content}edited by the server\n`, base: notes.hash, message: 'test: edit in a foreign-owned source' });
       const edit = await er.json();
@@ -7241,6 +7250,31 @@ try {
       const inspect = args => git(['-C', ownSource, '-c', `safe.directory=${realpathSync(ownSource)}`, ...args]);
       assert.equal(inspect(['rev-parse', 'HEAD']).stdout.toString().trim(), edit.commit, 'the commit landed in the work tree');
     } finally { await stopServer(ownSrv); }
+
+    // The same folder imported at runtime stays inert: a dashboard request can name any
+    // path, so the ownership check must stay on there, and no commit (and therefore no
+    // hook) may run in a foreign-owned runtime source. POSIX-only: the fixture only
+    // crosses a uid boundary where chown or the shim can simulate it.
+    if (process.platform !== 'win32') {
+      const runCfg = join(tmp, 'server-config-own-edit-runtime.json');
+      writeFileSync(runCfg, JSON.stringify({ apiKey: null }));
+      const runSrv = spawnServer(['--port', '0', '--config', runCfg, '--db', join(tmp, 'state-own-edit-runtime.db')], ownEnv);
+      try {
+        const { apiKey: runKey, base: runBase } = await awaitStartup(runSrv);
+        const runAuth = { 'Content-Type': 'application/json', Authorization: `Bearer ${runKey}` };
+        const runGet = async route => fetch(new URL(route, runBase), { headers: { Authorization: `Bearer ${runKey}` } });
+        const runPut = async b => fetch(new URL('/api/file', runBase), { method: 'PUT', headers: runAuth, body: JSON.stringify(b) });
+        const ir = await fetch(new URL(`${runBase}/api/import`), { method: 'POST', headers: runAuth, body: JSON.stringify({ source: ownSource }) });
+        assert.equal(ir.status, 200, JSON.stringify(await ir.json()));
+        const health = await (await runGet('/health')).json();
+        assert.equal(health.git, false, 'a runtime-imported foreign-owned source stays refused');
+        const notes = await (await runGet('/api/file?path=notes.md')).json();
+        const er = await runPut({ path: 'notes.md', content: `${notes.content}edited\n`, base: notes.hash, message: 'test: runtime foreign source must stay inert' });
+        const edit = await er.json();
+        assert.equal(er.status, 200, JSON.stringify(edit));
+        assert.equal(edit.commit, '', 'a runtime-imported foreign-owned source never commits');
+      } finally { await stopServer(runSrv); }
+    }
   }
 
   // Teardown escalation: a server that ignores SIGTERM (what a mutant can become) must still

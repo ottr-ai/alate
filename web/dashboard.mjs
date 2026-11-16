@@ -569,19 +569,42 @@ function applyToTree(dir, rel, base, bytes) {
   }
 }
 
-// git in dir; env carries auth through per-process config, never argv or URL. A path
-// source is operator config, so runGit trusts exactly that one directory across a uid
-// boundary (a compose /data bind mount owned by another user runs the server as root,
-// and git then refuses every child with "dubious ownership"). git reads safe.directory
-// only from system, global or command-line config, so the -c argument is the only way
-// to pass it, and GIT_CONFIG_* env stays out because it can carry helpers. Resolved,
-// because git compares the entry against the resolved path. For the server's own temp
-// clones the argument changes nothing: their ownership check already passes.
+// The one directory whose git children may cross a uid boundary: the operator-configured
+// path source, marked once at startup from the source the server boots with (server.ts
+// passes the flag, the persisted config, or the persisted database row). Dashboard
+// requests can switch the source at runtime (POST /config, POST /api/import), so a
+// runtime-chosen directory never gains this trust: git keeps refusing a foreign-owned
+// repo there, and its hooks can never run with the server's privileges. The operator
+// restarts the server to move the trust to a new source. The worker thread receives the
+// directory with each edit op (one worker, one op at a time, so no call can race it).
+/** @type {string | null} */
+let trustedSourceDir = null;
+/** @param {string | null} dir @returns {void} */
+function setTrustedPathSource(dir) {
+  try { trustedSourceDir = dir === null ? null : realpathSync(dir); } catch { trustedSourceDir = null; }
+}
+/** @returns {string | null} */
+function getTrustedPathSource() {
+  return trustedSourceDir;
+}
+
+// git in dir; env carries auth through per-process config, never argv or URL. A
+// foreign-owned work tree needs safe.directory for git to run in it at all, and git
+// reads that setting only from system, global or command-line config — the -c argument
+// is the only supported channel, and GIT_CONFIG_* env stays out because it can carry
+// helpers. The trust is scoped to the operator-configured source directory: for any
+// other directory the ownership check stays on, so a foreign-owned repo that a
+// dashboard request names at runtime keeps failing every git call, and its hooks and
+// repo config never execute. Resolved, because git compares the entry against the
+// resolved path. For the server's own temp clones the argument never applies: they are
+// server-owned, so their ownership check already passes.
 /** @param {string} dir @param {string[]} args @param {NodeJS.ProcessEnv} [env] */
 function runGit(dir, args, env = serverGitEnv()) {
   /** @type {string[]} */
   let safe = [];
-  try { safe = ['-c', `safe.directory=${realpathSync(dir)}`]; } catch { /* a missing dir is git's own error */ }
+  try {
+    if (trustedSourceDir !== null && realpathSync(dir) === trustedSourceDir) safe = ['-c', `safe.directory=${trustedSourceDir}`];
+  } catch { /* a missing dir is git's own error */ }
   return spawnSync('git', ['-C', dir, ...safe, ...args], { env, encoding: 'utf8' });
 }
 
@@ -750,4 +773,4 @@ function remoteHead(name, ref, token, host = '') {
   return git.status === 0 && git.stdout ? git.stdout.split('\n')[0].trim().split(/\s+/)[0] : '';
 }
 
-export { scanInventory, importSource, isGitWorkTree, isWritableDir, loadState, remoteHead, snapshotData, readStoredFile, listStoredFiles, applyFileEdit };
+export { scanInventory, importSource, isGitWorkTree, isWritableDir, loadState, remoteHead, snapshotData, readStoredFile, listStoredFiles, applyFileEdit, setTrustedPathSource, getTrustedPathSource };
