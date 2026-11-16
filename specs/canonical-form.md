@@ -161,8 +161,9 @@ Each fails before the change:
 6. A baseline-shipping skill fixture in a git checkout of the canonical ruleset
    holds a `.cmd` whose index blob is LF and whose working-tree bytes are CRLF
    under a clean `git status`; install exits 0 and the installed `.cmd` holds CRLF.
-   A non-suffix text file in the same checkout whose working bytes are CRLF over an
-   LF blob still refuses, named in the message while the `.cmd` stays unnamed.
+   A non-suffix text file in the same checkout, committed with LF and rewritten to
+   CRLF in the working tree, still refuses through the blob compare, named in the
+   message while the `.cmd` stays unnamed.
 
 ## Alternatives considered
 

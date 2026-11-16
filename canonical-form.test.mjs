@@ -318,6 +318,7 @@ function sectionD() {
     put(data, 'user/omp/agent/skills/smudgy/SKILL.md', smudgyMd);
     put(data, 'user/omp/agent/skills/smudgy/.skillspector-baseline.yaml', 'findings: []\n');
     put(data, 'user/omp/agent/skills/smudgy/scripts/run.cmd', RUN_CMD);
+    put(data, 'user/omp/agent/skills/smudgy/notes.txt', 'body\n');
     const git = args => {
       const r = spawnSync('git', args, { encoding: 'utf8', cwd: data, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', HOME: data } });
       if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr || r.stdout}`);
@@ -345,8 +346,9 @@ function sectionD() {
       const inst = readFileSync(join(home, '.omp/agent/skills/smudgy/scripts/run.cmd'));
       assert.ok(inst.includes(Buffer.from('\r\n')), `the installed run.cmd holds no CRLF (hex head ${inst.subarray(0, 12).toString('hex')}); install must render *.cmd as CRLF on every target`);
     });
-    // The boundary holds: a CRLF working copy of a non-suffix file over an LF blob is a
-    // real conversion and still refuses — named, while the smudged .cmd stays out.
+    // The boundary holds: notes.txt was committed with LF, so its CRLF working copy
+    // sits over a tracked LF blob — the blob compare refuses it (not a missing blob),
+    // named while the smudged .cmd stays out.
     put(data, 'user/omp/agent/skills/smudgy/notes.txt', 'body\r\n');
     const r2 = run('install-user.mjs', ['--home', home, '--data', data, '--skip-plugins'], installEnv(home));
     attempt('D non-suffix CRLF copy still refuses', () => {
