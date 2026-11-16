@@ -1766,7 +1766,7 @@ try {
       const bundle = /^ottr\/project-skills\/[^/]+\/([^/]+)\//.exec(rel);
       if (bundle) {
         const name = bundle[1];
-        if (!scanRejected.some(dir => basename(dir) === name)) return null;
+        if (![...scanRejected].some(dir => basename(dir) === name)) return null;
         return `user/${skillNameItem.get(name) ?? `ottr/project-skills/${rel.split('/')[2]}/${name}`}`;
       }
       let best = '';
