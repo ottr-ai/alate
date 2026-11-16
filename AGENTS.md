@@ -107,6 +107,7 @@ release.
 - Before a ready report, check the diff against every acceptance clause of the card, one clause at a time. List each clause with its evidence in the report.
 - A ready report states every deviation from the card or steer text, with the reason. The implementation ships the mechanism the card or steer names unless the ready report gives that reason.
 - When a change touches a failure path, test each point where the failure can fire in the first commit. One fixture covers one point. A fetch timeout fires at connect, at the response headers, and at the body read (ALAT-103, ALAT-113, ALAT-131).
+- When an acceptance clause covers a merge order, a mode difference, or a key that another module also normalizes, test the clause's edge forms (a missing list file, a duplicate name with different case, the precedence direction) and name the pinning test as the clause's evidence in the ready report.
 
 ## Merging changes
 
