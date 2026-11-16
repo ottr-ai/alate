@@ -261,6 +261,68 @@ the first write, the scan gate, and any layer creation:
   the bundles that name it, or an "on the shelf" marker. The counts row gains
   the bundle count.
 
+### Editing (ALAT-180)
+
+The overview gains three editing surfaces: the Bundles section, the project
+blocks, and the Shelf section. Every action writes through the file editor's
+save path: it verifies each touched file against the base hash the caller
+read, writes the tree, makes one commit for the one save, and pushes with the
+same git and writable rules as a file edit. The answer carries the editor's
+result shape (`commit`, `pushed`, `warning`, the new state), so the press-bar
+notes and the refresh behave as for a file edit.
+
+- `POST /api/bundle` serves every action. It runs serialized with the import
+  chain and the editor, and answers 409 while another write runs.
+- `create` (`{ action, name }`): the name must match the bundle folder rule
+  (`[a-z0-9][a-z0-9-]*`), and `bundles/<name>/` must not exist. The action
+  creates `bundles/<name>/skills.txt` with a two-line comment header, because
+  git tracks no empty folder.
+- `add` and `remove` (`{ action, bundle, kind: 'skill' | 'plugin', name }`):
+  structured item edits cover the two name lists only. A list file that does
+  not exist yet starts with the same comment header. The server keeps the
+  file's line-ending style and its comment and blank lines. Adding a name the
+  file already lists is a refusal, so a save never makes an empty commit.
+- `move` (`{ action, kind, name, from, to }`): `from` is a bundle that names
+  the item; `to` is a bundle name or `shelf`. A move between bundles writes
+  both files in the one save. A move to the shelf removes the name from every
+  bundle that names it. The action refuses when `from` does not name the
+  item, and when `to` is a bundle that already names it.
+- `assign` and `unassign` (`{ action, project, bundle }`): the server parses
+  the stored `projects/projects.json`, changes only that project's `bundles`
+  array, and writes the whole manifest back as JSON with two-space indent and
+  a trailing newline. A legacy array value becomes the object form with
+  `extras`. Assigning refuses an unknown bundle with the install's message,
+  and a name the project already carries; unassigning refuses a name the
+  project does not carry.
+- The known skill and plugin universe comes from the stored snapshot the same
+  way the inventory scan derives it. An unknown name is refused with the same
+  message the install throws: the list path, the kind, the name. Every
+  refusal is a 4xx before any write. A file that changed since the caller
+  read it fails with the editor's 409.
+- The four worker lists (apt, tools, env, requirements) stay list-only in the
+  Bundles section: the scan reports their items, and each file name links into
+  the file editor for hand edits. The card adds no structured editor for them;
+  their validators live in the installer, and a `tools.json` entry is an
+  object, not a name.
+- A move to the shelf does not touch `workers/<p>/` lists. A name that a
+  project's own list still holds stays off the shelf for it, and the row says
+  so.
+- Display: each bundle block lists its items by kind (skills, plugins, apt
+  lines, tool names, env lines, requirement pins). Name items carry remove and
+  move controls; each list-file name links to the file editor. Each project
+  block shows its bundles as removable rows plus a picker of the bundles it
+  does not carry yet, and its effective item list per kind with the source of
+  each item: `core`, the bundle name, or `workers/<p>`. The merge follows the
+  merge-order section (first name wins, env later wins per name, the first pin
+  wins, the first tool wins); core items show too, because the effective list
+  is the merge order made visible. The Shelf section lists the skills and
+  plugins that no bundle and no worker list names, each with an "Add to
+  bundle" picker. Without `bundles/` in the data repo the three editing
+  surfaces render nothing; today's read-only overview stays.
+- Accessibility stays at the dashboard's level: a visible label per control,
+  keyboard operation, visible focus, state in text rather than color alone.
+  At 900 px and below the new blocks stack per the design's responsive rules.
+
 ## Acceptance checks
 
 Tests use a temp data repo and a temp home, and each fails before the change:
@@ -277,6 +339,13 @@ Tests use a temp data repo and a temp home, and each fails before the change:
    dedup; the per-project plugin list merges core, bundles, and own.
 6. A `plugins.txt` name that the data repo does not hold refuses, naming the
    source and the item.
+7. The dashboard creates a bundle, adds a skill, and assigns the bundle to a
+   project: `projects.json` and the bundle file change as the Editing section
+   says, and the project's effective list shows the skill with its source.
+8. A move to the shelf removes the name from the bundles that hold it; the
+   item shows on the shelf and in no effective list.
+9. An add of an unknown skill or plugin name refuses with the install's
+   message and writes nothing.
 
 The repo check and test commands (the verified chain in `AGENTS.md`, `npm test`)
 exit 0 with the new test files joined into the chain, `package.json`, and
