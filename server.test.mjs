@@ -3282,14 +3282,18 @@ try {
   assert.equal(bundleRemoteText('bundles/toolsonly/apt.txt'), 'htop\n');
   assert.equal(bundleRemoteText('bundles/web/apt.txt'), '# apt packages of bundle web\ncurl\n');
 
-  // r. a tool moved to the shelf leaves every bundle tools.json that listed it.
-  r = await postBundle({ action: 'add', bundle: 'gamedev-2d', kind: 'tools', item: JSON.stringify(fdTool) });
-  assert.equal(r.status, 200, JSON.stringify(await r.json()));
-  r = await postBundle({ action: 'move', kind: 'tools', item: JSON.stringify(fdTool), from: 'gamedev-2d', to: 'shelf' });
+  // r. a tool moved by its bare name: between bundles the stored entry travels, and the
+  // shelf move drops it everywhere. The body never carries the full entry.
+  r = await postBundle({ action: 'move', kind: 'tools', item: 'fd', from: 'core', to: 'gamedev-2d' });
   body = await r.json();
   assert.equal(r.status, 200, JSON.stringify(body));
+  assert.deepEqual(bundleStatFiles(body.commit), ['bundles/core/tools.json', 'bundles/gamedev-2d/tools.json'], 'the between-bundles tool move is one commit with both files');
   assert.equal(bundleRemoteText('bundles/core/tools.json'), `${JSON.stringify([rgTool], null, 2)}\n`, 'fd left the core list');
-  assert.equal(bundleRemoteText('bundles/gamedev-2d/tools.json'), '[]\n', 'fd left the gamedev list too, as an empty array');
+  assert.equal(bundleRemoteText('bundles/gamedev-2d/tools.json'), `${JSON.stringify([fdTool], null, 2)}\n`, 'fd arrived in the other list with its full stored entry');
+  r = await postBundle({ action: 'move', kind: 'tools', item: 'fd', from: 'gamedev-2d', to: 'shelf' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(bundleRemoteText('bundles/gamedev-2d/tools.json'), '[]\n', 'fd left the gamedev list by name');
 
   // s. removes: the line leaves the file, its header stays, and a missing line is a 404.
   r = await postBundle({ action: 'remove', bundle: 'web', kind: 'apt', item: 'curl' });
@@ -7484,6 +7488,11 @@ try {
       controls4f.find((c) => c.tag === 'select').value = 'shelf';
       assert.deepEqual(await doAction180(() => controls4f.find((c) => c.tag === 'button' && c.textContent === 'Move').fire('click')),
         { action: 'move', kind: 'apt', item: 'libsdl2', from: 'gamedev-2d', to: 'shelf' });
+      // g. A tools row sends the bare entry name, the key remove and move key on.
+      const core4g = block180(flat180(galley180.children[0]), 'core');
+      const remove4g = flat180(core4g).find((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Remove ripgrep from core');
+      assert.deepEqual(await doAction180(() => remove4g.fire('click')),
+        { action: 'remove', bundle: 'core', kind: 'tools', item: 'ripgrep' });
 
       // 5. A refused action: the section status carries the message, the button unlocks again.
       failAt180 = posts180.length + 1;

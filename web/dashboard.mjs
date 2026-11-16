@@ -1175,7 +1175,9 @@ function applyBundleAction(state, db, body, token, known) {
       const workerKind = /** @type {'apt' | 'env' | 'requirements' | 'tools'} */ (kind);
       const item = typeof body.item === 'string' ? body.item.trim() : '';
       if (!item) fail(400, `${rel}: the item is empty`);
-      const key = workerItemBodyKey(workerKind, item, rel);
+      // An add carries the tool entry as JSON text; a remove names the entry and keys on
+      // its name, because the inventory rows hold names, not entries.
+      const key = action === 'add' ? workerItemBodyKey(workerKind, item, rel) : (workerKind === 'tools' ? item : workerItemKey(workerKind, item));
       if (action === 'add') {
         // A list file that does not exist yet lists nothing (and an absent tools.json
         // must not reach the tools parser as empty bytes).
@@ -1227,10 +1229,13 @@ function applyBundleAction(state, db, body, token, known) {
       const workerKind = /** @type {'apt' | 'env' | 'requirements' | 'tools'} */ (kind);
       const item = typeof body.item === 'string' ? body.item.trim() : '';
       if (!item) fail(400, `${fromRel}: the item is empty`);
-      const key = workerItemBodyKey(workerKind, item, fromRel);
+      // A move names the entry (the tool name for tools.json) and the stored entry travels
+      // to the target file, so the body never needs the full entry.
+      const key = workerKind === 'tools' ? item : workerItemKey(workerKind, item);
       const fromBytes = storedBytes(db, fromRel);
       // An absent list file names nothing; an absent tools.json must not reach the tools parser as empty bytes.
-      if (fromBytes === null || !workerItems(workerKind, fromBytes, fromRel).some(it => it.key === key)) fail(409, `${fromRel}: does not name ${kind} "${key}"`);
+      const fromHit = fromBytes === null ? undefined : workerItems(workerKind, fromBytes, fromRel).find(it => it.key === key);
+      if (!fromHit) fail(409, `${fromRel}: does not name ${kind} "${key}"`);
       const label = kind === 'tools' ? key : item;
       if (body.to === 'shelf') {
         // The shelf: drop the key from every stored list of this kind that lists it,
@@ -1251,7 +1256,7 @@ function applyBundleAction(state, db, body, token, known) {
         if (toBytes === null && storedBundleFiles(db, to).length === 0) fail(404, `bundles: bundle "${to}" has no folder under bundles/`);
         if (toBytes !== null && workerItems(workerKind, toBytes, toRel).some(it => it.key === key)) fail(409, `${toRel}: already lists ${workerInfo.noun} "${key}"`);
         message = `alate: move ${kind} ${label} from ${from} to ${to}`;
-        const composed = composeWorkerAdd(workerKind, toBytes, item, toBytes === null ? workerInfo.header(to) : null);
+        const composed = composeWorkerAdd(workerKind, toBytes, fromHit.text, toBytes === null ? workerInfo.header(to) : null);
         try { validateWorkerBytes(workerKind, composed, toRel); } catch (err) { fail(400, /** @type {Error} */ (err).message); }
         stage(fromRel, sha256(/** @type {Buffer} */ (fromBytes)), dropWorkerItem(workerKind, /** @type {Buffer} */ (fromBytes), key));
         stage(toRel, toBytes === null ? null : sha256(toBytes), composed);

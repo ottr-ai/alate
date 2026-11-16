@@ -281,13 +281,15 @@ notes and the refresh behave as for a file edit.
   tracks no empty folder.
 - `add` and `remove`: structured item edits cover all six kinds. `kind` is one of
   `skill`, `plugin`, `apt`, `env`, `requirements`, `tools`; the payload field is
-  `name` for the two name lists and `item` for the four worker lists (the whole
-  line, or the tool entry as JSON text). A list file that does not exist yet
-  starts with a `# <kind> of bundle <name>` comment header; a new `tools.json`
-  starts as a JSON array holding the one entry. The server keeps the file's
-  line-ending style and its comment and blank lines. Adding an item the file
-  already lists under the same dedup key is a refusal, so a save never makes an
-  empty commit.
+  `name` for the two name lists and `item` for the four worker lists. For
+  `apt`, `env` and `requirements`, `item` is the whole line. For `tools`, an
+  `add` carries the whole entry as JSON text, while a `remove` carries only the
+  entry name, because the inventory rows hold names, not entries. A list file
+  that does not exist yet starts with a `# <kind> of bundle <name>` comment
+  header; a new `tools.json` starts as a JSON array holding the one entry. The
+  server keeps the file's line-ending style and its comment and blank lines.
+  Adding an item the file already lists under the same dedup key is a refusal,
+  so a save never makes an empty commit.
 - Dedup keys follow the merge-order section: the first token for apt and env
   lines, the package name before `==` lowercased for requirements, the entry
   `name` for tools, the name itself for skills and plugins. A new apt line is
@@ -297,12 +299,14 @@ notes and the refresh behave as for a file edit.
   the optional word `plain`, `requirements.txt` lines are pinned and hashed.
   `lib/worker-lists.mjs` mirrors those rules; its header names the installer
   functions it must stay in sync with.
-- `move` (`{ action, kind, name | item, from, to }`): `from` is a bundle that
-  lists the item under its dedup key; `to` is a bundle name or `shelf`. A move
-  between bundles writes both files in the one save. A move to the shelf
-  removes the item, by its dedup key, from every bundle of that kind that
-  lists it. The action refuses when `from` does not list the item, and when
-  `to` is a bundle that already lists it.
+- `move` (`{ action, kind, name | item, from, to }`): `item` names the entry
+  (the tool name for `tools`). `from` is a bundle that lists the item under its
+  dedup key; `to` is a bundle name or `shelf`. A move between bundles writes
+  both files in the one save, and the stored entry travels to the target file,
+  so the body never needs the full entry. A move to the shelf removes the
+  item, by its dedup key, from every bundle of that kind that lists it. The
+  action refuses when `from` does not list the item, and when `to` is a bundle
+  that already lists it.
 - `assign` and `unassign` (`{ action, project, bundle }`): the server parses
   the stored `projects/projects.json`, changes only that project's `bundles`
   array, and writes the whole manifest back as JSON with two-space indent and
