@@ -1682,11 +1682,14 @@ try {
   // removes a rejected one.
   // CRLF guard (ALAT-178), before the scan and before any write, in both modes: the
   // scan verdicts bind bytes, and the shipped baselines fingerprint LF bytes. A stale
-  // checkout (made before the data repo's .gitattributes, with core.autocrlf=true) or
-  // a CRLF text file committed against it changes every finding key, so no baseline
-  // entry matches and the gate would reject whole skills that are fine. Refuse with
-  // the fix instead. Unreadable files stay out (the hash and scan gates report them),
-  // and a NUL byte marks binary content whose CR bytes are data, not line endings.
+  // checkout (made before the data repo's .gitattributes, with core.autocrlf=true)
+  // changes every finding key, so no baseline entry matches and the gate would reject
+  // whole skills that are fine. Refuse with the fix instead — but only a real
+  // conversion (ALAT-183): bytes the data repo already commits are its own content, so
+  // a committed CR file (a Windows .cmd script) installs, and the refusal keeps
+  // covering only working bytes that differ from the committed blob. Unreadable files
+  // stay out (the hash and scan gates report them), and a NUL byte marks binary
+  // content whose CR bytes are data, not line endings.
   /** @type {string[]} */
   const crlfFiles = [];
   for (const dir of skillDirs) {
@@ -1704,15 +1707,37 @@ try {
     }
   }
   if (crlfFiles.length) {
-    crlfFiles.sort();
-    const named = crlfFiles.slice(0, 10);
-    throw new Error([
-      `refusing: ${crlfFiles.length} text file${crlfFiles.length === 1 ? '' : 's'} in baseline-shipping skills of ${data.dir} hold CR bytes (CRLF line endings).`,
-      'The scan baselines fingerprint LF bytes, so CRLF source bytes would reject skills that are fine.',
-      'Fix the data repo checkout, then run again: rewrite the files from HEAD (remove them and run git checkout -- . in the data repo), or set core.autocrlf=false there.',
-      ...named.map(f => `  ${f}`),
-      ...(crlfFiles.length > named.length ? [`  … and ${crlfFiles.length - named.length} more`] : []),
-    ].join('\n'));
+    // The committed bytes come from the data dir's git HEAD when it answers: a --data
+    // checkout and a --repo seed clone both have .git. The server's provision copy of an
+    // imported repo has no .git but carries the imported --commit, and its bytes are
+    // that import's committed bytes by construction (the import clones with LF pinned).
+    // A data dir with neither cannot prove intent, so every CR text file stays a
+    // refusal. The probe only runs when candidates exist, so the clean path never pays
+    // for it, and each candidate costs one git spawn on the CR path only.
+    const snapshotImport = args.values['--commit'] !== undefined;
+    const gitTracks = !snapshotImport && spawnSync('git', ['-C', data.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: childEnv() }).status === 0;
+    const converted = snapshotImport ? [] : crlfFiles.filter(rel => {
+      if (!gitTracks) return true; // a plain data dir cannot prove intent
+      let work;
+      try {
+        work = readFileSync(join(data.dir, rel));
+      } catch {
+        return true; // unreadable now: not provably committed
+      }
+      const blob = spawnSync('git', ['-C', data.dir, 'cat-file', 'blob', `HEAD:${rel}`], { encoding: 'buffer', env: childEnv(), maxBuffer: work.length + (1 << 20) });
+      return blob.status !== 0 || !blob.stdout.equals(work);
+    });
+    if (converted.length) {
+      converted.sort();
+      const named = converted.slice(0, 10);
+      throw new Error([
+        `refusing: ${converted.length} text file${converted.length === 1 ? '' : 's'} in baseline-shipping skills of ${data.dir} hold CR bytes (CRLF line endings).`,
+        'The scan baselines fingerprint LF bytes, so CRLF source bytes would reject skills that are fine.',
+        'Fix the data repo checkout, then run again: rewrite the files from HEAD (remove them and run git checkout -- . in the data repo), or set core.autocrlf=false there.',
+        ...named.map(f => `  ${f}`),
+        ...(converted.length > named.length ? [`  … and ${converted.length - named.length} more`] : []),
+      ].join('\n'));
+    }
   }
   if (!layerMode && (skillDirs.length || shippedScanDirs.length)) {
     /** @param {string} dir @returns {string} */

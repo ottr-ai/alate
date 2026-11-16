@@ -230,11 +230,17 @@ j. A case variant (`Skills/`), an 8.3 short name (`MANAGE~1/`), an ignorable-cod
    variant (`skil\u200Cls/`), and a trailing-dot variant (`skills./`) of a skill root are
    each reported `rejected`, are never scanned or installed, and the exact skill roots
    still install; exit 1, `fatal: false`.
-k. A data repo skill that ships a baseline and holds CRLF bytes in a text file
-   refuses the whole run before any write: exit non-zero, nothing installed or
-   deleted, the manifest and the installed copies unchanged, the message names the
-   files and the fix, and no scan runs. The same repo with LF bytes installs the
-   skill. A NUL-bearing (binary) file with CR bytes does not trip the guard.
+k. A data repo skill that ships a baseline and holds CRLF bytes in a text file whose
+   bytes differ from the committed blob (a CRLF working copy of an LF blob, the
+   checkout-conversion case) refuses the whole run before any write: exit non-zero,
+   nothing installed or deleted, the manifest and the installed copies unchanged, the
+   message names the files and the fix, and no scan runs. The same repo with LF bytes
+   installs the skill. A NUL-bearing (binary) file with CR bytes does not trip the
+   guard, and neither does a text file whose committed blob already holds the CR
+   bytes (ALAT-183): the guard reads the blob from the data dir's git HEAD when it
+   answers (`--data` checkout, `--repo` seed clone); the server's provision copy has
+   no .git but carries the imported `--commit`, and its bytes are that import's
+   committed bytes; a plain data dir with neither keeps the refusal.
 
 ## Non-goals
 

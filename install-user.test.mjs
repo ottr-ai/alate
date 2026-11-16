@@ -1345,6 +1345,85 @@ try {
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /[1-9]\d* installed/, 'the binary file installs beside the guard');
 
+    // ALAT-183: the guard judges a CR byte against the data repo's committed bytes, so a
+    // Windows .cmd file the repo commits on purpose seeds and installs, and the refusal
+    // keeps firing only for a checkout conversion (working bytes that differ from the
+    // committed blob). The fixture is a real git checkout: core.autocrlf=false commits
+    // the bytes verbatim, so the blob of run.cmd holds the CR bytes.
+    const crlfGitData = join(tmp, 'data-crlf-git');
+    const crlfGitCfg = join(tmp, 'crlf-gitconfig');
+    writeFileSync(crlfGitCfg, '');
+    const crlfGitEnv = { ...sandbox(), GIT_CONFIG_GLOBAL: crlfGitCfg, GIT_CONFIG_NOSYSTEM: '1' };
+    mkdirSync(crlfGitData, { recursive: true });
+    const gitRun = args => {
+      const g = spawnSync('git', args, { encoding: 'utf8', env: crlfGitEnv, cwd: crlfGitData });
+      assert.equal(g.status, 0, `git ${args.join(' ')} failed: ${g.stderr}`);
+    };
+    gitRun(['init', '-q', '-b', 'main', '.']);
+    gitRun(['config', 'user.email', 't@t']);
+    gitRun(['config', 'user.name', 't']);
+    const putG = (rel, text) => { mkdirSync(dirname(join(crlfGitData, 'user', rel)), { recursive: true }); writeFileSync(join(crlfGitData, 'user', rel), text); };
+    putG('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putG('omp/agent/skills/cmdy/SKILL.md', skillText('cmdy'));
+    putG('omp/agent/skills/cmdy/.skillspector-baseline.yaml', 'findings: []\n');
+    putG('omp/agent/skills/cmdy/scripts/run.cmd', '@echo off\r\necho hi\r\n');
+    gitRun(['-c', 'core.autocrlf=false', 'add', '-A']);
+    gitRun(['-c', 'core.autocrlf=false', 'commit', '-qm', 'crlf fixture']);
+    const crlfGitHome = join(tmp, 'home-crlf-git');
+    writeStub(0);
+    r = run(['--data', crlfGitData, '--skip-plugins'], crlfGitHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(join(crlfGitHome, '.omp/agent/skills/cmdy/scripts/run.cmd'), 'utf8'), '@echo off\r\necho hi\r\n', 'the committed CRLF bytes install verbatim');
+    // A CRLF working copy over an LF blob is still a conversion: the refusal names the
+    // converted file and not the committed-CR file beside it.
+    putG('omp/agent/skills/cmdy/SKILL.md', skillText('cmdy').replace(/\n/g, '\r\n'));
+    const crlfGitCalls = readFileSync(callsLog, 'utf8');
+    r = run(['--data', crlfGitData, '--skip-plugins'], crlfGitHome);
+    assert.equal(r.status, 1, 'a CRLF working copy over an LF blob refuses the run');
+    assert.ok(r.stderr.includes('user/omp/agent/skills/cmdy/SKILL.md'), `the refusal names the converted file: ${r.stderr}`);
+    assert.ok(!r.stderr.includes('run.cmd'), 'the committed-CR file never appears in the refusal');
+    assert.ok(r.stderr.includes('git checkout -- .') && r.stderr.includes('core.autocrlf=false'), 'the refusal prints the fix');
+    assert.ok(!/\d+ installed/.test(r.stdout), 'nothing installs');
+    assert.ok(!/\d+ deleted/.test(r.stdout), 'nothing deletes');
+    assert.equal(readFileSync(callsLog, 'utf8'), crlfGitCalls, 'the refusal comes before any scan');
+    // The committed state itself seeds: the board seed clones the data repo (--repo), and
+    // the fresh LF-pinned clone carries the committed CR bytes of run.cmd.
+    const crlfGh = join(tmp, 'crlf-gh');
+    {
+      const g = spawnSync('git', ['clone', '-q', crlfGitData, join(crlfGh, 'me', 'data')], { encoding: 'utf8', env: crlfGitEnv });
+      assert.equal(g.status, 0, `git clone failed: ${g.stderr}`);
+    }
+    const crlfSeedCfg = join(tmp, 'crlf-seed-gitconfig');
+    writeFileSync(crlfSeedCfg, `[url "${pathToFileURL(crlfGh).href}/"]\n\tinsteadOf = https://github.com/\n`);
+    const crlfSeedHome = join(tmp, 'home-crlf-seed');
+    r = run(['--repo', 'me/data', '--skip-plugins'], crlfSeedHome, { ...sandbox(), PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), GIT_CONFIG_GLOBAL: crlfSeedCfg, GIT_CONFIG_NOSYSTEM: '1' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(join(crlfSeedHome, '.omp/agent/skills/cmdy/scripts/run.cmd'), 'utf8'), '@echo off\r\necho hi\r\n', 'the seed install keeps the committed CRLF bytes');
+    // The server's provision copy is a snapshot without .git plus the imported --commit:
+    // its bytes are the import's committed bytes, so the committed CR file installs there
+    // too, while the same plain dir without --commit keeps today's refusal.
+    const crlfSnapData = join(tmp, 'data-crlf-snap');
+    const putS = (rel, text) => { mkdirSync(dirname(join(crlfSnapData, 'user', rel)), { recursive: true }); writeFileSync(join(crlfSnapData, 'user', rel), text); };
+    putS('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putS('omp/agent/skills/cmdy/SKILL.md', skillText('cmdy'));
+    putS('omp/agent/skills/cmdy/.skillspector-baseline.yaml', 'findings: []\n');
+    putS('omp/agent/skills/cmdy/scripts/run.cmd', '@echo off\r\necho hi\r\n');
+    const crlfSnapHome = join(tmp, 'home-crlf-snap');
+    r = run(['--data', crlfSnapData, '--commit', 'a'.repeat(40), '--skip-plugins'], crlfSnapHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(join(crlfSnapHome, '.omp/agent/skills/cmdy/scripts/run.cmd'), 'utf8'), '@echo off\r\necho hi\r\n', 'the snapshot import installs the committed CRLF bytes');
+    const crlfSnapHome2 = join(tmp, 'home-crlf-snap2');
+    r = run(['--data', crlfSnapData, '--skip-plugins'], crlfSnapHome2);
+    assert.equal(r.status, 1, 'a plain data dir without git keeps the refusal');
+    assert.ok(r.stderr.includes('user/omp/agent/skills/cmdy/scripts/run.cmd'), `the plain-dir refusal names the CR file: ${r.stderr}`);
+    // Restore the git fixture's working copy: the committed bytes seed (the remote clone
+    // above already took them), and the LF working copy installs in place again.
+    putG('omp/agent/skills/cmdy/SKILL.md', skillText('cmdy'));
+    r = run(['--data', crlfGitData, '--skip-plugins'], crlfGitHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes('0 deleted'), 'the restored run deletes nothing');
+    assert.equal(readFileSync(join(crlfGitHome, '.omp/agent/skills/cmdy/scripts/run.cmd'), 'utf8'), '@echo off\r\necho hi\r\n', 'the committed CRLF bytes stay installed');
+
     // Retention covers a rejected skill whole, not partial: a recorded file the rejected
     // snapshot drops never enters the rejected walk's `current`, so only the record
     // resurrection keeps it from the deletion path (send-back 1: the run must not print
