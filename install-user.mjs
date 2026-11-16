@@ -45,7 +45,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { assertDirIdentity, assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, dirIdentity, fingerprint, forTarget, indexExecPaths, makeDirInside, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, renderForTarget, resolveDataDir, ruleProblems, sameContent, SKILL_ROOT_NAMES, skillProblems, skillRootAlias, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeFileInside, writeProvisionResults, yamlProblems } from './lib/data.mjs';
+import { assertDirIdentity, assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, CRLF_SUFFIXES, describeProblem, describeScanReport, dirIdentity, fingerprint, forTarget, indexExecPaths, makeDirInside, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, renderForTarget, resolveDataDir, ruleProblems, sameContent, SKILL_ROOT_NAMES, skillProblems, skillRootAlias, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeFileInside, writeProvisionResults, yamlProblems } from './lib/data.mjs';
 import { isBundlesMode, parseManifestProjects, renderToolsJson, resolveBundlePlan } from './lib/bundles.mjs';
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
@@ -1758,9 +1758,13 @@ try {
   // whole skills that are fine. Refuse with the fix instead — but only a real
   // conversion (ALAT-183): bytes the data repo already commits are its own content, so
   // a committed CR file (a Windows .cmd script) installs, and the refusal keeps
-  // covering only working bytes that differ from the committed blob. Unreadable files
-  // stay out (the hash and scan gates report them), and a NUL byte marks binary
-  // content whose CR bytes are data, not line endings.
+  // covering only working bytes that differ from the committed blob. A tracked
+  // checkout's *.cmd/*.bat bytes are its own canonical rendering too (ALAT-186): the
+  // data repo's .gitattributes checks the suffix out as CRLF over LF index bytes with
+  // a clean git status, and install canonicalizes and re-renders it, so the suffix
+  // never refuses in a git dir. Unreadable files stay out (the hash and scan gates
+  // report them), and a NUL byte marks binary content whose CR bytes are data, not
+  // line endings.
   /** @type {string[]} */
   const crlfFiles = [];
   for (const dir of skillDirs) {
@@ -1790,6 +1794,7 @@ try {
     const gitTracks = spawnSync('git', ['-C', data.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: childEnv() }).status === 0;
     const snapshotImport = args.values['--commit'] !== undefined;
     const converted = gitTracks ? crlfFiles.filter(rel => {
+      if (CRLF_SUFFIXES.some(suffix => rel.toLowerCase().endsWith(suffix))) return false;
       let work;
       try {
         work = readFileSync(join(data.dir, rel));
@@ -1805,7 +1810,7 @@ try {
       throw new Error([
         `refusing: ${converted.length} text file${converted.length === 1 ? '' : 's'} in baseline-shipping skills of ${data.dir} hold CR bytes (CRLF line endings).`,
         'The scan baselines fingerprint LF bytes, so CRLF source bytes would reject skills that are fine.',
-        'Fix the data repo checkout, then run again: rewrite the files from HEAD (remove them and run git checkout -- . in the data repo), or set core.autocrlf=false there.',
+        'Fix the data repo checkout, then run again: set core.autocrlf=false there, remove the named files, and run git checkout -- . in the data repo; a file git does not track must be removed or rewritten to LF.',
         ...named.map(f => `  ${f}`),
         ...(converted.length > named.length ? [`  … and ${converted.length - named.length} more`] : []),
       ].join('\n'));

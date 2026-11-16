@@ -155,10 +155,14 @@ failure; `provisionedSha` still moves only on `ok`.
 4. worker-list validation (fatal as before), conflicts (fatal as before);
 5. CRLF source guard before the scan, in both modes and before any write: a text
    file (no NUL byte) under a surviving skill dir that ships
-   `.skillspector-baseline.yaml` must hold no CR byte. One hit refuses the whole run
+   `.skillspector-baseline.yaml` must hold no CR byte, except that a git-checkout
+   data dir passes a `*.cmd`/`*.bat` file (the canonical `.gitattributes` checks the
+   suffix out as CRLF over an LF index blob, ALAT-186) and passes a file whose bytes
+   equal its committed blob (ALAT-183). One hit refuses the whole run
    (fatal, exit 1, nothing written or deleted), names up to 10 files, and prints the
-   fix: rewrite the files from HEAD in the data repo, or set `core.autocrlf=false`
-   there. A stale checkout (made before the repo's `.gitattributes`, with
+   fix: set `core.autocrlf=false`, remove the named files, and run
+   `git checkout -- .` in the data repo; a file git does not track must be removed
+   or rewritten to LF. A stale checkout (made before the repo's `.gitattributes`, with
    `core.autocrlf=true`) holds CRLF working-tree bytes while `git status` is clean;
    the shipped baselines fingerprint LF bytes, so every finding key would miss and
    the gate would reject whole skills that are fine;
@@ -240,7 +244,10 @@ k. A data repo skill that ships a baseline and holds CRLF bytes in a text file w
    bytes (ALAT-183): the guard reads the blob from the data dir's git HEAD when it
    answers (`--data` checkout, `--repo` seed clone); the server's provision copy has
    no .git but carries the imported `--commit`, and its bytes are that import's
-   committed bytes; a plain data dir with neither keeps the refusal.
+   committed bytes; a plain data dir with neither keeps the refusal. A
+   `*.cmd`/`*.bat` whose working tree holds the checkout's CRLF smudge of an LF
+   index blob (a clean `git status` under the canonical `.gitattributes`) installs
+   (ALAT-186), and the refusal message never names it.
 
 ## Non-goals
 

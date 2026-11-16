@@ -293,10 +293,80 @@ function sectionC() {
   }
 }
 
+function sectionD() {
+  try {
+    // ALAT-186: a clean checkout of a canonical data repo holds CRLF *.cmd bytes over
+    // LF index blobs (the .gitattributes smudge), and a baseline-shipping skill ships
+    // one. The CRLF source guard must not refuse git's own checkout rendering; it must
+    // still refuse a CRLF working copy of a non-suffix file over an LF blob.
+    const data = join(tmp, 'data-d');
+    const home = join(tmp, 'home-d');
+    mkdirSync(data, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    put(data, '.gitattributes', [
+      '# One canonical form (specs/canonical-form.md): text is LF everywhere;',
+      '# *.cmd/*.bat check out CRLF on every OS.',
+      '* text=auto eol=lf',
+      '*.cmd text eol=crlf',
+      '*.bat text eol=crlf',
+      '',
+    ].join('\n'));
+    put(data, 'upstreams.json', JSON.stringify({
+      items: [{ name: 'smudgy', kind: 'skill', origin: 'https://github.com/example/smudgy', check: { type: 'github-path', repo: 'example/smudgy', path: 'skills/smudgy' }, paths: ['user/omp/agent/skills/smudgy'] }],
+    }));
+    const smudgyMd = SKILL_MD.replace('name: demo', 'name: smudgy');
+    put(data, 'user/omp/agent/skills/smudgy/SKILL.md', smudgyMd);
+    put(data, 'user/omp/agent/skills/smudgy/.skillspector-baseline.yaml', 'findings: []\n');
+    put(data, 'user/omp/agent/skills/smudgy/scripts/run.cmd', RUN_CMD);
+    const git = args => {
+      const r = spawnSync('git', args, { encoding: 'utf8', cwd: data, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', HOME: data } });
+      if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr || r.stdout}`);
+      return r;
+    };
+    git(['init', '-b', 'main']);
+    git(['config', 'user.email', 'test@example.com']);
+    git(['config', 'user.name', 'Canonical Test']);
+    git(['add', '-A']);
+    git(['-c', 'commit.gpgsign=false', 'commit', '-m', 'fixture']);
+    // The canonical smudge: the index blob holds LF, the working tree holds CRLF, and
+    // git status stays clean — the checkout state the guard refused before the fix.
+    // The add only refreshes git's stat cache for the rewritten file (its clean filter
+    // returns the committed LF blob), which is what a real checkout's refresh does.
+    writeFileSync(join(data, 'user/omp/agent/skills/smudgy/scripts/run.cmd'), crlf(RUN_CMD));
+    git(['add', 'user/omp/agent/skills/smudgy/scripts/run.cmd']);
+    const status = git(['status', '--porcelain']);
+    attempt('D fixture is a clean checkout', () => {
+      assert.equal(status.stdout, '', `the smudged fixture is not a clean checkout: ${JSON.stringify(status.stdout)}`);
+    });
+
+    const r = run('install-user.mjs', ['--home', home, '--data', data, '--skip-plugins'], installEnv(home));
+    attempt('D install exits 0', () => assert.equal(r.status, 0, `install refused the canonical checkout's CRLF .cmd bytes\n${outOf(r)}`));
+    attempt('D run.cmd installed with CRLF', () => {
+      const inst = readFileSync(join(home, '.omp/agent/skills/smudgy/scripts/run.cmd'));
+      assert.ok(inst.includes(Buffer.from('\r\n')), `the installed run.cmd holds no CRLF (hex head ${inst.subarray(0, 12).toString('hex')}); install must render *.cmd as CRLF on every target`);
+    });
+    // The boundary holds: a CRLF working copy of a non-suffix file over an LF blob is a
+    // real conversion and still refuses — named, while the smudged .cmd stays out.
+    put(data, 'user/omp/agent/skills/smudgy/notes.txt', 'body\r\n');
+    const r2 = run('install-user.mjs', ['--home', home, '--data', data, '--skip-plugins'], installEnv(home));
+    attempt('D non-suffix CRLF copy still refuses', () => {
+      assert.equal(r2.status, 1, `a CRLF notes.txt over an LF blob installed\n${outOf(r2)}`);
+      assert.ok(r2.stderr.includes('user/omp/agent/skills/smudgy/notes.txt'), `the refusal names the converted file: ${r2.stderr}`);
+      assert.ok(!r2.stderr.includes('run.cmd'), `the smudged .cmd must not appear in the refusal: ${r2.stderr}`);
+    });
+    put(data, 'user/omp/agent/skills/smudgy/notes.txt', 'body\n');
+    const r3 = run('install-user.mjs', ['--home', home, '--data', data, '--skip-plugins'], installEnv(home));
+    attempt('D restored checkout installs', () => assert.equal(r3.status, 0, `install refused the restored checkout\n${outOf(r3)}`));
+  } catch (err) {
+    failures.push(`D (fixture error): ${err.message}`);
+  }
+}
+
 try {
   await sectionA();
   await sectionB();
   sectionC();
+  sectionD();
 } finally {
   console.log('\n=== canonical-form.test.mjs (specs/canonical-form.md) ===');
   for (const f of failures) console.log(`FAIL ${f}`);

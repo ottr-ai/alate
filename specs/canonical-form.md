@@ -128,8 +128,12 @@ No file is ever duplicated per OS.
 - A capture or install source that cannot be decided text or binary (unreadable)
   refuses as it does today.
 - The CRLF source guard (a text file under a baseline-shipping skill dir) stays
-  fatal and unchanged. Canonical capture makes it unreachable for fresh captures;
-  it keeps guarding stale checkouts (see Risks).
+  fatal. Canonical capture makes it unreachable for fresh captures. In a
+  git-checkout data dir it passes a `*.cmd`/`*.bat` candidate (the checkout's CRLF
+  smudge of LF index bytes) and a candidate whose bytes equal its committed blob;
+  every other candidate whose bytes differ from the committed blob refuses, and a
+  data dir without git refuses every candidate. The guard keeps guarding stale
+  checkouts (see Risks).
 
 ## Acceptance checks
 
@@ -154,6 +158,11 @@ Each fails before the change:
    value installs as `npx` on Linux and `npx.cmd` on win32; the unknown-platform
    forms refuse.
 5. The project's check and test commands (the verified chain in `AGENTS.md`) exit 0.
+6. A baseline-shipping skill fixture in a git checkout of the canonical ruleset
+   holds a `.cmd` whose index blob is LF and whose working-tree bytes are CRLF
+   under a clean `git status`; install exits 0 and the installed `.cmd` holds CRLF.
+   A non-suffix text file in the same checkout whose working bytes are CRLF over an
+   LF blob still refuses, named in the message while the `.cmd` stays unnamed.
 
 ## Alternatives considered
 
@@ -195,8 +204,8 @@ Each fails before the change:
 - No change to Ottr: installed worker lists and skill trees hold plain target-form
   bytes, exactly what Ottr reads today.
 - No capture-side mode recording; exec stays a git-index decision.
-- No relaxation of the CRLF source guard, the SkillSpector rules, or the baseline
-  severity cap.
+- No relaxation of the CRLF source guard beyond the tracked-checkout exemption in
+  Error cases; the SkillSpector rules and the baseline severity cap stay untouched.
 - The real agent-data renormalize is a data-repo card (filed from this task), not a
   commit in that checkout from this branch.
 - No bundles-feature changes beyond the worker-list render points this card needs.
