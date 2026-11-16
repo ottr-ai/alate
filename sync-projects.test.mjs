@@ -99,6 +99,16 @@ try {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(snap('beta', 'scripts/tool.mjs'), '// helper v2\n', 're-listing an extra resumes refreshing it');
 
+  // Object project values (specs/bundles.md): extras capture exactly like the array form,
+  // and bundles is never read here (it drives install-user only; bundles/core does not exist).
+  manifest({ contextFiles: ['AGENTS.md'], projects: { alpha: [], beta: { extras: ['scripts/tool.mjs'], bundles: ['core'] } } });
+  put(tmp, 'beta/scripts/tool.mjs', '// helper v3\n');
+  r = run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /updated\s+projects.beta.scripts.tool\.mjs/, r.stdout);
+  assert.equal(snap('beta', 'scripts/tool.mjs'), '// helper v3\n', 'the object form captures extras like the array form');
+  assert.match(r.stdout, /0 added, 1 updated, 2 unchanged/, r.stdout);
+
   // --- capture baseline (ALAT-154): the capture never overwrites a newer committed snapshot ---
   // The state file records, per machine and per file, the snapshot bytes the last capture
   // wrote or adopted; a one-sided snapshot change refreshes the machine copy, a two-sided

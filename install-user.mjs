@@ -46,6 +46,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { assertDirIdentity, assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, describeProblem, describeScanReport, dirIdentity, fingerprint, forTarget, makeDirInside, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, resolveDataDir, ruleProblems, sameContent, SKILL_ROOT_NAMES, skillProblems, skillRootAlias, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeFileInside, writeProvisionResults, yamlProblems } from './lib/data.mjs';
+import { isBundlesMode, parseManifestProjects, resolveBundlePlan } from './lib/bundles.mjs';
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
@@ -986,6 +987,91 @@ try {
     }
   }
 
+  // Bundles mode (specs/bundles.md) resolves its whole plan here: after the content gates
+  // built skillDirs/rejectedSkills, before the snapshot walk, the scan gate, any worker
+  // write, and any layer creation, so a refusal (unknown name, unknown bundle, misplaced
+  // or malformed file) leaves the home and the layer untouched. Without bundles/ nothing
+  // below runs and today's behavior holds byte for byte: no projects.json read.
+  const bundlesMode = isBundlesMode(data.dir);
+  /** @type {ReturnType<typeof resolveBundlePlan> | null} */
+  let bundlesPlan = null;
+  // Skill names bundles/core names: they install into the home roots for every project.
+  const coreSkillNames = new Set();
+  // Skill name -> sorted names of the projects whose merged non-core skills list has it.
+  /** @type {Map<string, string[]>} */
+  const projectSkillTargets = new Map();
+  // The (project, skill) pairs whose per-project folder the plan installs, for the
+  // layer-mode scan, which collectSkillDirs cannot find on its own.
+  /** @type {{ project: string, name: string }[]} */
+  let plannedProjectSkills = [];
+  // Skill name -> the snapshot rel of the skill dir of that name, so per-project rels
+  // report under their snapshot skill's item key.
+  /** @type {Map<string, string>} */
+  const skillNameItem = new Map();
+  if (bundlesMode) {
+    const manifestPath = join(data.dir, 'projects', 'projects.json');
+    /** @type {any} */
+    let table = {};
+    if (existsSync(manifestPath)) {
+      try {
+        table = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      } catch (err) {
+        throw new Error(`projects.json: ${/** @type {Error} */ (err).message}`);
+      }
+    }
+    // A workers-only dir is a project with no bundles key; a manifest entry wins on a clash.
+    // A project name is one path segment: it names a .ottr destination, so a traversal
+    // spelling refuses here instead of failing a destination guard later.
+    const projects = new Map(parseManifestProjects(table?.projects ?? {}).map(p => {
+      if (!p.name || p.name === '.' || p.name === '..' || /[\\/]/.test(p.name)) throw new Error(`projects.json: rejected unsafe project name "${p.name}"`);
+      return [p.name, p];
+    }));
+    const dataWorkers = join(data.dir, 'workers');
+    if (existsSync(dataWorkers)) {
+      assertSourceInside(data.dir, dataWorkers);
+      for (const entry of readdirSync(dataWorkers, { withFileTypes: true })) {
+        if (entry.isDirectory() && entry.name !== '_all' && !projects.has(entry.name)) {
+          projects.set(entry.name, { name: entry.name, extras: [], bundles: [] });
+        }
+      }
+    }
+    // Existence is what matters: every snapshot skill dir name, whatever its gate state.
+    const knownSkills = new Set(skillDirs.map(dir => basename(dir)));
+    // A plugin the repo holds: the captured package.json dependencies, lockfile, and
+    // installed-plugins names. Each source is optional: a missing or unparsable file
+    // holds no names.
+    const knownPlugins = new Set();
+    const capturedPlugins = join(userRoot, 'omp', 'plugins');
+    for (const [file, pick] of /** @type {[string, (doc: any) => unknown[]][]} */ ([
+      ['package.json', doc => Object.keys(doc?.dependencies ?? {})],
+      ['omp-plugins.lock.json', doc => Object.keys(doc?.plugins ?? doc ?? {})],
+      ['installed_plugins.json', doc => Object.keys(doc?.plugins ?? doc ?? {})],
+    ])) {
+      try {
+        for (const name of pick(JSON.parse(readFileSync(join(capturedPlugins, file), 'utf8')))) {
+          if (typeof name === 'string') knownPlugins.add(name);
+        }
+      } catch { /* missing or unparsable: that source holds no names */ }
+    }
+    // Throws the whole-run refusal messages on any unknown name, unknown bundle, or
+    // misplaced bundle file; the throw flows through the main catch below.
+    bundlesPlan = resolveBundlePlan({ dataDir: data.dir, projects: [...projects.values()], knownSkills, knownPlugins });
+    for (const name of bundlesPlan.core.lists.get('skills') ?? []) coreSkillNames.add(name);
+    for (const project of bundlesPlan.projects) {
+      for (const name of project.lists.get('skills') ?? []) {
+        const targets = projectSkillTargets.get(name);
+        if (targets) targets.push(project.name);
+        else projectSkillTargets.set(name, [project.name]);
+      }
+    }
+    for (const targets of projectSkillTargets.values()) targets.sort();
+    plannedProjectSkills = bundlesPlan.projects.flatMap(p => (p.lists.get('skills') ?? []).map(name => ({ project: p.name, name })));
+  }
+  for (const dir of skillDirs) {
+    const name = basename(dir);
+    if (!skillNameItem.has(name)) skillNameItem.set(name, relative(userRoot, dir).split(sep).join('/'));
+  }
+
   // The capture roots (lib/data.mjs) are dot-dirs in the home (user/omp -> ~/.omp); the full
   // list, never just this snapshot's top-level dirs, so a stored path through a root the
   // snapshot lacks still moves.
@@ -1144,33 +1230,28 @@ try {
   // install through the deletion path below.
   /** @type {Map<string, string>} */
   const recordedFp = new Map();
-  for (const rel of walk(userRoot)) {
-    // A skill left out by a gate contributes nothing: no plan entry, no manifest record, no
-    // conflict, so its installed copy is deleted later like any path the snapshot dropped.
-    if (inRejected(rel, rejectedSkills)) continue;
-    relSource.set(rel, 'snapshot');
-    // Snapshot content must resolve inside the snapshot; links escaping it, or cyclic
-    // ones, refuse the restore instead of being followed.
-    const srcPath = join(userRoot, rel);
-    try {
-      assertSourceInside(userRoot, srcPath);
-    } catch (err) {
-      throw new Error(`user/${rel}: ${/** @type {Error} */ (err).message}`);
-    }
-    const dest = join(writeRoot, '.' + rel);
+  // Plans one snapshot rel: a home rel as today, or in bundles mode a virtual per-project
+  // rel. `source` is 'snapshot' for a home rel and the owning skill dir for a virtual one,
+  // so a scan rejection of that dir strips exactly its own rels — home and virtual — from
+  // the plan, the record, and the conflicts.
+  /** @param {string} planRel @param {string} source @param {string} srcPath @returns {void} */
+  const planSnapshotRel = (planRel, source, srcPath) => {
+    const virtual = source !== 'snapshot';
+    relSource.set(planRel, source);
+    const dest = join(writeRoot, '.' + planRel);
     // Every destination is preflighted before any content is read or written, so a
     // symlink, hardlink, or directory at dest refuses the whole restore up front —
     // --force overrides the conflict refusal, never this alias guard.
     checkDestination(writeRoot, dest);
-    const machineSrc = layerMode && rel === 'omp/agent/config.yml' ? machineRoot : readRoot;
-    const readDest = join(machineSrc, '.' + rel);
+    const machineSrc = layerMode && planRel === 'omp/agent/config.yml' ? machineRoot : readRoot;
+    const readDest = join(machineSrc, '.' + planRel);
     // The machine copy feeds config.yml's deployment blocks, the fingerprints, and the kept
     // bytes: one read through a no-follow fd, never an alias out of the live layer, or out
     // of an in-place home on a first layer. See the guard on lastManifest above.
     const machineBytes = readMachineFile(machineSrc, readDest);
     // forTarget roots a captured absolute path at the real home; in layer mode the remap
     // below alone moves it into the layer — writeRoot here would put the layer prefix in twice.
-    const target = forTarget(rel, readFileSync(srcPath), { home, platform: process.platform, roots });
+    const target = forTarget(planRel, readFileSync(srcPath), { home, platform: process.platform, roots });
     notes.push(...target.notes);
     // Captured config can point at absolute paths in the capture home; a layer re-roots them
     // so a turn pinned to the layer resolves files under its own path.
@@ -1181,29 +1262,29 @@ try {
     // skills.customDirectories goes too (gatedConfig above); capture strips it already, so
     // only a hand-written snapshot carries it. A config the syntax gate refuses is rejected
     // per item: no plan entry, no manifest record, no conflict.
-    if (rel === 'omp/agent/config.yml') {
+    if (planRel === 'omp/agent/config.yml') {
       const gated = gatedConfig(snapshot.toString('utf8'));
       if (gated.problems.length) {
         const first = describeProblem(gated.problems[0]);
-        failItem(`user/${rel}`, 'rejected', first.rule, first.at, gated.problems.join('\n'));
-        continue;
+        failItem(`user/${planRel}`, 'rejected', first.rule, first.at, gated.problems.join('\n'));
+        return;
       }
-      if (gated.dropped) notes.push(`user/${rel}: dropped skills.customDirectories (the skill gates never judge those folders)`);
+      if (gated.dropped) notes.push(`user/${planRel}: dropped skills.customDirectories (the skill gates never judge those folders)`);
       snapshot = Buffer.from(gated.text, 'utf8');
     }
     // The remap prefix must spell the home exactly as forTarget rooted it above, so a
     // non-canonical --home still re-roots once; the layer side is canonical.
-    if (layerMode && /\.(?:json|ya?ml)$/.test(rel)) snapshot = Buffer.from(remapHomePaths(snapshot.toString('utf8'), home, /** @type {string} */ (newLayerDir)), 'utf8');
+    if (layerMode && /\.(?:json|ya?ml)$/.test(planRel)) snapshot = Buffer.from(remapHomePaths(snapshot.toString('utf8'), home, /** @type {string} */ (newLayerDir)), 'utf8');
     // config.yml's top-level hindsight:/alate: blocks are deployment settings that stay on the
     // target: the snapshot never carries them (capture strips them), and the machine's own ride
     // along on every install. In layer mode they come from the live layer's config, the fresh
     // one has none yet. Compare deployment-free content, so a target that differs only in
     // those blocks is unchanged and a real conflict cannot hide behind them. `dropped` holds
     // credentials: never log it.
-    const machineYaml = rel === 'omp/agent/config.yml' && machineBytes !== null
+    const machineYaml = planRel === 'omp/agent/config.yml' && machineBytes !== null
       ? machineBytes.toString('utf8') : null;
     const deployed = machineYaml === null ? null : splitDeploymentBlocks(machineYaml);
-    const want = fingerprint(rel, snapshot);
+    const want = fingerprint(planRel, snapshot);
     let src = snapshot;
     if (deployed?.dropped.length) {
       const base = splitDeploymentBlocks(snapshot.toString('utf8'));
@@ -1217,8 +1298,8 @@ try {
       const problems = configProblems(src.toString('utf8'));
       if (problems.length) {
         const first = describeProblem(problems[0]);
-        failItem(`user/${rel}`, 'rejected', first.rule, first.at, problems.join('\n'));
-        continue;
+        failItem(`user/${planRel}`, 'rejected', first.rule, first.at, problems.join('\n'));
+        return;
       }
     }
     // Rules restored through user/ land in the live agent rules dir, so every Markdown there
@@ -1230,31 +1311,32 @@ try {
     // The extension matches without case: on a case-insensitive filesystem (Windows, macOS)
     // omp's fixed-path read of RULES.md opens a RULES.MD too.
     // A file with problems is rejected per item: no plan entry, no manifest record, no conflict.
-    // Files inside a skill folder are judged by the whole-skill gate above, never per file.
-    if (/\.(md|mdc)$/i.test(rel) && !skillEntrypoints.has(srcPath)
-        && !skillRelPrefixes.some(p => rel === p || rel.startsWith(`${p}/`))) {
-      const problems = ruleProblems(`user/${rel}`, src.toString('utf8'), { frontmatter: /^omp\/agent\/rules\/[^/]+\.mdc?$/.test(rel) });
+    // Files inside a skill folder are judged by the whole-skill gate above, never per file; a
+    // virtual per-project rel holds exactly such skill files, so it never rides this gate.
+    if (!virtual && /\.(md|mdc)$/i.test(planRel) && !skillEntrypoints.has(srcPath)
+        && !skillRelPrefixes.some(p => planRel === p || planRel.startsWith(`${p}/`))) {
+      const problems = ruleProblems(`user/${planRel}`, src.toString('utf8'), { frontmatter: /^omp\/agent\/rules\/[^/]+\.mdc?$/.test(planRel) });
       if (problems.length) {
         const first = describeProblem(problems[0]);
-        failItem(`user/${rel}`, 'rejected', first.rule, first.at, problems.join('\n'));
-        continue;
+        failItem(`user/${planRel}`, 'rejected', first.rule, first.at, problems.join('\n'));
+        return;
       }
     }
     // The machine text minus its deployment blocks (lib/data.mjs keeps the last kept line's
     // terminator). `dropped` holds credentials: never log it.
-    const have = machineFingerprint(rel, machineBytes);
+    const have = machineFingerprint(planRel, machineBytes);
     // The snapshot comparison uses the layer-normalized form: a file whose only difference
     // from the snapshot is the layer prefix in re-rooted paths is unchanged.
-    const haveLayer = layerMachineFingerprint(rel, machineBytes, machineSrc);
+    const haveLayer = layerMachineFingerprint(planRel, machineBytes, machineSrc);
     // The record-match: the plain form (strip-era records, and every non-config file) or the
     // legacy form above (records a pre-strip alate wrote, entry included). A matched file was
     // not changed on the machine since the install, so the snapshot may replace it.
-    const record = have !== null && (have === last[rel] || legacyFingerprint(rel, machineBytes) === last[rel]);
-    if (record) recordedFp.set(rel, /** @type {string} */ (last[rel]));
+    const record = have !== null && (have === last[planRel] || legacyFingerprint(planRel, machineBytes) === last[planRel]);
+    if (record) recordedFp.set(planRel, /** @type {string} */ (last[planRel]));
     // The item key rides on every plan entry, so the per-item results can aggregate by key.
-    const itemKey = `user/${rel}`;
+    const itemKey = `user/${planRel}`;
     if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null]);
-    else if (layerMode && haveLayer === want) plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);
+    else if (layerMode && haveLayer === want) plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer)]);
     else if (layerMode && machineBytes !== null && !record) {
       // A machine change beyond the deployment blocks is never a refusal in layer mode:
       // machine state wins and rides into the new layer, --force takes the snapshot instead.
@@ -1262,12 +1344,12 @@ try {
       // Plugin install files are the exception: the provisioner itself runs bun install
       // over them, so a turn-edited copy must never ride into the new layer. The snapshot
       // wins, --force or not; a deliberate change goes through a data-repo commit.
-      if (pluginInstallFile(rel)) {
-        plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);
+      if (pluginInstallFile(planRel)) {
+        plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer)]);
         notes.push(`plugin install file takes the snapshot, machine change ignored: ${readDest}`);
       }
       else if (force) {
-        plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);
+        plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer)]);
         notes.push(`machine change overridden by --force: ${readDest}`);
       } else {
         // A kept file can hold paths re-rooted into the live layer at its install, so they
@@ -1278,29 +1360,139 @@ try {
         // snapshot does above, so the choice never rides along with the machine part. A turn
         // writes the live layer, so its customDirectories goes the same way too, and a kept
         // copy the syntax gate refuses gives way to the snapshot, which passed it above.
-        const gated = rel === 'omp/agent/config.yml' ? gatedConfig(keptBytes.toString('utf8')) : null;
+        const gated = planRel === 'omp/agent/config.yml' ? gatedConfig(keptBytes.toString('utf8')) : null;
         if (gated?.problems.length) {
-          plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);
+          plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer)]);
           notes.push(`machine copy takes the snapshot, its YAML syntax is unsupported (${describeProblem(gated.problems[0]).rule}): ${readDest}`);
         } else {
           if (gated) {
-            if (gated.dropped) notes.push(`user/${rel}: dropped skills.customDirectories from the kept machine copy (the skill gates never judge those folders)`);
+            if (gated.dropped) notes.push(`user/${planRel}: dropped skills.customDirectories from the kept machine copy (the skill gates never judge those folders)`);
             keptBytes = Buffer.from(gated.text, 'utf8');
           }
-          if (/\.(?:json|ya?ml)$/.test(rel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, /** @type {string} */ (newLayerDir)), 'utf8');
-          plan.push(['installed', dest, keptBytes, itemKey, layerLabel(rel, keptBytes, haveLayer)]);
+          if (/\.(?:json|ya?ml)$/.test(planRel)) keptBytes = Buffer.from(remapHomePaths(keptBytes.toString('utf8'), machineSrc, /** @type {string} */ (newLayerDir)), 'utf8');
+          plan.push(['installed', dest, keptBytes, itemKey, layerLabel(planRel, keptBytes, haveLayer)]);
           notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
         }
       }
     }
-    else if (have === null || record || force) plan.push(['installed', dest, src, itemKey, layerLabel(rel, src, haveLayer)]);
+    else if (have === null || record || force) plan.push(['installed', dest, src, itemKey, layerLabel(planRel, src, haveLayer)]);
     else conflicts.push(dest);
-    current[rel] = want;
+    current[planRel] = want;
+  };
+  for (const rel of walk(userRoot)) {
+    // A skill left out by a gate contributes nothing: no plan entry, no manifest record, no
+    // conflict, so its installed copy is deleted later like any path the snapshot dropped.
+    if (inRejected(rel, rejectedSkills)) continue;
+    // Bundles mode targets whole skills (specs/bundles.md): a skill bundles/core names keeps
+    // today's home rels; a skill only projects name plans one virtual rel per target and
+    // none into the home roots; a shelf skill plans nothing — it stays scanned like today
+    // and installs nowhere. The virtual rel reuses the same snapshot bytes, so the
+    // machine-compare, conflict, fingerprint, label, and record machinery runs unchanged
+    // per (rel, dest), and the manifest keys spell the virtual rels like home rels.
+    /** @type {{ rel: string, source: string }[]} */
+    let planRels = [{ rel, source: 'snapshot' }];
+    if (bundlesMode) {
+      const skillPrefix = skillRelPrefixes.find(p => rel.startsWith(`${p}/`));
+      const skillName = skillPrefix === undefined ? null : basename(skillPrefix);
+      if (skillName !== null && !coreSkillNames.has(skillName)) {
+        const targets = projectSkillTargets.get(skillName);
+        if (!targets?.length) continue;
+        const skillDir = join(userRoot, /** @type {string} */ (skillPrefix));
+        planRels = targets.map(project => ({
+          rel: `ottr/project-skills/${project}/${skillName}/${rel.slice(/** @type {string} */ (skillPrefix).length + 1)}`,
+          source: skillDir,
+        }));
+      }
+    }
+    // Snapshot content must resolve inside the snapshot; links escaping it, or cyclic
+    // ones, refuse the restore instead of being followed.
+    const srcPath = join(userRoot, rel);
+    try {
+      assertSourceInside(userRoot, srcPath);
+    } catch (err) {
+      throw new Error(`user/${rel}: ${/** @type {Error} */ (err).message}`);
+    }
+    for (const { rel: planRel, source } of planRels) planSnapshotRel(planRel, source, srcPath);
   }
   const workersRoot = join(data.dir, 'workers');
   /** @type {Set<string>} */
   const shipped = new Set();
-  if (existsSync(workersRoot)) {
+  // Plans one worker list file: the compare base is the machine side (the live layer in
+  // layer mode), never the fresh layer being written. Layer mode still writes every file
+  // and labels it; in-place mode skips a matching copy.
+  /** @param {string} project @param {string} file @param {Buffer} src @returns {void} */
+  const planWorkerFile = (project, file, src) => {
+    shipped.add(`${project}/${file}`);
+    const dest = join(writeRoot, '.ottr', 'workers', project, file);
+    checkDestination(writeRoot, dest);
+    // The compare base is machine side (the live layer in layer mode): the same alias
+    // guard and single no-follow read every machine-side read gets, so a planted link or
+    // special file refuses the run instead of being followed out of the layer.
+    const liveCopy = join(readRoot, '.ottr', 'workers', project, file);
+    const liveBytes = readMachineFile(readRoot, liveCopy);
+    const haveWorker = liveBytes !== null && sameContent('', liveBytes, src);
+    plan.push(haveWorker && !layerMode ? ['unchanged', dest, null, `workers/${project}/${file}`, null]
+      : ['installed', dest, src, `workers/${project}/${file}`, layerMode ? (haveWorker ? 'unchanged' : liveBytes !== null ? 'updated' : 'added') : null]);
+  };
+  if (bundlesPlan) {
+    // Bundles mode plans the merged worker lists per project (specs/bundles.md merge
+    // order); workers/_all keeps today's verbatim path. Every contributing source — each
+    // bundle folder file and each project's own file — validates before any write, and the
+    // merged bytes re-validate the same way, so a failure names its source with the
+    // existing wording. A project that plans no bytes for a file type installs nothing:
+    // the unshipped-file deletion below removes a stale copy.
+    const bundlesRoot = join(data.dir, 'bundles');
+    assertSourceInside(data.dir, bundlesRoot);
+    for (const bundle of readdirSync(bundlesRoot, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name)) {
+      for (const file of WORKER_FILES) {
+        const srcPath = join(bundlesRoot, bundle, file);
+        if (!existsSync(srcPath)) continue;
+        assertSourceInside(bundlesRoot, srcPath);
+        const src = readFileSync(srcPath);
+        if (file === 'tools.json') validateTools(src, `bundles/${bundle}/${file}`);
+        else if (file === 'env.txt') validateEnv(src, `bundles/${bundle}/${file}`);
+        else if (file === 'requirements.txt') validateRequirements(src, `bundles/${bundle}/${file}`);
+      }
+    }
+    if (existsSync(workersRoot)) {
+      assertSourceInside(data.dir, workersRoot);
+      for (const { name } of bundlesPlan.projects) {
+        for (const file of WORKER_FILES) {
+          const srcPath = join(workersRoot, name, file);
+          if (!existsSync(srcPath)) continue;
+          assertSourceInside(workersRoot, srcPath);
+          const src = readFileSync(srcPath);
+          if (file === 'tools.json') validateTools(src, `workers/${name}/${file}`);
+          else if (file === 'env.txt') validateEnv(src, `workers/${name}/${file}`);
+          else if (file === 'requirements.txt') validateRequirements(src, `workers/${name}/${file}`);
+        }
+      }
+    }
+    for (const project of bundlesPlan.projects) {
+      for (const file of WORKER_FILES) {
+        const src = project.workerFiles.get(file);
+        if (src === undefined) continue;
+        const mergedPath = `workers/${project.name}/${file}`;
+        if (file === 'tools.json') validateTools(src, mergedPath);
+        else if (file === 'env.txt') validateEnv(src, mergedPath);
+        else if (file === 'requirements.txt') validateRequirements(src, mergedPath);
+        planWorkerFile(project.name, file, src);
+      }
+    }
+    if (existsSync(workersRoot)) {
+      assertSourceInside(data.dir, workersRoot);
+      for (const file of WORKER_FILES) {
+        const srcPath = join(workersRoot, '_all', file);
+        if (!existsSync(srcPath)) continue;
+        assertSourceInside(workersRoot, srcPath);
+        const src = readFileSync(srcPath);
+        if (file === 'tools.json') validateTools(src, srcPath);
+        else if (file === 'env.txt') validateEnv(src, srcPath);
+        else if (file === 'requirements.txt') validateRequirements(src, srcPath);
+        planWorkerFile('_all', file, src);
+      }
+    }
+  } else if (existsSync(workersRoot)) {
     assertSourceInside(data.dir, workersRoot);
     for (const project of readdirSync(workersRoot, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name)) {
       for (const file of WORKER_FILES) {
@@ -1311,21 +1503,45 @@ try {
         if (file === 'tools.json') validateTools(src, srcPath);
         else if (file === 'env.txt') validateEnv(src, srcPath);
         else if (file === 'requirements.txt') validateRequirements(src, srcPath);
-        shipped.add(`${project}/${file}`);
-        const dest = join(writeRoot, '.ottr', 'workers', project, file);
-        checkDestination(writeRoot, dest);
-        // The compare base is the machine side (the live layer in layer mode), never the
-        // fresh layer being written. Layer mode still writes every file and labels it;
-        // in-place mode skips a matching copy.
-        const liveCopy = join(readRoot, '.ottr', 'workers', project, file);
-        // The compare base is machine side (the live layer in layer mode): the same alias
-        // guard and single no-follow read every machine-side read gets, so a planted link or
-        // special file refuses the run instead of being followed out of the layer.
-        const liveBytes = readMachineFile(readRoot, liveCopy);
-        const haveWorker = liveBytes !== null && sameContent('', liveBytes, src);
-        plan.push(haveWorker && !layerMode ? ['unchanged', dest, null, `workers/${project}/${file}`, null]
-          : ['installed', dest, src, `workers/${project}/${file}`, layerMode ? (haveWorker ? 'unchanged' : liveBytes !== null ? 'updated' : 'added') : null]);
+        planWorkerFile(project, file, src);
       }
+    }
+  }
+  // Bundles mode: the per-project plugin lists (specs/bundles.md). A project's merged
+  // plugin names install to .ottr/plugins/<project>.txt and ride the same compare,
+  // conflict, and record machinery as every planned file, so an empty or absent list
+  // deletes a stale file the record still matches.
+  /** @param {string} rel @param {Buffer} bytes @returns {void} */
+  const planRecordedFile = (rel, bytes) => {
+    const dest = join(writeRoot, '.' + rel);
+    checkDestination(writeRoot, dest);
+    const readDest = join(readRoot, '.' + rel);
+    const machineBytes = readMachineFile(readRoot, readDest);
+    const want = fingerprint(rel, bytes);
+    const have = machineFingerprint(rel, machineBytes);
+    const haveLayer = layerMachineFingerprint(rel, machineBytes, readRoot);
+    const record = have !== null && have === last[rel];
+    const itemKey = `user/${rel}`;
+    if (have === want && !layerMode) plan.push(['unchanged', dest, null, itemKey, null]);
+    else if (layerMode && haveLayer === want) plan.push(['installed', dest, bytes, itemKey, layerLabel(rel, bytes, haveLayer)]);
+    else if (layerMode && machineBytes !== null && !record) {
+      if (force) {
+        plan.push(['installed', dest, bytes, itemKey, layerLabel(rel, bytes, haveLayer)]);
+        notes.push(`machine change overridden by --force: ${readDest}`);
+      } else {
+        plan.push(['installed', dest, machineBytes, itemKey, layerLabel(rel, machineBytes, haveLayer)]);
+        notes.push(`machine change kept: ${readDest} (--force takes the snapshot)`);
+      }
+    }
+    else if (have === null || record || force) plan.push(['installed', dest, bytes, itemKey, layerLabel(rel, bytes, haveLayer)]);
+    else conflicts.push(dest);
+    current[rel] = want;
+  };
+  if (bundlesPlan) {
+    for (const project of bundlesPlan.projects) {
+      const names = project.lists.get('plugins');
+      if (!names?.length) continue;
+      planRecordedFile(`ottr/plugins/${project.name}.txt`, Buffer.from(`${names.join('\n')}\n`));
     }
   }
   // Ottr ships its agent skills in its own checkout, alate vendors the whole tree at one
@@ -1542,6 +1758,14 @@ try {
     };
     /** @param {string} rel @returns {string | null} */
     const owningRejectedKey = rel => {
+      // A per-project bundle rel reports under its snapshot skill's item key: its
+      // rejected owner is the skill dir whose basename is the skill name.
+      const bundle = /^ottr\/project-skills\/[^/]+\/([^/]+)\//.exec(rel);
+      if (bundle) {
+        const name = bundle[1];
+        if (!scanRejected.some(dir => basename(dir) === name)) return null;
+        return `user/${skillNameItem.get(name) ?? `ottr/project-skills/${rel.split('/')[2]}/${name}`}`;
+      }
       let best = '';
       for (const dir of scanRejected) {
         const p = rejectedPrefix(dir);
@@ -1564,7 +1788,14 @@ try {
         const owner = owningRejectedKey(rel);
         if (owner !== null) keptKeys.add(owner);
       } else if (source !== undefined) {
-        keptKeys.add(/** @type {string} */ (shippedDirKey.get(source)));
+        const shipped = shippedDirKey.get(source);
+        if (shipped !== undefined) keptKeys.add(shipped);
+        else {
+          // A virtual per-project rel of a rejected snapshot skill reports under
+          // the skill's item key, never under an undefined shipped key.
+          const owner = owningRejectedKey(rel);
+          if (owner !== null) keptKeys.add(owner);
+        }
       }
     }
     // The copy is whole, never partial: a recorded file the rejected snapshot or vendored
@@ -1721,25 +1952,59 @@ try {
 
     if (layerMode) {
       assertLayer();
+      // The layer scan judges every skill folder the fresh layer carries: the skill roots
+      // collectSkillDirs finds, plus the per-project bundle folders it misses on purpose
+      // (.ottr/project-skills is not named skills), plus the shelf skills' snapshot dirs —
+      // nothing of a shelf skill installs, but it is scanned like today (specs/bundles.md).
+      // A per-project dir reports under its snapshot skill's item key; a rejected copy
+      // removes exactly that project's folder from the layer and the record.
       const layerSkillDirs = collectSkillDirs(/** @type {string} */ (newLayerDir));
-      if (layerSkillDirs.length) {
+      const scanItems = new Map(layerSkillDirs.map(dir => [dir, skillKey(/** @type {string} */ (newLayerDir), dir)]));
+      const layerOwned = new Set(layerSkillDirs);
+      for (const { project, name } of plannedProjectSkills) {
+        const dir = join(/** @type {string} */ (newLayerDir), '.ottr', 'project-skills', project, name);
+        if (existsSync(dir)) {
+          scanItems.set(dir, `user/${skillNameItem.get(name) ?? relative(userRoot, dir).split(sep).join('/')}`);
+          layerOwned.add(dir);
+        }
+      }
+      // Shelf source dirs exist only in bundles mode: a skill nothing names installs
+      // nowhere, so its snapshot dir joins the scan from the data repo. Any other mode
+      // installs every snapshot skill into the layer, which collectSkillDirs already
+      // covers — a source dir here would scan and reject data-repo bytes twice.
+      for (const dir of skillDirs) {
+        const name = basename(dir);
+        if (!bundlesMode || rejectedSkills.has(dir) || coreSkillNames.has(name) || projectSkillTargets.has(name)) continue;
+        scanItems.set(dir, skillKey(userRoot, dir));
+      }
+      if (scanItems.size) {
         /** @param {string} dir @returns {string} */
-        const itemKey = dir => skillKey(/** @type {string} */ (newLayerDir), dir);
-        const scan = await runScan(layerSkillDirs, itemKey, reviews);
+        const itemKey = dir => /** @type {string} */ (scanItems.get(dir));
+        const scan = await runScan([...scanItems.keys()], itemKey, reviews);
+        const failed = new Set();
         for (const [dir, info] of scan.rejected) {
-          // The manifest must never name a file the layer lacks: the rejected skill dir is
-          // removed from the fresh layer, and its rels from the record, before the switch.
-          // Never delete through a swapped layer or a symlink planted on the skill's path.
-          assertLayer();
-          makeDirInside(layerHome, dir);
-          rmSync(dir, { recursive: true, force: true });
-          addScanRejection(itemKey(dir), info);
-          // The layer mirrors the home in dot-dirs (.omp); the record keys use the snapshot
-          // spelling (omp), so the leading dot drops out of the top-level segment.
-          const layerRel = relative(/** @type {string} */ (newLayerDir), dir).split(sep).join('/');
-          const prefix = layerRel.startsWith('.') ? layerRel.slice(1) : layerRel;
-          for (const rel of Object.keys(current)) {
-            if (rel === prefix || rel.startsWith(`${prefix}/`)) delete current[rel];
+          // A shelf dir is snapshot content, never layer content: its rejection is only a
+          // failed item, with nothing installed to remove.
+          if (layerOwned.has(dir)) {
+            // The manifest must never name a file the layer lacks: the rejected skill dir is
+            // removed from the fresh layer, and its rels from the record, before the switch.
+            // Never delete through a swapped layer or a symlink planted on the skill's path.
+            assertLayer();
+            makeDirInside(layerHome, dir);
+            rmSync(dir, { recursive: true, force: true });
+            // The layer mirrors the home in dot-dirs (.omp); the record keys use the snapshot
+            // spelling (omp), so the leading dot drops out of the top-level segment.
+            const layerRel = relative(/** @type {string} */ (newLayerDir), dir).split(sep).join('/');
+            const prefix = layerRel.startsWith('.') ? layerRel.slice(1) : layerRel;
+            for (const rel of Object.keys(current)) {
+              if (rel === prefix || rel.startsWith(`${prefix}/`)) delete current[rel];
+            }
+          }
+          // One snapshot skill can ride several per-project dirs; its item fails once.
+          const item = itemKey(dir);
+          if (!failed.has(item)) {
+            failed.add(item);
+            addScanRejection(item, info);
           }
         }
       }
@@ -1862,6 +2127,11 @@ try {
     const itemKeyOf = key => {
       const m = /^user\/((?:omp\/agent\/(?:skills|managed-skills)|agents\/skills)\/[^/]+)\//.exec(key);
       if (m) return `user/${m[1]}`;
+      // A per-project bundle rel aggregates under its snapshot skill's item key, so a
+      // bundle skill installing into several projects reports as one item.
+      const v = /^user\/ottr\/project-skills\/[^/]+\/([^/]+)\//.exec(key);
+      const item = v && skillNameItem.get(v[1]);
+      if (item) return `user/${item}`;
       if (key.startsWith('user/omp/plugins')) return 'user/omp/plugins';
       return key;
     };

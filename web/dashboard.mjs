@@ -7,17 +7,19 @@ import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { assertSourceInside, checkDestination, cloneCommand, dataHost, descriptionText, gitAuthEnv, githubHost, parseDataSpec, redactSecrets, serverGitEnv, SNAP_AGENTS_DIR } from '../lib/data.mjs';
+import { isBundlesMode, parseNameList, readBundleFolder } from '../lib/bundles.mjs';
 
 /** @typedef {import('node:sqlite').DatabaseSync} DashDb */
 /** @typedef {import('../lib/data.mjs').DataSpec} DataSpec */
 /** @typedef {{ name: string, description: string }} RuleInfo */
 /** @typedef {{ path: string, bytes: number }} FileInfo */
-/** @typedef {{ name: string, origin: string, path: string, description: string }} SkillInfo */
-/** @typedef {{ name: string, version?: string, origin?: string }} PluginInfo */
+/** @typedef {{ name: string, origin: string, path: string, description: string, bundles: string[], shelf: boolean }} SkillInfo */
+/** @typedef {{ name: string, version?: string, origin?: string, bundles: string[], shelf: boolean }} PluginInfo */
+/** @typedef {{ name: string, files: string[], skills: string[], plugins: string[] }} BundleInfo */
 /** @typedef {{ path: string, bytes: number, status: string }} InventoryEntry */
-/** @typedef {{ name: string, extras: number, files: number, live: string, entries: InventoryEntry[] }} NamedProject */
+/** @typedef {{ name: string, extras: number, files: number, live: string, bundles: string[], entries: InventoryEntry[] }} NamedProject */
 /** @typedef {{ contextFiles: string[], named: NamedProject[] }} ProjectsInventory */
-/** @typedef {{ rules: RuleInfo[], user: { configFiles: FileInfo[], others: FileInfo[], skills: SkillInfo[], extensions: string[], plugins: PluginInfo[] }, projects: ProjectsInventory, counts: { rules: number, skills: number, plugins: number, extensions: number, projects: number, userFiles: number }, warnings: string[] }} Inventory */
+/** @typedef {{ rules: RuleInfo[], user: { configFiles: FileInfo[], others: FileInfo[], skills: SkillInfo[], extensions: string[], plugins: PluginInfo[] }, projects: ProjectsInventory, bundles: BundleInfo[], counts: { rules: number, skills: number, plugins: number, extensions: number, projects: number, bundles: number, userFiles: number }, warnings: string[] }} Inventory */
 /** @typedef {{ added: string[], removed: string[], updated: string[] }} SectionChanges */
 /** @typedef {Record<string, SectionChanges>} Changes */
 /** @typedef {{ kind: string, spec: string, name: string, host: string, ref: string, importedSha: string }} SourceMeta */
@@ -121,6 +123,7 @@ function scanInventory(dir, liveRoot = null) {
     configFiles.push({ path: rel, bytes: statSync(file).size });
   }
 
+  /** @type {SkillInfo[]} */
   const skills = [];
   for (const [rel, origin] of SKILL_DIRS) {
     const base = join(dir, ...rel.split('/'));
@@ -129,7 +132,7 @@ function scanInventory(dir, liveRoot = null) {
       if (!entry.isDirectory()) continue;
       assertSourceInside(dir, join(base, entry.name));
       const skillMd = join(base, entry.name, 'SKILL.md');
-      skills.push({ name: entry.name, origin, path: `${rel}/${entry.name}/SKILL.md`, description: existsSync(skillMd) ? mdDescription(skillMd) : '' });
+      skills.push({ name: entry.name, origin, path: `${rel}/${entry.name}/SKILL.md`, description: existsSync(skillMd) ? mdDescription(skillMd) : '', bundles: [], shelf: false });
     }
   }
 
@@ -154,6 +157,7 @@ function scanInventory(dir, liveRoot = null) {
     }
   }
 
+  /** @type {PluginInfo[]} */
   const plugins = [];
   const seen = new Set();
   /** @param {string[]} names */
@@ -161,7 +165,7 @@ function scanInventory(dir, liveRoot = null) {
     for (const name of names) {
       if (seen.has(name)) continue;
       seen.add(name);
-      plugins.push({ name });
+      plugins.push({ name, bundles: [], shelf: false });
     }
   };
   /** @param {string} rel */
@@ -180,7 +184,7 @@ function scanInventory(dir, liveRoot = null) {
   for (const name of Object.keys(pkg?.dependencies ?? {})) {
     if (seen.has(name)) continue;
     seen.add(name);
-    plugins.push({ name, version: pkg.dependencies[name], origin: 'package.json' });
+    plugins.push({ name, version: pkg.dependencies[name], origin: 'package.json', bundles: [], shelf: false });
   }
   const lock = readJson('user/omp/plugins/omp-plugins.lock.json');
   const lockNames = Object.keys(lock?.plugins ?? lock ?? {});
@@ -193,6 +197,95 @@ function scanInventory(dir, liveRoot = null) {
   addPlugins(instNames);
   for (let i = instStart; i < plugins.length; i++) plugins[i].origin = 'installed_plugins.json';
 
+  // Bundles mode (specs/bundles.md): list every bundle folder with its present
+  // list files and the names in its skills.txt/plugins.txt, and scan the worker
+  // lists as further naming sources (workers/_all included). The dashboard
+  // warns where the install refuses; it never fails the scan.
+  const bundlesMode = isBundlesMode(dir);
+  /** @type {BundleInfo[]} */
+  const bundles = [];
+  /** @type {string[]} */
+  const workerSkills = [];
+  /** @type {string[]} */
+  const workerPlugins = [];
+  if (bundlesMode) {
+    const workersBase = join(dir, 'workers');
+    if (existsSync(workersBase)) {
+      try {
+        assertSourceInside(dir, workersBase);
+        for (const entry of readdirSync(workersBase, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const wdir = join(workersBase, entry.name);
+          assertSourceInside(dir, wdir);
+          /** @param {'skills.txt' | 'plugins.txt'} file @param {'skill' | 'plugin'} kind @param {string[]} into */
+          const readWorkerNames = (file, kind, into) => {
+            const path = join(wdir, file);
+            if (!existsSync(path)) return;
+            assertSourceInside(dir, path);
+            try {
+              for (const name of parseNameList(readFileSync(path), `workers/${entry.name}/${file}`, kind)) {
+                if (!into.includes(name)) into.push(name);
+              }
+            } catch (err) {
+              warnings.push(/** @type {Error} */ (err).message);
+            }
+          };
+          readWorkerNames('skills.txt', 'skill', workerSkills);
+          readWorkerNames('plugins.txt', 'plugin', workerPlugins);
+        }
+      } catch {
+        warnings.push('workers: link escapes the data repo; lists skipped');
+      }
+    }
+    const knownSkills = new Set(skills.map(s => s.name));
+    for (const entry of readdirSync(join(dir, 'bundles'), { withFileTypes: true })) {
+      let files;
+      try {
+        files = readBundleFolder(dir, entry.name);
+      } catch (err) {
+        // not a folder, or a misplaced file: the message names the bundle (and the file)
+        warnings.push(/** @type {Error} */ (err).message);
+        continue;
+      }
+      /** @type {string[]} */
+      const skillNames = [];
+      /** @type {string[]} */
+      const pluginNames = [];
+      /** @param {string} list @param {'skill' | 'plugin'} kind @param {string[]} into */
+      const readNames = (list, kind, into) => {
+        if (!files.has(list)) return;
+        try {
+          into.push(...parseNameList(/** @type {Buffer} */ (files.get(list)), `bundles/${entry.name}/${list}`, kind));
+        } catch (err) {
+          warnings.push(/** @type {Error} */ (err).message);
+        }
+      };
+      readNames('skills.txt', 'skill', skillNames);
+      readNames('plugins.txt', 'plugin', pluginNames);
+      for (const name of skillNames) if (!knownSkills.has(name)) warnings.push(`bundles/${entry.name}: unknown skill "${name}"`);
+      for (const name of pluginNames) if (!seen.has(name)) warnings.push(`bundles/${entry.name}: unknown plugin "${name}"`);
+      bundles.push({ name: entry.name, files: [...files.keys()].sort(), skills: skillNames, plugins: pluginNames });
+    }
+    // Sorted bundle order: the per-item bundles arrays and the section follow it,
+    // and the listing stays stable across platforms' readdir orders.
+    bundles.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    // Per-item naming: the bundles that name the item, in bundle scan order; the
+    // shelf means no bundle and no worker list names it.
+    const bundleSkills = new Map();
+    const bundlePlugins = new Map();
+    for (const b of bundles) {
+      for (const name of b.skills) { if (!bundleSkills.has(name)) bundleSkills.set(name, []); bundleSkills.get(name)?.push(b.name); }
+      for (const name of b.plugins) { if (!bundlePlugins.has(name)) bundlePlugins.set(name, []); bundlePlugins.get(name)?.push(b.name); }
+    }
+    /** @param {string} name @param {Map<string, string[]>} named @param {string[]} workers @returns {{ bundles: string[], shelf: boolean }} */
+    const naming = (name, named, workers) => ({ bundles: named.get(name) ?? [], shelf: !named.has(name) && !workers.includes(name) });
+    for (const s of skills) Object.assign(s, naming(s.name, bundleSkills, workerSkills));
+    for (const p of plugins) Object.assign(p, naming(p.name, bundlePlugins, workerPlugins));
+  } else {
+    for (const s of skills) { s.bundles = []; s.shelf = false; }
+    for (const p of plugins) { p.bundles = []; p.shelf = false; }
+  }
+
   /** @type {ProjectsInventory} */
   const projects = { contextFiles: [], named: [] };
   const manifest = readJson('projects/projects.json');
@@ -204,13 +297,26 @@ function scanInventory(dir, liveRoot = null) {
     let table = null;
     if (manifest.projects !== null && typeof manifest.projects === 'object' && !Array.isArray(manifest.projects)) table = manifest.projects;
     else warnings.push('projects/projects.json: projects must be an object; ignored');
-    for (const [name, extras] of Object.entries(table ?? {})) {
+    for (const [name, value] of Object.entries(table ?? {})) {
       // F1: a projects.json key is a single path segment, never a traversal
       if (!name || name === '.' || name === '..' || /[\\/]/.test(name)) {
         warnings.push(`projects/projects.json: rejected unsafe project name "${name}"`);
         continue;
       }
-      if (!Array.isArray(extras) || !extras.every(f => typeof f === 'string')) {
+      // parseManifestProjects semantics with per-entry tolerance: the legacy
+      // value is the extras array, the object form holds extras and bundles.
+      /** @type {unknown} */
+      let extras;
+      /** @type {string[]} */
+      let projectBundles = [];
+      if (Array.isArray(value)) extras = value;
+      else if (value !== null && typeof value === 'object') {
+        extras = /** @type {{ extras?: unknown }} */ (value).extras === undefined ? [] : /** @type {{ extras?: unknown }} */ (value).extras;
+        const rawBundles = /** @type {{ bundles?: unknown }} */ (value).bundles;
+        if (Array.isArray(rawBundles) && rawBundles.every(/** @param {unknown} f */ f => typeof f === 'string')) projectBundles = /** @type {string[]} */ (rawBundles);
+        else if (rawBundles !== undefined) warnings.push(`projects/projects.json: bundles for "${name}" must be an array of strings; bundles ignored`);
+      } else extras = value;
+      if (!Array.isArray(extras) || !extras.every(/** @param {unknown} f */ f => typeof f === 'string')) {
         warnings.push(`projects/projects.json: extras for "${name}" must be an array of strings; project skipped`);
         continue;
       }
@@ -256,7 +362,7 @@ function scanInventory(dir, liveRoot = null) {
         }
       }
       entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-      projects.named.push({ name, extras: extras.length, files: snapRels.length, live, entries });
+      projects.named.push({ name, extras: extras.length, files: snapRels.length, live, bundles: projectBundles, entries });
     }
   } else if (existsSync(join(dir, 'projects'))) {
     warnings.push('projects/projects.json: missing or unparseable; showing what exists');
@@ -276,12 +382,14 @@ function scanInventory(dir, liveRoot = null) {
     rules,
     user: { configFiles, others, skills, extensions, plugins },
     projects,
+    bundles,
     counts: {
       rules: rules.length,
       skills: skills.length,
       plugins: plugins.length,
       extensions: extensions.length,
       projects: projects.named.length,
+      bundles: bundles.length,
       userFiles,
     },
     warnings,
@@ -340,11 +448,13 @@ function computeChanges(prev, next) {
   ];
   const changes = {
     rules: withUpdates(prev?.rules ?? [], next.rules, r => r.description),
-    skills: withUpdates(prev?.user?.skills ?? [], next.user.skills, s => s.origin + '\u0000' + s.description),
-    plugins: withUpdates(prev?.user?.plugins ?? [], next.user.plugins, p => p.version + '\u0000' + p.origin),
+    // A bundles/shelf change is metadata: it marks the item updated.
+    skills: withUpdates(prev?.user?.skills ?? [], next.user.skills, s => s.origin + '\u0000' + s.description + '\u0000' + (s.bundles ?? []).join(',') + '\u0000' + (s.shelf ? '1' : '0')),
+    plugins: withUpdates(prev?.user?.plugins ?? [], next.user.plugins, p => p.version + '\u0000' + p.origin + '\u0000' + (p.bundles ?? []).join(',') + '\u0000' + (p.shelf ? '1' : '0')),
     extensions: sectionChanges(prev?.user?.extensions ?? [], next.user.extensions),
     user: sectionChanges(userIds(prev), userIds(next)),
     projects: withUpdates(projList(prev), projList(next), p => (p.extras ?? 0) + '\u0000' + (p.files ?? 0)),
+    bundles: sectionChanges((prev?.bundles ?? []).map(b => b.name), next.bundles.map(b => b.name)),
   };
   return changes;
 }

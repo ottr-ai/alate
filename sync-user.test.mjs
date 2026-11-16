@@ -21,6 +21,8 @@ mkdirSync(join(repo, 'lib'), { recursive: true });
 mkdirSync(data);
 copyFileSync(fileURLToPath(new URL('./sync-user.mjs', import.meta.url)), join(repo, 'sync-user.mjs'));
 copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(repo, 'lib/data.mjs'));
+// install-user.mjs imports the bundle resolution module, so the sandbox copies it too.
+copyFileSync(fileURLToPath(new URL('./lib/bundles.mjs', import.meta.url)), join(repo, 'lib/bundles.mjs'));
 // install-user's shipped-skill install reads the pin module and the vendored tree from the
 // tool root, so the sandbox provisions the real vendored skills like a real checkout does.
 copyFileSync(fileURLToPath(new URL('./lib/shipped.mjs', import.meta.url)), join(repo, 'lib/shipped.mjs'));

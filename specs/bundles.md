@@ -1,0 +1,299 @@
+# Bundles: per-project skills, plugins and worker lists
+
+Status: draft (ALAT-179 P2). Research evidence holds for omp 18.15.0 and the Ottr
+board of 2026-11-16.
+
+## Problem
+
+`install-user.mjs` installs every skill of the data repo into the shared home, so
+every project loads all of them. A game skill loads in a web project. The user
+cannot keep a skill for later without loading it everywhere.
+
+## Goal
+
+A bundle is a named folder `bundles/<name>/` in the data repo. `projects.json`
+gives each project a `bundles` name list. A bundle named `core` applies to every
+project. A project gets core, then its bundles, then its own `workers/<p>/`
+lists. A skill or plugin that no bundle of a project names does not load for that
+project. Items that no bundle names stay in the repo, are scanned like today, and
+load nowhere (the shelf). The dashboard shows them as "on the shelf".
+
+## Research: how a turn loads skills
+
+Facts, each checked on this machine on 2026-11-16 against the installed omp
+18.15.0 bundle (`dist/cli.js`) and live probes, or against the Ottr checkout at
+`/workspace/ottr` (commit fde43dc):
+
+1. **omp skill roots.** omp loads skills from
+   - user roots: `<agentDir>/skills`, `<agentDir>/managed-skills`,
+     `~/.agents/skills`, `~/.agent/skills`, `~/.claude/skills`;
+   - project roots: `.omp/skills`, `.agents/skills`, `.agent/skills`,
+     `.claude/skills` at the cwd and its parents up to the repo root, plus
+     `.codex/skills`, `.opencode/skills`, `.github/skills` at the cwd only.
+   Evidence: `src/discovery/builtin.ts:68-76,309-367` in the installed package.
+2. **`skills.customDirectories`.** A config array of directories whose immediate
+   child folders (each with a `SKILL.md`) load as skills at user level. It needs
+   a frontmatter description, expands `~`, ignores a missing directory, and runs
+   after the ordinary roots. Evidence: live probe plus
+   `src/extensibility/skills.ts:485-493`. Ottr already uses this key for the
+   skills of enabled plugins (`/workspace/ottr/src/pluginSkills.ts`, spec
+   `docs/specs/turn-home-plugin-skills.md`), verified live on this stack.
+3. **Project-level skill roots are pinned off on board turns.** Ottr passes a
+   `--config` overlay on every board-side run that sets
+   `skills.enableAgentsProject`, `skills.enableClaudeProject` and
+   `skills.enablePiProject` to `false`, so a worker-planted `.agents/skills/` in
+   the run cwd never loads. Evidence: `pluginSkillsOverlayYaml` in
+   `pluginSkills.ts`; the pin exists because the run cwd is a worker-writable
+   worktree and nothing from it may steer a run.
+4. **The project config layer is cwd-exact.** omp reads `<cwd>/.omp/config.yml`
+   as the project settings layer (live probe: `omp config list --scope=project`).
+   It does not walk parents, so a turn in a worktree sees no main-checkout
+   project layer. Array values replace across layers (live probe: a project
+   `customDirectories` replaced the global list; no merge).
+5. **How Ottr starts a turn.** `src/runner.ts:startRun` pins the alate layer and
+   spawns with `HOME=<layer dir>` and `PI_CODING_AGENT_DIR=<layer>/.omp/agent`;
+   cwd is `<project>/.worktrees/<id>` (main checkout for interview, grill and
+   scout cards). `PI_CODING_AGENT_DIR` moves the whole agent dir (skills,
+   managed-skills, sessions, agent.db); `plugins/` and `marketplaces.json` stay
+   at `<HOME>/.omp`, and `HOME` is the layer dir, so they ride the layer too.
+   Evidence: `src/runner.ts:1803-1829,2275-2301`; `src/workers.ts:423-455`.
+6. **What is per project today.** Ottr reads `.ottr/workers/<project>/` lists
+   per turn (`<project>` is the workspace folder name, `basename(projectPath)`)
+   and sets `OTTR_PROJECT` in the turn env. Skills come from the home and are the
+   same for every project. Evidence: `src/login.ts:353-374`, `src/store.ts`,
+   `src/turn.ts:5941`.
+7. **Filters exist but run at spawn time.** `skills.includeSkills`,
+   `skills.ignoredSkills`, `disabledExtensions` entries `skill:<name>`, and
+   frontmatter `enabled: false` filter by name. The argv and the config overlays
+   are built by Ottr, so per-project filtering through them needs an Ottr change.
+8. **Profiles** (`OMP_PROFILE`) isolate the agent dir as `~/.omp/profiles/<name>/agent`
+   but ignore `PI_CODING_AGENT_DIR`, which the layer setup pins. Unusable here.
+
+### Chosen mechanism
+
+The shared home layer is per data-repo commit, not per project, and every turn
+reads it. A turn's skill set can therefore differ per project only when the spawn
+side (Ottr) passes a per-project value. The one verified per-project config
+channel is `skills.customDirectories`. So:
+
+- alate installs the project's non-core bundle skills into a per-project folder
+  in the same provisioned home: `<home>/.ottr/project-skills/<project>/<name>/`.
+  The root is not named `skills` on purpose: alate's own skill-root walk
+  (`collectSkillDirs`) treats every directory named `skills/` or
+  `managed-skills/` as a flat skill folder, and omp's custom-directory scan
+  reads only the folder's children, never its name;
+- alate writes the project's merged plugin name list to
+  `<home>/.ottr/plugins/<project>.txt`;
+- an Ottr change (a separate card in the ottr project) adds these two to the
+  per-run overlay: the per-project folder as one more `customDirectories`
+  entry, and the plugin list as the project's plugin-skill filter. Without that
+  card the data plane ships but no turn consumes it; with it, core skills load
+  from the home roots as today, bundle skills load only for their projects, and
+  a shelf skill or plugin loads for no project.
+
+This card ships the alate side: resolution, install, dashboard, docs, and the
+spec. The acceptance tests judge the installed trees, not a live session.
+
+### Alternatives considered
+
+- **Checkout `.agents/skills` with a git exclude.** Rejected: Ottr pins
+  `enableAgentsProject: false` on every board run (research fact 3), so board
+  and worker turns never load it; a git-excluded folder also stays out of new
+  worktrees, and the checkout is worker-writable, the exact vector the pin
+  closes.
+- **`<cwd>/.omp/config.yml` project config layer.** Rejected: cwd-exact, so
+  worktree turns never see the main checkout's layer; array values replace, so
+  Ottr's overlay would drop the project list; same worker-writable trust hole.
+- **Per-project layer or profile plus `PI_CODING_AGENT_DIR` per project.**
+  Rejected for this card: the spawn env is Ottr's; profiles ignore
+  `PI_CODING_AGENT_DIR`; a second layer per project re-derives the shared-state
+  link set that `specs/agent-layer-switch.md` owns. The `.ottr/project-skills/<project>`
+  folder rides the existing layer switch instead.
+- **`--skills` glob filters per project.** Rejected: argv is Ottr's, and a name
+  filter keeps every skill's bytes in every home; the card wants unused items
+  off the shelf and out of the install.
+
+## Data repo format
+
+- `bundles/<name>/` holds any of six list files: `apt.txt`, `tools.json`,
+  `env.txt`, `requirements.txt`, `skills.txt`, `plugins.txt`. The first four
+  follow the existing `workers/<p>/` formats and validators. `skills.txt` and
+  `plugins.txt` list item names, one per line, `#` comments and blank lines.
+  A skill name matches `[a-z0-9][a-z0-9-]*` (the skill structure gate's rule).
+  A plugin name matches that rule per segment, with one optional scope prefix:
+  `name` or `@scope/name`, where scope follows the same rule (npm package
+  names, as the plugin manifests spell them). A bundle folder holds no other
+  files; an unexpected file is a whole-run refusal that names the bundle and
+  the file.
+- `projects/projects.json` gains an optional `"bundles": ["<name>", ...]` per
+  project. A project value keeps its legacy form, an extras array, or takes an
+  object form with optional `extras` and `bundles` arrays. A `bundles` entry
+  that names no folder under `bundles/` is an unknown name (below).
+  `sync-projects.mjs` never rewrites the manifest, so the key survives capture
+  untouched.
+- A bundle named `core`, when the folder `bundles/core/` exists, applies to
+  every project.
+
+## Mode and migration
+
+- Bundles mode is active when `bundles/` exists as a directory in the data
+  repo. Git tracks no empty folders, so a repo that wants bundles mode commits
+  at least one bundle folder.
+- Without `bundles/`, today's behavior stays exactly: every skill installs into
+  the home roots for every project, worker lists install verbatim, no
+  `.ottr/project-skills/` or `.ottr/plugins/` appears. A `workers/<p>/skills.txt` or
+  `plugins.txt` outside bundles mode stays ignored, as today.
+- A project without a `bundles` key in bundles mode gets core plus its own
+  `workers/<p>/` lists. With no `core` bundle, such a project gets only its own
+  lists; every skill sits on the shelf for it. A `workers/<dir>/` folder with no
+  `projects.json` entry is a project with no `bundles` key.
+
+## Merge order
+
+For each project, the lists merge in this order; an item named twice counts
+once, at its first name:
+
+1. `bundles/core/` (when the folder exists),
+2. the project's `bundles` array, in array order,
+3. the project's own `workers/<p>/` lists.
+
+Per file type:
+
+- `apt.txt`, `requirements.txt`, `skills.txt`, `plugins.txt`: line lists; a
+  later duplicate line of an already-merged item drops. `apt.txt` keeps the
+  existing line form (comments, blank lines); dedup keys on the package name
+  (the first token). `requirements.txt` dedups on the package name before `==`.
+- `tools.json`: JSON arrays of tool entries; dedup on the entry `name`; the
+  first occurrence in merge order wins whole. The merged array re-validates
+  with the existing `tools.json` validator.
+- `env.txt`: name lists; dedup on the name. `env.txt` carries names, never
+  values (the existing validator rejects values), so no value conflict exists;
+  the "later list wins" rule has no observable effect beyond dedup.
+- Merged worker lists install to `.ottr/workers/<project>/<file>` as today, so
+  Ottr's turn readers need no change. The fleet folder `workers/_all/` keeps
+  today's behavior: Ottr merges it at turn time, outside this merge.
+
+## Skills and plugins: what installs where
+
+- **Home roots (global).** In bundles mode the snapshot skills named by `core`
+  install into the home skill roots (`omp/agent/skills`, `omp/agent/managed-skills`,
+  `agents/skills`) exactly as snapshot skills install today. A skill named by
+  core and also by a bundle installs once, globally; the bundle entries drop.
+  The vendored shipped skills install globally as today and stay out of bundle
+  scope.
+- **Per-project skills.** A skill named by a project's bundles or its own
+  `workers/<p>/skills.txt`, and not named by core, installs into
+  `<home>/.ottr/project-skills/<project>/<name>/`. The folder's immediate children are
+  skill folders, the shape `skills.customDirectories` scans. A project with no
+  non-core skills gets no per-project folder.
+- **Shelf.** A snapshot skill that no bundle and no `workers/<p>/skills.txt`
+  names installs nowhere. It still passes the origin, structure, and scan gates
+  like today, and a rejection still fails the run with that item, so the repo
+  stays visible and honest.
+- **Plugins.** `plugins.txt` names plugins the data repo already holds (names in
+  `user/omp/plugins/package.json` dependencies, `omp-plugins.lock.json`, or
+  `installed_plugins.json`). The merged per-project name list installs to
+  `<home>/.ottr/plugins/<project>.txt`. The home plugin install from the
+  captured lockfile stays as today (no lockfile surgery); scoping happens
+  because the Ottr overlay lists only the project's plugins when the file
+  exists. Boundary: an interactive omp run outside Ottr has no project, so it
+  keeps loading the home's plugins; this card scopes Ottr turns.
+- The existing shipped-skill suppression stays: a snapshot skill of a shipped
+  name (anywhere in the repo, shelf included) still skips the shipped copy.
+
+## Refusals before any write
+
+Each refusal is whole-run, names its source, and fires in the plan phase before
+the first write, the scan gate, and any layer creation:
+
+- an unknown skill or plugin name in a `bundles/<name>/` list: the message
+  names the bundle and the item;
+- an unknown skill or plugin name in a `workers/<p>/skills.txt` or
+  `plugins.txt`: names the project and the item;
+- a `bundles` entry in `projects.json` that names no folder under `bundles/`:
+  names the project and the bundle;
+- a malformed or misplaced file in `bundles/<name>/`: names the bundle and the
+  file, with the validator's first rule.
+
+## Gates and deletions
+
+- The SkillSpector scan rules do not change. Every snapshot skill dir is scanned
+  like today, shelf included, in both install modes; a scan rejection is a
+  failed item as today.
+- Per-project skills ride the same gates (origin, structure, hidden characters,
+  scan) as the snapshot skills they are; a gate-rejected skill installs nowhere
+  and fails its item.
+- The manifest records per-project rels (`ottr/project-skills/<project>/<name>/...`) the
+  same way it records home rels, so a skill that leaves core or a bundle is
+  deleted from the home roots or the per-project folder when the copy still
+  matches the record. A project folder that no longer plans any skill is pruned.
+- Merged worker lists follow the existing worker-list delete rule: a merged
+  result the repo no longer plans is deleted when it matches what alate wrote.
+- Layer mode installs the per-project folders and lists into the fresh layer, so
+  the atomic switch carries them; the post-write layer scan covers them like
+  every installed skill.
+
+## Dashboard
+
+- The inventory scans `bundles/` and reports, per bundle, its present list files
+  and the names in `skills.txt`/`plugins.txt`, with a warning per unknown name
+  (the dashboard warns, the install refuses).
+- Each project row shows its `bundles` list. Each skill and plugin row shows
+  the bundles that name it, or an "on the shelf" marker. The counts row gains
+  the bundle count.
+
+## Acceptance checks
+
+Tests use a temp data repo and a temp home, and each fails before the change:
+
+1. Project A with `bundles: ["gamedev-2d"]` gets the bundle skill under
+   `.ottr/project-skills/a/`; project B without it does not.
+2. A core skill installs into the home root for every project; a bundle skill
+   absent from the home roots; a shelf skill absent everywhere but scanned.
+3. An unknown skill name in a bundle refuses before any write: exit 1, the
+   message names the bundle and the item, the home gains nothing.
+4. A repo without `bundles/` installs as today: all skills global, no
+   `.ottr/project-skills/`, no `.ottr/plugins/`.
+5. Merged worker lists land in `.ottr/workers/<project>/` in merge order with
+   dedup; the per-project plugin list merges core, bundles, and own.
+6. A `plugins.txt` name that the data repo does not hold refuses, naming the
+   source and the item.
+
+The repo check and test commands (the verified chain in `AGENTS.md`, `npm test`)
+exit 0 with the new test files joined into the chain, `package.json`, and
+`.github/workflows/sync.yml`.
+
+## Non-goals
+
+- No change to the SkillSpector scan rules, the baseline severity cap, or the
+  scanner trust contract.
+- The data repo content (which bundles exist, which skill goes where) is the
+  user's decision, not part of this card; the examples fixture gains no bundles.
+- No lockfile surgery on `user/omp/plugins/`: the home plugin install stays the
+  captured snapshot; plugin scoping happens at turn time through the Ottr card.
+- No scoping of interactive omp runs outside Ottr, of `workers/_all/`, of
+  context files, or of rules.
+- No `env.txt` value forms beyond the existing names-only validator.
+- No change to `sync.mjs` (rules) or to the capture file formats: the manifest's
+  `bundles` key rides along untouched. `sync-projects.mjs` and
+  `install-projects.mjs` learn the object value form, so a manifest that uses
+  `bundles` still captures and installs the project's context files; the two
+  scripts never read `bundles` themselves.
+
+## Risks
+
+- **The data plane ships before the consumer.** Until the Ottr card lands,
+  bundle skills install into `.ottr/project-skills/<project>/` but no turn reads them;
+  core and migration behavior are unaffected. The Ottr card is filed from this
+  task and named in its report.
+- **Name clashes between a per-project skill and a home skill.** omp gives the
+  custom-directory skill the bare name and namespaces the home copy with a
+  warning. Core-first merge keeps shared names global; a bundle name that also
+  sits in core drops from the per-project folder, so the common case does not
+  warn.
+- **Accidental bundles mode.** A stray `bundles/` folder turns every unnamed
+  skill into shelf items that load nowhere. The refusal messages, the shelf
+  visibility in the dashboard, and the migration test keep the state obvious.
+- **Worktree deletion races.** Per-project folders ride the layer and its
+  manifest, so they switch and clean up with everything else; no new deletion
+  path touches the workspace checkouts.

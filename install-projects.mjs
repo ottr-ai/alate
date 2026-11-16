@@ -19,7 +19,8 @@ import { dirname, join, resolve } from 'node:path';
 import { assertSourceInside, checkDestination, describeProblem, fingerprint, parseArgs, PROVISION_ENV, readBaselines, resolveDataDir, ruleProblems, safeRel, writeBaselines, writeProvisionResults } from './lib/data.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
-/** @typedef {{ contextFiles: string[], projects: Record<string, string[]> }} ProjectsManifest */
+/** @typedef {string[] | { extras?: string[], bundles?: string[] }} ProjectValue */
+/** @typedef {{ contextFiles: string[], projects: Record<string, ProjectValue> }} ProjectsManifest */
 /** @typedef {{ item: string, status: 'added' | 'updated' | 'unchanged' | 'rejected', rule: string | null, at: string | null, report?: string }} ProvisionItem */
 /** @typedef {{ key: string, dest: string, snapBytes: Buffer, fpSnap: string, status: 'added' | 'updated' | 'unchanged', log: string | null }} Plan */
 
@@ -46,11 +47,26 @@ function install(root, manifestPath) {
   if (typeof projects !== 'object' || projects === null || Array.isArray(projects)) bad('projects must be an object');
 
   const contextFiles = [...new Set(manifest.contextFiles.map(f => safeRel(f, 'projects.json: contextFiles')))];
+  // One project value (specs/bundles.md): the legacy extras array, or an object with
+  // optional extras and bundles. Returns the extras as string[], or null when the value
+  // is neither form. bundles drives install-user only and is never read here.
+  /** @param {unknown} value @returns {string[] | null} */
+  const extrasOf = value => {
+    if (Array.isArray(value)) return value.every(f => typeof f === 'string') ? value : null;
+    if (typeof value === 'object' && value !== null) {
+      const shaped = /** @type {{ extras?: unknown }} */ (value);
+      if (shaped.extras === undefined) return [];
+      return Array.isArray(shaped.extras) && shaped.extras.every(f => typeof f === 'string') ? shaped.extras : null;
+    }
+    return null;
+  };
+
   const validated = /** @type {[string, string[]][]} */ (Object.entries(projects).map(([name, extras]) => {
     const safe = safeRel(name, 'projects.json: project name');
     if (safe.includes('/')) bad(`project name ${name} must be one directory segment`);
-    if (!Array.isArray(extras) || extras.some(f => typeof f !== 'string')) bad(`${safe}: extras must be an array of strings`);
-    return [safe, [...new Set(extras.map(f => safeRel(f, `projects.json: project ${safe}`)))]];
+    const list = extrasOf(extras);
+    if (list === null) bad(`${safe}: extras must be an array of strings`);
+    return [safe, [...new Set(list.map(f => safeRel(f, `projects.json: project ${safe}`)))]];
   }));
 
   // Capture baselines (specs/capture-baseline.md), shared with sync-projects.mjs: per installed

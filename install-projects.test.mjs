@@ -99,6 +99,16 @@ try {
   assert.ok(r.stdout.includes('projects/beta/ghost.md is not in the snapshot; skipped'), r.stdout);
   assert.match(r.stdout, /0 added, 0 updated, 1 unchanged across 1 projects/, r.stdout);
 
+  // (e2) Object project values (specs/bundles.md): extras install exactly like the array
+  // form, and bundles is never read here (it drives install-user only; bundles/core does not exist).
+  manifest({ contextFiles: ['AGENTS.md'], projects: { beta: { extras: ['deep/nested/extra.md'], bundles: ['core'] } } });
+  put(data, 'projects/beta/deep/nested/extra.md', '// extra v2\n');
+  r = run(withRoot);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /refreshed projects\/beta\/deep\/nested\/extra\.md/, r.stdout);
+  assert.equal(readFileSync(machineOf('beta/deep/nested/extra.md'), 'utf8'), '// extra v2\n', 'the object form installs extras like the array form');
+  assert.match(r.stdout, /0 added, 1 updated, 1 unchanged across 1 projects/, r.stdout);
+
   // (f) No checkout dir: the whole project is skipped with a note, exit 0.
   manifest({ contextFiles: ['AGENTS.md'], projects: { beta: [], ghostproj: [] } });
   r = run(withRoot);

@@ -36,6 +36,7 @@ const sandbox = (env = process.env) => {
 mkdirSync(join(scriptDir, 'lib'), { recursive: true });
 copyFileSync(fileURLToPath(new URL('./install-user.mjs', import.meta.url)), join(scriptDir, 'install-user.mjs'));
 copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(scriptDir, 'lib', 'data.mjs'));
+copyFileSync(fileURLToPath(new URL('./lib/bundles.mjs', import.meta.url)), join(scriptDir, 'lib', 'bundles.mjs'));
 // Layer mode spawns the real sync.mjs beside the script for the rules install.
 copyFileSync(fileURLToPath(new URL('./sync.mjs', import.meta.url)), join(scriptDir, 'sync.mjs'));
 // The shipped-skill install reads the pin module and the vendored tree from the tool root,
@@ -1971,6 +1972,7 @@ try {
     const pinnedDir = join(tmp, 'tool-v2-14');
     mkdirSync(join(pinnedDir, 'lib'), { recursive: true });
     copyFileSync(fileURLToPath(new URL('./lib/data.mjs', import.meta.url)), join(pinnedDir, 'lib', 'data.mjs'));
+    copyFileSync(fileURLToPath(new URL('./lib/bundles.mjs', import.meta.url)), join(pinnedDir, 'lib', 'bundles.mjs'));
     copyFileSync(fileURLToPath(new URL('./lib/shipped.mjs', import.meta.url)), join(pinnedDir, 'lib', 'shipped.mjs'));
     copyTree(fileURLToPath(new URL('./shipped/ottr', import.meta.url)), join(pinnedDir, 'shipped', 'ottr'));
     copyFileSync(shippedReviews, join(pinnedDir, 'shipped', 'skillspector-reviews.json'));

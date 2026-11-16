@@ -268,6 +268,7 @@ function overviewView() {
   const inv = state.inventory || {};
   const user = inv.user || { configFiles: [], others: [], skills: [], extensions: [], plugins: [] };
   const projects = inv.projects || { contextFiles: [], named: [] };
+  const bundles = Array.isArray(inv.bundles) ? inv.bundles : [];
   const rules = inv.rules || [];
   const src = state.source;
   // Per-item provision results apply only to the snapshot they ran against: hide them when a
@@ -315,6 +316,15 @@ function overviewView() {
   const has = new Set(files.map((f) => f.path));
   const link = (p) => (has.has(p) ? fileHref(p) : null);
 
+  // The bundles that name an item, or the shelf, ride the aside label as a muted
+  // suffix on the origin text (specs/bundles.md dashboard section).
+  const namingAside = (origin, row) => {
+    const bits = [];
+    if (Array.isArray(row.bundles) && row.bundles.length) bits.push('bundles: ' + row.bundles.join(', '));
+    if (row.shelf) bits.push('on the shelf');
+    return bits.length ? origin + ' · ' + bits.join(' · ') : origin;
+  };
+
   const sheet = h('article', { class: 'sheet' });
   const spec = src.kind === 'repo' ? src.name + (src.ref ? '@' + src.ref : '') : src.spec;
   const provMeta = prov ? ' · provisioned ' + relTime(prov.at) + (prov.items.some((i) => i.status === 'rejected' || i.status === 'no-origin') ? ', ' + prov.items.filter((i) => i.status === 'rejected' || i.status === 'no-origin').length + ' failed' : '') : '';
@@ -324,14 +334,14 @@ function overviewView() {
     ...provisionFailureView(prov),
     h('p', { class: 'totals' },
       plural(rules.length, 'rule'), ', ', plural(user.skills.length, 'skill'), ', ', plural(user.plugins.length, 'plugin'), ', ',
-      plural(projects.named.length, 'project'), ', and ', plural(files.length, 'file'), ' in total. Pick a file in the index to edit it, or ',
+      plural(bundles.length, 'bundle'), ', ', plural(projects.named.length, 'project'), ', and ', plural(files.length, 'file'), ' in total. Pick a file in the index to edit it, or ',
       h('a', { href: '#/new', text: 'add a new file' }), '.')));
 
   // Changes since the previous import, and scan warnings.
   const ch = state.changes;
   if (ch) {
     const items = [];
-    const NAMES = { rules: 'Rules', skills: 'Skills', plugins: 'Plugins', extensions: 'Extensions', user: 'User layer', projects: 'Projects' };
+    const NAMES = { rules: 'Rules', skills: 'Skills', plugins: 'Plugins', bundles: 'Bundles', extensions: 'Extensions', user: 'User layer', projects: 'Projects' };
     for (const [k, label] of Object.entries(NAMES)) {
       const c = ch[k];
       if (!c) continue;
@@ -363,19 +373,35 @@ function overviewView() {
     userRows.length ? h('ul', { class: 'entries' }, userRows) : h('p', { class: 'note', text: 'No user layer in this data repo.' })));
 
   sheet.append(part('Skills', String(user.skills.length),
-    user.skills.length ? h('ul', { class: 'entries' }, user.skills.map((s) => provEntry(s.path.replace(/\/SKILL\.md$/, ''), link(s.path), s.name, s.description || 'No description in SKILL.md.', s.origin)))
+    user.skills.length ? h('ul', { class: 'entries' }, user.skills.map((s) => provEntry(s.path.replace(/\/SKILL\.md$/, ''), link(s.path), s.name, s.description || 'No description in SKILL.md.', namingAside(s.origin, s))))
       : h('p', { class: 'note', text: 'No skills in this data repo.' })));
 
   sheet.append(part('Plugins', String(user.plugins.length),
-    user.plugins.length ? h('ul', { class: 'entries' }, user.plugins.map((p) => entry(link('user/omp/plugins/' + p.origin), p.name, p.version || '', 'from ' + p.origin)))
+    user.plugins.length ? h('ul', { class: 'entries' }, user.plugins.map((p) => entry(link('user/omp/plugins/' + p.origin), p.name, p.version || '', namingAside('from ' + p.origin, p))))
       : h('p', { class: 'note', text: 'No plugins in this data repo.' })));
+
+  // Bundles: one row per bundle with its list-file count and item names. Without
+  // bundles content the section shows nothing (specs/bundles.md).
+  if (bundles.length) sheet.append(part('Bundles', String(bundles.length),
+    bundles.map((b) => {
+      const bfiles = Array.isArray(b.files) ? b.files : [];
+      const bskills = Array.isArray(b.skills) ? b.skills : [];
+      const bplugins = Array.isArray(b.plugins) ? b.plugins : [];
+      const items = [bskills.length ? 'Skills: ' + bskills.join(', ') : null, bplugins.length ? 'Plugins: ' + bplugins.join(', ') : null].filter(Boolean).join(' · ');
+      const detail = items ? 'Files: ' + bfiles.join(', ') + ' · ' + items : bfiles.length ? 'Files: ' + bfiles.join(', ') : 'No list files.';
+      return h('div', { class: 'project' },
+        h('h3', null, h('span', { text: b.name }), h('span', { text: plural(bfiles.length, 'list file') })),
+        h('p', { class: 'meta', text: detail }));
+    })));
 
   const projectBlocks = projects.named.map((p) => {
     const entries = Array.isArray(p.entries) ? p.entries : [];
     const drift = entries.filter((e) => DRIFT.has(e.status)).length;
     const live = p.live === 'gone' ? 'project folder missing on this machine' : p.live === 'off' ? 'not compared with this machine' : drift ? plural(drift, 'file') + ' differ from this machine' : 'in sync with this machine';
+    const bundlesNote = Array.isArray(p.bundles) && p.bundles.length ? h('p', { class: 'meta', text: 'Bundles: ' + p.bundles.join(', ') }) : null;
     return h('div', { class: 'project' },
       h('h3', null, h('span', { text: p.name }), h('span', { class: drift || p.live === 'gone' ? 'alert' : '', text: live })),
+      bundlesNote,
       entries.length ? h('ul', { class: 'entries' }, entries.map((e) => entry(link('projects/' + p.name + '/' + e.path), e.path, STATUS_COPY[e.status] || e.status, bytes(e.bytes), DRIFT.has(e.status))))
         : h('p', { class: 'note', text: 'No snapshot files.' }));
   });

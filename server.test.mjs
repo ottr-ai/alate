@@ -5362,7 +5362,8 @@ try {
     assert.deepEqual(scan10('e10'), {
       rules: [], user: { configFiles: [], others: [], skills: [], extensions: [], plugins: [] },
       projects: { contextFiles: [], named: [] },
-      counts: { rules: 0, skills: 0, plugins: 0, extensions: 0, projects: 0, userFiles: 0 }, warnings: [],
+      bundles: [],
+      counts: { rules: 0, skills: 0, plugins: 0, extensions: 0, projects: 0, bundles: 0, userFiles: 0 }, warnings: [],
     });
 
     // -- projects/ dir without projects.json warns; the default contextFiles survives.
@@ -5441,23 +5442,23 @@ try {
           { path: 'omp/plugins/package.json', bytes: 56 },
         ],
         skills: [
-          { name: 'demo', origin: 'skills', path: 'user/omp/agent/skills/demo/SKILL.md', description: 'demo skill' },
-          { name: 'msk', origin: 'managed-skills', path: 'user/omp/agent/managed-skills/msk/SKILL.md', description: 'msk skill' },
-          { name: 'ask', origin: 'agents-skills', path: 'user/agents/skills/ask/SKILL.md', description: '' },
+          { name: 'demo', origin: 'skills', path: 'user/omp/agent/skills/demo/SKILL.md', description: 'demo skill', bundles: [], shelf: false },
+          { name: 'msk', origin: 'managed-skills', path: 'user/omp/agent/managed-skills/msk/SKILL.md', description: 'msk skill', bundles: [], shelf: false },
+          { name: 'ask', origin: 'agents-skills', path: 'user/agents/skills/ask/SKILL.md', description: '', bundles: [], shelf: false },
         ],
         extensions: ['ext-a', 'ext-b', 'zfile.txt'],
         plugins: [
-          { name: '@scope/demo', version: '^1.0.0', origin: 'package.json' },
-          { name: 'dup', version: '^1.0.0', origin: 'package.json' },
-          { name: 'lockp', origin: 'omp-plugins.lock.json' },
-          { name: 'lockinst', origin: 'omp-plugins.lock.json' },
-          { name: 'instp', origin: 'installed_plugins.json' },
+          { name: '@scope/demo', version: '^1.0.0', origin: 'package.json', bundles: [], shelf: false },
+          { name: 'dup', version: '^1.0.0', origin: 'package.json', bundles: [], shelf: false },
+          { name: 'lockp', origin: 'omp-plugins.lock.json', bundles: [], shelf: false },
+          { name: 'lockinst', origin: 'omp-plugins.lock.json', bundles: [], shelf: false },
+          { name: 'instp', origin: 'installed_plugins.json', bundles: [], shelf: false },
         ],
       },
       projects: {
         contextFiles: ['ctx.md'],
         named: [{
-          name: 'alpha', extras: 2, files: 3, live: 'off',
+          name: 'alpha', extras: 2, files: 3, live: 'off', bundles: [],
           entries: [
             { path: 's1.md', bytes: 4, status: 'unknown' },
             { path: 's2.md', bytes: 4, status: 'unknown' },
@@ -5465,7 +5466,8 @@ try {
           ],
         }],
       },
-      counts: { rules: 4, skills: 3, plugins: 5, extensions: 3, projects: 1, userFiles: 13 },
+      bundles: [],
+      counts: { rules: 4, skills: 3, plugins: 5, extensions: 3, projects: 1, bundles: 0, userFiles: 13 },
       warnings: [
         'projects/projects.json: rejected unsafe project name "."',
         'projects/projects.json: rejected unsafe project name ".."',
@@ -5502,7 +5504,7 @@ try {
     const live = dash.scanInventory(join(w10, 'live10/data'), join(w10, 'live10/ws'));
     assert.deepEqual(live.projects.named, [
       {
-        name: 'alpha', extras: 7, files: 3, live: 'checked',
+        name: 'alpha', extras: 7, files: 3, live: 'checked', bundles: [],
         entries: [
           { path: 'a0.md', bytes: 2, status: 'uncaptured' },
           { path: 'ctx.md', bytes: 4, status: 'uncaptured' },
@@ -5512,8 +5514,8 @@ try {
           { path: 'z9.md', bytes: 2, status: 'uncaptured' },
         ],
       },
-      { name: 'esc', extras: 0, files: 0, live: 'off', entries: [] },
-      { name: 'ghost', extras: 0, files: 0, live: 'gone', entries: [] },
+      { name: 'esc', extras: 0, files: 0, live: 'off', bundles: [], entries: [] },
+      { name: 'ghost', extras: 0, files: 0, live: 'gone', bundles: [], entries: [] },
     ]);
     assert.deepEqual(live.warnings, [
       'alpha: rejected unsafe snapshot path "../nope.md"',
@@ -5544,7 +5546,7 @@ try {
     dig('uj10/user/omp/plugins/omp-plugins.lock.json', JSON.stringify({ plugins: { lockp: {} } }));
     const uj = scan10('uj10');
     assert.deepEqual([uj.user.plugins, uj.warnings], [
-      [{ name: 'lockp', origin: 'omp-plugins.lock.json' }],
+      [{ name: 'lockp', origin: 'omp-plugins.lock.json', bundles: [], shelf: false }],
       ['user/omp/plugins/package.json: unparseable JSON, skipped'],
     ]);
 
@@ -5657,6 +5659,7 @@ try {
       extensions: { added: ['ext-b'], removed: [], updated: [] },
       user: { added: ['ext-b'], removed: [], updated: [] },
       projects: { added: ['newp'], removed: ['oldp'], updated: ['alpha', 'beta', 'gamma'] },
+      bundles: { added: [], removed: [], updated: [] },
     });
 
     // -- computeChanges over a hand-crafted previous inventory with absent sections.
@@ -5672,6 +5675,127 @@ try {
       extensions: { added: ['ext-a'], removed: [], updated: [] },
       user: { added: ['omp/agent/config.yml', 'omp/plugins/package.json', 'ext-a'], removed: [], updated: [] },
       projects: { added: ['@context/ctx.md', 'alpha', 'beta', 'gamma', 'oldp'], removed: [], updated: [] },
+      bundles: { added: [], removed: [], updated: [] },
+    });
+
+    // -- bundles mode (specs/bundles.md): per-bundle files and item names, per-item
+    // naming and the shelf, worker lists as naming sources, projects object form.
+    dig('bnd10/user/omp/agent/skills/shared/SKILL.md', fm('shared skill')); // named by core
+    dig('bnd10/user/omp/agent/skills/bundled/SKILL.md', fm('bundled skill')); // named by a bundle and a worker list
+    dig('bnd10/user/omp/agent/skills/workeronly/SKILL.md', fm('worker only')); // named only by a worker list
+    dig('bnd10/user/omp/agent/skills/shelfy/SKILL.md', fm('bundled too')); // named by a bundle only
+    dig('bnd10/user/omp/agent/managed-skills/mshelf/SKILL.md', fm('on the shelf')); // named by nothing
+    dig('bnd10/user/omp/plugins/package.json', JSON.stringify({ dependencies: { '@scope/plug': '^1.0.0', 'plug-two': '^2.0.0', loneplug: '^3.0.0' } }));
+    dig('bnd10/bundles/core/skills.txt', '# every project\nshared\n');
+    dig('bnd10/bundles/core/plugins.txt', '@scope/plug\n');
+    dig('bnd10/bundles/core/tools.json', '[{ "name": "ripgrep" }]\n');
+    dig('bnd10/bundles/gamedev-2d/skills.txt', 'bundled\nshelfy\n');
+    dig('bnd10/bundles/gamedev-2d/plugins.txt', 'plug-two\n');
+    dig('bnd10/bundles/gamedev-2d/apt.txt', 'curl\n');
+    dig('bnd10/workers/alpha/skills.txt', 'workeronly\n');
+    dig('bnd10/workers/alpha/plugins.txt', '# no plugin names\n');
+    dig('bnd10/workers/_all/skills.txt', 'shared\n'); // the fleet folder names too
+    dig('bnd10/projects/alpha/s.md', 's\n');
+    dig('bnd10/projects/beta/s.md', 's\n');
+    writeFileSync(join(w10, 'bnd10/projects/projects.json'), JSON.stringify({
+      contextFiles: [],
+      projects: { alpha: { extras: ['s.md'], bundles: ['gamedev-2d'] }, beta: ['s.md'] },
+    }));
+    const bnd = scan10('bnd10');
+    assert.deepEqual(bnd.bundles, [
+      { name: 'core', files: ['plugins.txt', 'skills.txt', 'tools.json'], skills: ['shared'], plugins: ['@scope/plug'] },
+      { name: 'gamedev-2d', files: ['apt.txt', 'plugins.txt', 'skills.txt'], skills: ['bundled', 'shelfy'], plugins: ['plug-two'] },
+    ]);
+    assert.deepEqual(bnd.user.skills, [
+      { name: 'bundled', origin: 'skills', path: 'user/omp/agent/skills/bundled/SKILL.md', description: 'bundled skill', bundles: ['gamedev-2d'], shelf: false },
+      { name: 'shared', origin: 'skills', path: 'user/omp/agent/skills/shared/SKILL.md', description: 'shared skill', bundles: ['core'], shelf: false },
+      { name: 'shelfy', origin: 'skills', path: 'user/omp/agent/skills/shelfy/SKILL.md', description: 'bundled too', bundles: ['gamedev-2d'], shelf: false },
+      { name: 'workeronly', origin: 'skills', path: 'user/omp/agent/skills/workeronly/SKILL.md', description: 'worker only', bundles: [], shelf: false },
+      { name: 'mshelf', origin: 'managed-skills', path: 'user/omp/agent/managed-skills/mshelf/SKILL.md', description: 'on the shelf', bundles: [], shelf: true },
+    ]);
+    assert.deepEqual(bnd.user.plugins, [
+      { name: '@scope/plug', version: '^1.0.0', origin: 'package.json', bundles: ['core'], shelf: false },
+      { name: 'plug-two', version: '^2.0.0', origin: 'package.json', bundles: ['gamedev-2d'], shelf: false },
+      { name: 'loneplug', version: '^3.0.0', origin: 'package.json', bundles: [], shelf: true },
+    ]);
+    assert.deepEqual(bnd.projects.named, [
+      { name: 'alpha', extras: 1, files: 1, live: 'off', bundles: ['gamedev-2d'], entries: [{ path: 's.md', bytes: 2, status: 'unknown' }] },
+      { name: 'beta', extras: 1, files: 1, live: 'off', bundles: [], entries: [{ path: 's.md', bytes: 2, status: 'unknown' }] },
+    ]);
+    assert.deepEqual(bnd.counts, { rules: 0, skills: 5, plugins: 3, extensions: 0, projects: 2, bundles: 2, userFiles: 6 });
+    assert.deepEqual(bnd.warnings, []);
+
+    // -- bundles warnings: unknown names, a misplaced file, a non-folder bundle, a
+    // broken worker list, a malformed bundles key; the scan never refuses.
+    dig('bw10/user/omp/agent/skills/real/SKILL.md', fm('real skill'));
+    dig('bw10/user/omp/plugins/package.json', JSON.stringify({ dependencies: { realplug: '1.0.0' } }));
+    dig('bw10/bundles/known/skills.txt', 'real\n');
+    dig('bw10/bundles/known/plugins.txt', 'realplug\n');
+    dig('bw10/bundles/soft/skills.txt', 'ghost-skill\n');
+    dig('bw10/bundles/soft/plugins.txt', 'ghost-plug\n');
+    dig('bw10/bundles/messy/skills.txt', 'real\n');
+    dig('bw10/bundles/messy/stray.txt', 'misplaced\n');
+    dig('bw10/bundles/notdir', 'a file, not a folder\n');
+    dig('bw10/workers/gamma/skills.txt', '!!!\n');
+    ddir('bw10/projects');
+    writeFileSync(join(w10, 'bw10/projects/projects.json'), JSON.stringify({
+      contextFiles: [],
+      projects: { alpha: { extras: [], bundles: ['known'] }, bad: { bundles: 'nope' } },
+    }));
+    const bw = scan10('bw10');
+    assert.deepEqual(bw.bundles, [
+      { name: 'known', files: ['plugins.txt', 'skills.txt'], skills: ['real'], plugins: ['realplug'] },
+      { name: 'soft', files: ['plugins.txt', 'skills.txt'], skills: ['ghost-skill'], plugins: ['ghost-plug'] },
+    ]);
+    assert.deepEqual(bw.warnings, [
+      'workers/gamma/skills.txt:1: "!!!" is not a valid skill name',
+      'bundles/messy: unexpected file "stray.txt" (allowed: apt.txt, tools.json, env.txt, requirements.txt, skills.txt, plugins.txt)',
+      'bundles: bundle "notdir" is not a folder under bundles/',
+      'bundles/soft: unknown skill "ghost-skill"',
+      'bundles/soft: unknown plugin "ghost-plug"',
+      'projects/projects.json: bundles for "bad" must be an array of strings; bundles ignored',
+    ]);
+    assert.deepEqual(bw.user.skills, [{ name: 'real', origin: 'skills', path: 'user/omp/agent/skills/real/SKILL.md', description: 'real skill', bundles: ['known'], shelf: false }]);
+    assert.deepEqual(bw.user.plugins, [{ name: 'realplug', version: '1.0.0', origin: 'package.json', bundles: ['known'], shelf: false }]);
+    assert.deepEqual(bw.projects.named.map(p => p.bundles), [['known'], []]);
+    assert.equal(bw.counts.bundles, 2);
+
+    // -- without bundles/ the scan stays bundles-free: no section content, no shelf.
+    dig('nb10/user/omp/agent/skills/solo/SKILL.md', fm('solo skill'));
+    ddir('nb10/projects');
+    writeFileSync(join(w10, 'nb10/projects/projects.json'), JSON.stringify({
+      contextFiles: [],
+      projects: { alpha: { extras: [], bundles: ['gamedev-2d'] } },
+    }));
+    const nb = scan10('nb10');
+    assert.deepEqual([nb.bundles, nb.counts.bundles], [[], 0]);
+    assert.deepEqual(nb.user.skills, [{ name: 'solo', origin: 'skills', path: 'user/omp/agent/skills/solo/SKILL.md', description: 'solo skill', bundles: [], shelf: false }]);
+    assert.deepEqual(nb.projects.named.map(p => p.bundles), [['gamedev-2d']], 'the manifest bundles key still parses');
+    assert.deepEqual(nb.warnings, []);
+
+    // -- computeChanges: a bundles/shelf flip marks the item updated; the bundles
+    // section gains and loses bundle names like extensions.
+    const dbB = mkDb10('alat10-b.db');
+    dbB.prepare('INSERT INTO state (id, value) VALUES (1, ?)').run(JSON.stringify({
+      source: null,
+      inventory: {
+        rules: [],
+        user: { configFiles: [], others: [], skills: [{ name: 'shared', origin: 'skills', path: 'user/omp/agent/skills/shared/SKILL.md', description: 'shared skill', bundles: [], shelf: true }], extensions: [], plugins: [] },
+        projects: { contextFiles: [], named: [] },
+        bundles: [],
+        counts: {}, warnings: [],
+      },
+      previous: null, changes: null,
+    }));
+    const bc = dash.importSource(dash.loadState(dbB), join(w10, 'bnd10'), undefined, null, dbB).changes;
+    assert.deepEqual(bc, {
+      rules: { added: [], removed: [], updated: [] },
+      skills: { added: ['bundled', 'shelfy', 'workeronly', 'mshelf'], removed: [], updated: ['shared'] },
+      plugins: { added: ['@scope/plug', 'plug-two', 'loneplug'], removed: [], updated: [] },
+      extensions: { added: [], removed: [], updated: [] },
+      user: { added: ['omp/plugins/package.json'], removed: [], updated: [] },
+      projects: { added: ['alpha', 'beta'], removed: [], updated: [] },
+      bundles: { added: ['core', 'gamedev-2d'], removed: [], updated: [] },
     });
 
     // -- remoteHead: sha of the fixture remote, ref-aware, '' on failure.
