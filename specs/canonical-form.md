@@ -39,7 +39,10 @@ The repo (its git index) holds:
 - `config.yml` host paths (`shellPath`, `skills.customDirectories`) and deployment
   blocks: dropped at capture, re-added at install (existing strips, unchanged).
 - File modes: the git index's `100755`/`100644`, never the filesystem. Install writes
-  `0755` for an index-executable file and `0644` for everything else. A data dir that
+  `0755` for an index-executable file and `0644` for everything else, and the mode
+  applies to fresh and updated files alike: every write enforces it (`fchmodSync` on
+  the open fd, `chmodSync` beside `writeFileSync`), so an existing file never keeps a
+  filesystem mode the index contradicts. A data dir that
   is not a git checkout gives `0644`. A capture records no mode: exec lives in the
   index, set by git (`git update-index --chmod=+x`) at commit time.
 
@@ -80,9 +83,13 @@ file it must stay in sync with.
 - Every source read renders in this order: canonicalize the checkout bytes (the data
   dir may be a CRLF checkout), run the item transforms (`forTarget` JSON re-rooting,
   the config gates, the layer remap), then render for the target: CRLF for
-  `.cmd`/`.bat`, LF for all other text, binary untouched. The rendered bytes are what
-  the fingerprint compares, the record, and the write all see, so an installed file
-  holds the target form and stays byte-stable across installs from any checkout form.
+  `.cmd`/`.bat`, LF for all other text, binary untouched. `forTarget` re-roots the
+  stored form at the target home on every platform, so the placeholder becomes the
+  target home everywhere; an install into the workers' home `/root` is an identity
+  (`specs/stored-json-path-form.md` records the amended rule). The rendered bytes are
+  what the fingerprint compares, the record, and the write all see, so an installed
+  file holds the target form and stays byte-stable across installs from any checkout
+  form.
 - The scan gate judges the rendered bytes: every snapshot skill is scanned through a
   staged copy that holds the rendered bytes with clean modes (the existing staging
   becomes the one scan path; the exec-bit-only condition is subsumed). The verdict
@@ -90,7 +97,8 @@ file it must stay in sync with.
 - Modes come from the index rule above. `writeFileInside` gains a mode parameter;
   every install write passes `0755` or `0644` from it.
 - Merged worker lists (`tools.json`, `apt.txt`, `env.txt`, `requirements.txt`) render
-  the same way, both in bundles mode and in the verbatim non-bundles path.
+  the same way, in bundles mode, in the `workers/_all/` fleet folder, and in the
+  verbatim non-bundles path.
 
 ### Per-OS differences as data
 

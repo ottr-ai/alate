@@ -99,6 +99,19 @@ const fixture = (opts = {}) => {
   put(dataDir, 'workers/alpha/skills.txt', 'gamedev-skill\n');
   put(dataDir, 'workers/alpha/apt.txt', 'pkg-three\n');
   put(dataDir, 'workers/_all/apt.txt', 'fleet-pkg\n');
+  // The _all fleet lists hold the canonical form too (specs/canonical-form.md): the CRLF
+  // fixture bytes and the per-OS tools.json must land rendered and resolved.
+  put(dataDir, 'workers/_all/env.txt', 'FLEET_VAR\r\n');
+  put(dataDir, 'workers/_all/tools.json', JSON.stringify([
+    {
+      name: 'fleet-tool',
+      url: { linux: 'https://example/fleet-linux.tar.gz', win32: 'https://example/fleet-win.zip' },
+      sha256: 'a'.repeat(64),
+      unpack: 'zip',
+      bin: { linux: 'fleet', win32: 'fleet.exe' },
+    },
+    { name: 'win-only', os: ['win32'], url: 'https://example/fleet.exe', sha256: 'b'.repeat(64), unpack: 'none' },
+  ]));
   put(dataDir, 'projects/projects.json', opts.unknownBundle
     ? JSON.stringify({ contextFiles: [], projects: { alpha: { bundles: ['ghost-bundle'] }, beta: [] } })
     : PROJECTS_JSON);
@@ -126,10 +139,23 @@ try {
     assert.ok(existsSync(join(homeDir, '.omp/agent/skills/core-skill')), 'a core skill installs into the shared home roots');
     assert.ok(!existsSync(join(homeDir, '.omp/agent/skills/shelf-skill')), 'a shelf skill installs into no home root');
     assert.ok(!existsSync(join(homeDir, '.ottr/project-skills/alpha/shelf-skill')), 'a shelf skill installs into no project folder');
-    // Worker lists merge core, bundle, own; _all stays verbatim.
+    // Worker lists merge core, bundle, own; _all installs its own lists rendered to the
+    // canonical form (unmerged).
     assert.equal(got(homeDir, '.ottr/workers/alpha/apt.txt'), 'pkg-one\npkg-two\npkg-three\n');
     assert.equal(got(homeDir, '.ottr/workers/beta/apt.txt'), 'pkg-one\n');
     assert.equal(got(homeDir, '.ottr/workers/_all/apt.txt'), 'fleet-pkg\n');
+    assert.equal(got(homeDir, '.ottr/workers/_all/env.txt'), 'FLEET_VAR\n', 'a CRLF checkout of _all/env.txt installs LF');
+    const fleetTools = JSON.parse(got(homeDir, '.ottr/workers/_all/tools.json'));
+    const onWin = process.platform === 'win32';
+    assert.deepEqual(fleetTools, [
+      {
+        name: 'fleet-tool',
+        url: onWin ? 'https://example/fleet-win.zip' : 'https://example/fleet-linux.tar.gz',
+        sha256: 'a'.repeat(64),
+        unpack: 'zip',
+        bin: onWin ? 'fleet.exe' : 'fleet',
+      },
+    ], 'the _all tools.json resolves per-OS values and drops os-filtered entries');
     // Per-project plugin lists merge core, bundle, own. Core names no plugin,
     // so beta's set is empty — and its file must still exist (empty), because
     // the consumer scopes plugins only when the file exists: a missing file

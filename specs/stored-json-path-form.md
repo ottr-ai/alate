@@ -35,9 +35,11 @@ Every captured file whose snapshot rel path ends in `.json`: `.omp/agent/mcp.jso
   snapshot: a home can reference `~/.pi` through another captured file, so a stored
   `/root/.pi/...` path must move back even when the snapshot holds no `pi/` item. A new
   top-level capture item needs its segment added here, the same way `ITEMS` needs a line.
-- `forTarget()` stays the only install-side port. With the workers' home `/root`, a
-  Linux install passes the stored form through untouched, and a Windows install re-roots
-  it at the Windows home. Capture inverts both.
+- `forTarget()` stays the only install-side port. It re-roots the stored form at the
+  target home on every platform (ALAT-184, `specs/canonical-form.md`): the stored
+  prefix is the home placeholder, so it becomes the target home; a Linux install
+  into the workers' home `/root` is an identity, so worker behavior is unchanged.
+  Capture inverts every direction.
 - sync-user.mjs applies `toStoredForm()` before the secret gates and the write, so the
   gates judge the stored text. One note line reports each file with moves.
 
@@ -68,7 +70,8 @@ Every captured file whose snapshot rel path ends in `.json`: `.omp/agent/mcp.jso
 - `config.yml` and other non-JSON files.
 - The Windows host's own `C:\root` home (an omp setting on that machine).
 - The agent-data pre-push hook.
-- Any change to `forTarget()` install behavior.
+- No change to `forTarget()`'s install behavior beyond the Linux re-root of the
+  stored form, which is ALAT-184's (`specs/canonical-form.md`).
 
 ## Risks
 
@@ -76,6 +79,6 @@ Every captured file whose snapshot rel path ends in `.json`: `.omp/agent/mcp.jso
   forms. Worker behavior stays the same: `forTarget()` runs its rebase before the
   Linux-only env drop and disable checks, so those checks already saw POSIX forms
   before this change.
-- A Linux install into a home other than `/root` leaves the stored `/root` prefix in
-  place. Workers run as root. A future non-root Linux target needs its own direction,
-  as the `lib/data.mjs` ponytail note already records.
+- A Linux install into a home other than `/root` re-roots the stored form at that
+  home since ALAT-184; before it, the stored `/root` prefix stayed in place. A
+  captured absolute path outside the known roots (`/usr/bin/node`) still never moves.

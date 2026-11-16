@@ -74,6 +74,10 @@ const put = (dir, rel, bytes) => {
   writeFileSync(path, bytes);
 };
 const crlf = text => Buffer.from(text.replaceAll('\n', '\r\n'), 'utf8');
+// Text bytes for assertions. The zero-deps gate reads a Buffer.from call whose argument
+// is a quoted literal as a module specifier, so the tests route every literal through
+// this helper (the same rule lib/canonical.test.mjs documents).
+const bytes = text => Buffer.from(text, 'utf8');
 
 /** First 0x0D byte index, or -1. @param {Buffer} bytes */
 const firstCR = bytes => bytes.indexOf(0x0d);
@@ -160,9 +164,9 @@ async function sectionA() {
     attempt('A.5 install exits 0', () => assert.equal(r2.status, 0, `install refused the canonical data repo\n${outOf(r2)}`));
 
     // 6. The installed files must hold the target form. [RED today: CRLF installed as captured]
-    // mcp.json: specs/stored-json-path-form.md — a Linux install passes the stored /root
-    // prefix through untouched (the placeholder IS the canonical form; win32 re-roots,
-    // covered by section B).
+    // mcp.json: the /root prefix is the home placeholder, so the install re-roots it at
+    // the target home on every platform (specs/canonical-form.md); an install into a
+    // /root worker home is an identity. Section B covers the win32 direction.
     const instSkill = readFileSync(join(linuxHome, '.omp/agent/skills/demo/SKILL.md'));
     const instCmd = readFileSync(join(linuxHome, '.omp/agent/skills/demo/scripts/run.cmd'));
     const instLogo = readFileSync(join(linuxHome, '.omp/agent/skills/demo/assets/logo.bin'));
@@ -172,13 +176,15 @@ async function sectionA() {
       assert.equal(at, -1, `CRLF installed on Linux: .omp/agent/skills/demo/SKILL.md holds a 0x0D byte at offset ${at}; install must render canonical repo bytes to LF text`);
     });
     attempt('A.6 run.cmd installed with CRLF', () => {
-      assert.ok(instCmd.includes(Buffer.from('\r\n')), `.omp/agent/skills/demo/scripts/run.cmd holds no CRLF line end (hex head ${instCmd.subarray(0, 12).toString('hex')}); install must render *.cmd as CRLF on every target`);
+      assert.ok(instCmd.includes(bytes('\r\n')), `.omp/agent/skills/demo/scripts/run.cmd holds no CRLF line end (hex head ${instCmd.subarray(0, 12).toString('hex')}); install must render *.cmd as CRLF on every target`);
     });
-    attempt('A.6 mcp.json keeps the stored /root form on Linux', () => {
+    attempt('A.6 mcp.json re-roots the placeholder at the Linux home', () => {
       const doc = JSON.parse(instMcp.toString('utf8'));
-      // specs/stored-json-path-form.md: the /root prefix is the canonical home placeholder;
-      // a Linux install leaves it in place. Section B covers the win32 re-root direction.
-      assert.equal(doc.mcpServers.demo.args[0], storedMcpArg, `mcp.json installed with args[0] ${JSON.stringify(doc.mcpServers.demo.args[0])}, expected the stored form ${storedMcpArg} passed through untouched`);
+      // The /root prefix is the home placeholder: forTarget re-roots it at the target
+      // home on every platform (specs/canonical-form.md), so a non-/root Linux home
+      // gets its own path and a /root worker install stays an identity.
+      const expected = `${linuxHome}/.omp/plugins/demo/bin.js`;
+      assert.equal(doc.mcpServers.demo.args[0], expected, `mcp.json installed with args[0] ${JSON.stringify(doc.mcpServers.demo.args[0])}, expected the placeholder re-rooted at ${expected}`);
       assert.ok(!instMcp.toString('utf8').includes('C:'), 'installed mcp.json holds a Windows path');
     });
     attempt('A.6 logo.bin installed byte-identical', () => {
@@ -213,22 +219,22 @@ async function sectionB() {
   // Buffer or a { bytes } result either way.
   const asBytes = out => (Buffer.isBuffer(out) ? out : out.bytes);
   try {
-    const lf = Buffer.from('line one\nline two\n');
+    const lf = bytes('line one\nline two\n');
     attempt('B SKILL.md renders LF untouched', () => {
       const out = asBytes(renderForTarget('a/SKILL.md', lf));
       assert.equal(firstCR(out), -1, `renderForTarget('a/SKILL.md', LF bytes) introduced a 0x0D byte`);
       assert.ok(out.equals(lf), `renderForTarget('a/SKILL.md', LF bytes) changed the bytes: ${out.toString('hex')} != ${lf.toString('hex')}`);
     });
     attempt('B run.cmd renders CRLF', () => {
-      const out = asBytes(renderForTarget('a/run.cmd', Buffer.from('@echo off\n')));
-      assert.ok(out.includes(Buffer.from('\r\n')), `renderForTarget('a/run.cmd', LF bytes) produced no CRLF (hex ${out.toString('hex')}); *.cmd must render CRLF`);
+      const out = asBytes(renderForTarget('a/run.cmd', bytes('@echo off\n')));
+      assert.ok(out.includes(bytes('\r\n')), `renderForTarget('a/run.cmd', LF bytes) produced no CRLF (hex ${out.toString('hex')}); *.cmd must render CRLF`);
     });
     attempt('B logo.bin renders untouched', () => {
       const out = asBytes(renderForTarget('a/logo.bin', LOGO));
       assert.ok(out.equals(LOGO), `renderForTarget('a/logo.bin', binary) changed the bytes: ${out.toString('hex')} != ${LOGO.toString('hex')}`);
     });
     attempt('B render is idempotent', () => {
-      const once = asBytes(renderForTarget('a/run.cmd', Buffer.from('a\nb\n')));
+      const once = asBytes(renderForTarget('a/run.cmd', bytes('a\nb\n')));
       const twice = asBytes(renderForTarget('a/run.cmd', once));
       assert.ok(once.equals(twice), `renderForTarget is not idempotent: ${once.toString('hex')} != ${twice.toString('hex')}`);
     });

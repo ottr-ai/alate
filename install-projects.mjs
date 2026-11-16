@@ -14,7 +14,7 @@
 // silently. A refusal (invalid manifest, a path guard) writes nothing and exits 1. Snapshot
 // .md/.mdc items pass the sibling hidden-character gate before they install: a laced file
 // stays out per item, a copy this path installed before is removed, and the run exits 1.
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { assertSourceInside, canonicalizeBytes, checkDestination, describeProblem, fingerprint, indexExecPaths, parseArgs, PROVISION_ENV, readBaselines, renderForTarget, resolveDataDir, ruleProblems, safeRel, writeBaselines, writeProvisionResults } from './lib/data.mjs';
 
@@ -166,7 +166,10 @@ function install(root, manifestPath) {
   // rerun after fixing the cause. Upgrade to staging+rename if atomicity matters.
   // Modes come from the data repo's git index, never the filesystem (specs/canonical-form.md):
   // an index-executable snapshot installs 0755, everything else 0644; a data dir that is not
-  // a git checkout (or a missing git) gives 0644 everywhere. Keys already hold forward slashes.
+  // a git checkout (or a missing git) gives 0644 everywhere. The mode holds on create and
+  // update alike — writeFileSync's mode applies at creation only, so the chmodSync enforces
+  // it on an existing dest: a filesystem 0777 never survives a write. Keys already hold
+  // forward slashes.
   const execPaths = indexExecPaths(data.dir) ?? new Set();
   let added = 0, updated = 0, unchanged = 0;
   /** @type {Record<string, string>} */
@@ -176,8 +179,10 @@ function install(root, manifestPath) {
       unchanged++;
       if ((baselines?.[p.key] ?? null) !== p.fpSnap) updates[p.key] = p.fpSnap;
     } else {
+      const mode = execPaths.has(`projects/${p.key}`) ? 0o755 : 0o644;
       mkdirSync(dirname(p.dest), { recursive: true });
-      writeFileSync(p.dest, p.snapBytes, { mode: execPaths.has(`projects/${p.key}`) ? 0o755 : 0o644 });
+      writeFileSync(p.dest, p.snapBytes, { mode });
+      chmodSync(p.dest, mode);
       updates[p.key] = p.fpSnap;
       console.log(p.log);
       if (p.status === 'added') added++; else updated++;

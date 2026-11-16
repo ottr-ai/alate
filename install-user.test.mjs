@@ -519,7 +519,7 @@ try {
   const captured = Buffer.from(JSON.stringify({ marketplaces: [{ catalogPath: '/root/.omp/plugins/cache/marketplaces/m/marketplace.json' }] }));
   t = forTarget('omp/marketplaces.json', captured, winTarget);
   assert.equal(JSON.parse(t.bytes).marketplaces[0].catalogPath, 'C:\\Users\\me\\.omp\\plugins\\cache\\marketplaces\\m\\marketplace.json');
-  assert.deepEqual(t.notes, ['omp/marketplaces.json: 1 POSIX path(s) now point into C:\\Users\\me']);
+  assert.deepEqual(t.notes, ['omp/marketplaces.json: 1 path(s) now point into C:\\Users\\me']);
   const usr = Buffer.from(JSON.stringify({ node: '/usr/bin/node' }));
   t = forTarget('omp/agent/x.json', usr, winTarget);
   assert.equal(t.bytes, usr, 'a POSIX path outside the layer roots stays as captured');
@@ -580,7 +580,7 @@ try {
     assert.deepEqual(JSON.parse(t2.bytes), {
       a: { b: { p: '/home/u/.omp/deep.json' }, rel: '.omp/looks/posix', keep: [5, true, null] },
     });
-    assert.deepEqual(t2.notes, ['agents/x/meta.json: 1 Windows path(s) now point into /home/u']);
+    assert.deepEqual(t2.notes, ['agents/x/meta.json: 1 path(s) now point into /home/u']);
 
     // Repeated separators collapse into one split point.
     t2 = forTarget('agents/x/meta.json', Buffer.from(JSON.stringify({ p: 'C:\\\\me\\\\\\\\.omp\\\\a\\\\\\\\b.json' })), linux);
@@ -1235,6 +1235,19 @@ try {
   const modeOf = (h, rel) => statSync(join(h, rel)).mode & 0o777;
   assert.equal(modeOf(modeHome, '.omp/agent/bin/tool.sh'), 0o755, 'an index 100755 file installs 0755');
   assert.equal(modeOf(modeHome, '.omp/agent/skills/modey/hook.sh'), 0o644, 'a filesystem 0777 source installs 0644 from its index mode');
+
+  // The mode holds on update, not only at creation (specs/canonical-form.md): a write to
+  // an existing dest resets a filesystem 0777. A changed snapshot forces the write
+  // ('unchanged' entries never rewrite).
+  chmodSync(join(modeHome, '.omp/agent/skills/modey/hook.sh'), 0o777);
+  writeFileSync(join(modeData, 'user/omp/agent/skills/modey/hook.sh'), '#!/bin/sh\necho modey v2\n');
+  git('add', '-A');
+  // git add stages the source's filesystem 0777, so the index must hold 100644 again.
+  git('update-index', '--chmod=-x', 'user/omp/agent/skills/modey/hook.sh');
+  r = run(['--data', modeData, '--skip-plugins'], modeHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(modeOf(modeHome, '.omp/agent/skills/modey/hook.sh'), 0o644, 'an updated file takes its index mode over a filesystem 0777');
+  assert.equal(readFileSync(join(modeHome, '.omp/agent/skills/modey/hook.sh'), 'utf8'), '#!/bin/sh\necho modey v2\n', 'the updated bytes installed');
 
   // The verdict cache keys the rendered bytes (specs/canonical-form.md): the same logical
   // skill in a CRLF checkout and an LF checkout produces the same key, so the second install

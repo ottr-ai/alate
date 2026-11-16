@@ -1508,7 +1508,22 @@ try {
         const srcPath = join(workersRoot, '_all', file);
         if (!existsSync(srcPath)) continue;
         assertSourceInside(workersRoot, srcPath);
-        const src = readFileSync(srcPath);
+        let src = /** @type {Buffer} */ (readFileSync(srcPath));
+        // The _all fleet lists hold the canonical form like every other worker list
+        // (specs/canonical-form.md): tools.json resolves its per-OS data for this
+        // platform, every other list renders the target form, and a per-OS rule break
+        // refuses the whole run before any write.
+        if (file === 'tools.json') {
+          try {
+            const rendered = renderToolsJson(src, process.platform);
+            if (rendered === null) continue;
+            src = rendered;
+          } catch (err) {
+            throw new Error(`${srcPath}: ${/** @type {Error} */ (err).message.replace(/^tools\.json: /, '')}`);
+          }
+        } else {
+          src = renderForTarget(`workers/_all/${file}`, src);
+        }
         if (file === 'tools.json') validateTools(src, srcPath);
         else if (file === 'env.txt') validateEnv(src, srcPath);
         else if (file === 'requirements.txt') validateRequirements(src, srcPath);

@@ -1,7 +1,7 @@
 // Self-check for install-projects.mjs: node install-projects.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -275,6 +275,29 @@ try {
       const rN = runIn(dataN, wsN);
       assert.equal(rN.status, 0, rN.stderr);
       assert.equal(modeOf(join(wsN, 'iota', 'run.sh')), 0o644, 'a non-git data dir installs 0644');
+
+      // The mode holds on update, not only at creation (specs/canonical-form.md): a write
+      // resets a filesystem 0777 on the dest, and an index-100755 snapshot re-applies its
+      // mode to an existing file too. A changed snapshot forces the write ('unchanged'
+      // entries never rewrite).
+      put(dataG, 'projects/theta/notes.txt', 'notes v2\n');
+      put(dataG, 'projects/theta/run.sh', '#!/bin/sh\necho hi v2\n');
+      assert.equal(git('add', '.').status, 0);
+      // git add stages the filesystem mode, so the index exec bit must be re-applied.
+      assert.equal(git('update-index', '--chmod=+x', 'projects/theta/run.sh').status, 0, 'index chmod is required for the exec case');
+      assert.equal(git('-c', 'user.name=test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'snapshots v2').status, 0);
+      chmodSync(join(wsG, 'theta', 'notes.txt'), 0o777);
+      chmodSync(join(wsG, 'theta', 'run.sh'), 0o777);
+      const rG2 = runIn(dataG, wsG);
+      assert.equal(rG2.status, 0, rG2.stderr);
+      assert.match(rG2.stdout, /2 updated/, `the changed snapshots refresh: ${rG2.stdout}`);
+      assert.equal(modeOf(join(wsG, 'theta', 'run.sh')), 0o755, 'an updated file takes its index mode over a filesystem 0777');
+      assert.equal(modeOf(join(wsG, 'theta', 'notes.txt')), 0o644, 'an updated non-exec file takes its index mode over a filesystem 0777');
+      put(dataN, 'projects/iota/run.sh', '#!/bin/sh\necho hi v2\n');
+      chmodSync(join(wsN, 'iota', 'run.sh'), 0o777);
+      const rN2 = runIn(dataN, wsN);
+      assert.equal(rN2.status, 0, rN2.stderr);
+      assert.equal(modeOf(join(wsN, 'iota', 'run.sh')), 0o644, 'a refreshed file loses a filesystem 0777 even without a git index');
     } finally {
       process.umask(oldUmask);
     }
