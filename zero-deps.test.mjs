@@ -13,8 +13,10 @@ import { forAll, keepTemp } from './lib/data.mjs';
 // the fixture splits the keyword below and specifiers stay out of this file source.
 const EVIL_IMPORT = 'import x ' + 'fro' + "m 'left-pad';";
 
-// Matches the from / import / require keywords followed by a quoted specifier.
-const SPEC = /\b(?:from|import|require)\b\s*\(?\s*(['"])([^'"\n]+)\1/g;
+// Matches the from / import / require keywords followed by a quoted specifier. A
+// method call's `.from(` is content, not a specifier: Buffer.from('@scope/x') is
+// data, so the keyword must not sit right behind a dot.
+const SPEC = /(?<!\.)\b(?:from|import|require)\b\s*\(?\s*(['"])([^'"\n]+)\1/g;
 
 const MANIFESTS = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'bun.lock', 'bun.lockb', 'yarn.lock', 'pnpm-lock.yaml', 'deno.lock']);
 const CODE = /\.[cm]?[jt]s$/;
@@ -95,6 +97,17 @@ try {
   writeFileSync(join(declaredRoot, 'b.ts'), 'import x ' + "fro" + "m 'fastify/x';");
   assert.deepEqual(scan(declaredRoot).length, 1, `expected only left-pad violation, got: ${scan(declaredRoot).join('; ')}`);
   rmSync(declaredRoot, { recursive: true, force: true });
+
+  // A quoted string behind a method call's from is content, not a specifier:
+  // Buffer.from('@scope/x') must never read as an import of @scope/x, while a real
+  // import of an undeclared package still violates.
+  const methodRoot = mkdtempSync(join(tmpdir(), 'alate-zero-deps-method-'));
+  writeFileSync(join(methodRoot, 'package.json'), '{}');
+  writeFileSync(join(methodRoot, 'a.mjs'), "const b = Buffer.from('@scope/x');\nconst a = Array.from('left-pad');\n");
+  writeFileSync(join(methodRoot, 'b.mjs'), 'import x ' + "fro" + "m 'left-pad';");
+  const methodFound = scan(methodRoot);
+  assert.deepEqual(methodFound.length, 1, `expected only the real import, got: ${methodFound.join('; ')}`);
+  rmSync(methodRoot, { recursive: true, force: true });
 
   // The repo scan sees tracked paths only: an untracked stray lockfile or scratch file
   // cannot fail the gate, while the same paths staged (or committed) do.
