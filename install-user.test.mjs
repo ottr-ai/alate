@@ -1386,6 +1386,13 @@ try {
     assert.ok(!/\d+ installed/.test(r.stdout), 'nothing installs');
     assert.ok(!/\d+ deleted/.test(r.stdout), 'nothing deletes');
     assert.equal(readFileSync(callsLog, 'utf8'), crlfGitCalls, 'the refusal comes before any scan');
+    // A --commit argument never turns the guard off: the git HEAD decides when it
+    // answers, so a tracked checkout refuses its conversion even with the flag the
+    // server passes to a .git-less provision copy.
+    r = run(['--data', crlfGitData, '--commit', 'a'.repeat(40), '--skip-plugins'], crlfGitHome);
+    assert.equal(r.status, 1, 'a converted checkout refuses even with --commit');
+    assert.ok(r.stderr.includes('user/omp/agent/skills/cmdy/SKILL.md'), `the refusal names the converted file: ${r.stderr}`);
+    assert.ok(!r.stderr.includes('run.cmd'), 'the committed-CR file never appears in the refusal');
     // The committed state itself seeds: the board seed clones the data repo (--repo), and
     // the fresh LF-pinned clone carries the committed CR bytes of run.cmd.
     const crlfGh = join(tmp, 'crlf-gh');

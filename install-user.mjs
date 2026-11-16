@@ -1707,17 +1707,18 @@ try {
     }
   }
   if (crlfFiles.length) {
-    // The committed bytes come from the data dir's git HEAD when it answers: a --data
-    // checkout and a --repo seed clone both have .git. The server's provision copy of an
-    // imported repo has no .git but carries the imported --commit, and its bytes are
-    // that import's committed bytes by construction (the import clones with LF pinned).
-    // A data dir with neither cannot prove intent, so every CR text file stays a
-    // refusal. The probe only runs when candidates exist, so the clean path never pays
-    // for it, and each candidate costs one git spawn on the CR path only.
+    // Precedence (ALAT-183): the data dir's git HEAD decides when it answers — a --data
+    // checkout and a --repo seed clone both have .git, and a --commit argument never
+    // turns the guard off for a tree git can read. Only when git does not answer does
+    // the imported --commit carry the verdict: the server's provision copy has no .git,
+    // and its bytes are that import's committed bytes by construction (the import
+    // clones with LF pinned). A data dir with neither cannot prove intent, so every CR
+    // text file stays a refusal. The probe only runs when candidates exist, so the
+    // clean path never pays for it, and each candidate costs one git spawn on the CR
+    // path only.
+    const gitTracks = spawnSync('git', ['-C', data.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: childEnv() }).status === 0;
     const snapshotImport = args.values['--commit'] !== undefined;
-    const gitTracks = !snapshotImport && spawnSync('git', ['-C', data.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: childEnv() }).status === 0;
-    const converted = snapshotImport ? [] : crlfFiles.filter(rel => {
-      if (!gitTracks) return true; // a plain data dir cannot prove intent
+    const converted = gitTracks ? crlfFiles.filter(rel => {
       let work;
       try {
         work = readFileSync(join(data.dir, rel));
@@ -1726,7 +1727,7 @@ try {
       }
       const blob = spawnSync('git', ['-C', data.dir, 'cat-file', 'blob', `HEAD:${rel}`], { encoding: 'buffer', env: childEnv(), maxBuffer: work.length + (1 << 20) });
       return blob.status !== 0 || !blob.stdout.equals(work);
-    });
+    }) : snapshotImport ? [] : crlfFiles;
     if (converted.length) {
       converted.sort();
       const named = converted.slice(0, 10);
