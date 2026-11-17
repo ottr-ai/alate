@@ -111,6 +111,7 @@ release.
 - If the card lists a closed set, implement and test every element in the first commit. A closed set is a listed group of item kinds, entry paths, or states. Each element's test drives the payload shape that its real caller sends. A test that hand-builds the payload proves only one half. A refuse check keys on the whole entity (for a bundle folder, any list file), never on one representative file. Name the per-element evidence in the ready report.
 - A chain-green claim in a ready report cites one run of the verified-chain command copied verbatim from Commands. A reassembled command that drops any chain entry makes the claim false.
 - When a change adds or moves a check that more than one code path performs, put the card's rule before any mode branch. Give each entry path a fail-before test in the first commit.
+- A ready report states the exact observed result of each red-before check: the command, and each new test's fail or pass. It names any new test that passes before the fix, with the reason the test still pins the behavior.
 
 ## Merging changes
 
