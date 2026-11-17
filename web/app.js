@@ -754,7 +754,11 @@ function settingsView() {
       tokenStatus.textContent = settings.tokenSet ? 'Key saved. A GitHub key is stored.' : 'Key removed. No GitHub key is stored.';
     } catch (e) { tokenStatus.textContent = e.message; }
   };
-  tokenInput.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); saveKey(); } });
+  tokenInput.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' || ev.isComposing || ev.keyCode === 229) return;
+    ev.preventDefault();
+    saveKey();
+  });
   const auto = h('input', { type: 'checkbox', id: 'auto-update', checked: s.autoUpdate });
   auto.addEventListener('change', async () => {
     try { settings = await api('POST', '/api/settings', { autoUpdate: auto.checked }); } catch (e) { auto.checked = !auto.checked; tokenStatus.textContent = e.message; }
