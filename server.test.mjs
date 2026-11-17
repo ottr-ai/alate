@@ -4794,6 +4794,239 @@ try {
       assert.equal(Object.keys(rowsEx(await run({ 'upstreams.json': UP([]), 'user/omp/plugins/bun.lock': lockEsc }))).length, 1, 'an escaped quote keeps the stripper in sync');
     }
 
+    // Skill source URL rejects precede every upstream request, including URL normalization.
+    {
+      const commit = 'a'.repeat(40);
+      const base = 'https://github.com/reject-owner/reject-repo';
+      const invalid = [
+        ['foreign host', 'https://example.invalid/reject-owner/reject-repo'],
+        ['HTTP scheme', base.replace('https:', 'http:')],
+        ['FTP scheme', base.replace('https:', 'ftp:')],
+        ['SSH scheme', 'git@github.com:reject-owner/reject-repo.git'],
+        ['host suffix', base.replace('github.com', 'github.com.example.invalid')],
+        ['host prefix', base.replace('github.com', 'notgithub.com')],
+        ['credentials', base.replace('github.com', 'user@github.com')],
+        ['foreign credential host', base.replace('github.com', 'github.com@example.invalid')],
+        ['default port', base.replace('github.com', 'github.com:443')],
+        ['other port', base.replace('github.com', 'github.com:8443')],
+        ['query', `${base}?ref=main`],
+        ['empty query', `${base}?`],
+        ['fragment', `${base}#readme`],
+        ['empty fragment', `${base}#`],
+        ['leading whitespace', ` ${base}`],
+        ['trailing whitespace', `${base}\n`],
+        ['embedded whitespace', base.replace('reject-owner', 'reject\t-owner')],
+        ['literal backslash', `${base}/tree/${commit}/skills\\other`],
+        ['encoded backslash', `${base}/tree/${commit}/skills%5cother`],
+        ['encoded slash', `${base}/tree/${commit}/skills%2fother`],
+        ['encoded owner separator', base.replace('reject-owner', 'reject%2Fowner')],
+        ['encoded repo separator', base.replace('reject-repo', 'reject%5Crepo')],
+        ['owner dot', 'https://github.com/./reject-repo'],
+        ['owner traversal', 'https://github.com/../reject-repo'],
+        ['encoded owner traversal', 'https://github.com/%2e%2e/reject-repo'],
+        ['repo dot', 'https://github.com/reject-owner/.'],
+        ['repo traversal', 'https://github.com/reject-owner/..'],
+        ['encoded repo traversal', 'https://github.com/reject-owner/%2E%2e'],
+        ['suffix dot', `${base}/tree/${commit}/skills/./other`],
+        ['suffix traversal', `${base}/tree/${commit}/skills/../other`],
+        ['encoded suffix traversal', `${base}/tree/${commit}/skills/%2e%2e/other`],
+        ['mixed encoded traversal', `${base}/tree/${commit}/skills/.%2E/other`],
+        ['invalid owner', 'https://github.com/reject!owner/reject-repo'],
+        ['leading owner hyphen', 'https://github.com/-reject/reject-repo'],
+        ['double-encoded owner traversal', 'https://github.com/%252e%252e/reject-repo'],
+        ['double-encoded repo traversal', 'https://github.com/reject-owner/%252e%252e'],
+        ['double-encoded suffix traversal', `${base}/tree/${commit}/skills/%252e%252e/other`],
+        ['invalid repo', 'https://github.com/reject-owner/reject!repo'],
+        ['empty owner', 'https://github.com//reject-repo'],
+        ['empty repo', 'https://github.com/reject-owner/'],
+        ['empty middle segment', `${base}//tree/${commit}/skills`],
+        ['empty suffix segment', `${base}/tree/${commit}/skills//other`],
+        ['extra trailing segment', `${base}//`],
+        ['missing tree path', `${base}/tree/${commit}`],
+        ['empty tree path', `${base}/tree/${commit}/`],
+        ['missing commit', `${base}/tree//skills`],
+        ['short commit', `${base}/tree/${commit.slice(1)}/skills`],
+        ['long commit', `${base}/tree/${commit}a/skills`],
+        ['nonhex commit', `${base}/tree/${'g'.repeat(40)}/skills`],
+        ['branch reference', `${base}/tree/main/skills`],
+        ['tag reference', `${base}/tree/v1.0.0/skills`],
+        ['non-tree suffix', `${base}/blob/${commit}/SKILL.md`],
+        ['malformed escape', `${base}/tree/${commit}/skills/%zz`],
+        ['missing scheme', 'github.com/reject-owner/reject-repo'],
+        ['literal control character', `${base}\u0000`],
+        ['encoded control character', `${base}/tree/${commit}/skills/%00other`],
+        ['encoded DEL character', `${base}/tree/${commit}/skills/%7fother`],
+        ['null input', null],
+        ['number input', 17],
+        ['boolean input', true],
+        ['object input', {}],
+        ['array input', [base]],
+        ['unstringifiable object input', { toString: null, valueOf: null }, true],
+        ['prototype-named JSON input', JSON.parse('{"__proto__":{"repo":"reject-owner/reject-repo"}}')],
+      ];
+      const skills = Object.fromEntries(invalid.map(([label, sourceUrl], i) => [`reject-${i}`, {
+        sourceUrl, skillPath: 'skills/locked/SKILL.md', skillFolderHash: 'installed',
+      }]));
+      const realFetch = globalThis.fetch;
+      const requested = [];
+      // Record every attempted URL without a real connection, even if host validation regresses.
+      globalThis.fetch = async input => {
+        requested.push(String(input));
+        return new Response(JSON.stringify({ message: 'no fixture' }), { status: 404 });
+      };
+      let db;
+      try {
+        db = await run({ 'upstreams.json': UP([]), 'user/agents/.skill-lock.json': { skills } });
+        const r = rows(db);
+        const failures = invalid.flatMap(([label, sourceUrl, anyError], i) => {
+          const error = r[`reject-${i}`]?.error;
+          const rejected = anyError ? typeof error === 'string' && error.length > 0
+            : error === `cannot parse repo from sourceUrl ${sourceUrl}`;
+          return rejected ? [] : [label];
+        });
+        assert.deepEqual(failures, [], 'every invalid source produces an error row');
+        assert.ok(requested.every(u => u.startsWith(`${upBase}/gh/repos/${SHIPPED_PIN.repo}/`)),
+          `invalid sources make no requests: ${JSON.stringify(requested)}`);
+      } finally {
+        globalThis.fetch = realFetch;
+        db?.close();
+      }
+    }
+
+    // The published AGEN-102 lock keeps its origin; lock ref/path win in both check modes.
+    {
+      const locked = {
+        source: 'GoogleChrome/modern-web-guidance',
+        sourceType: 'github',
+        sourceUrl: 'https://github.com/GoogleChrome/modern-web-guidance/tree/4dd968349e54ca45a05dd5c818fb035c9054b022/skills/modern-web-guidance',
+        ref: 'v1.0.0',
+        version: '1.0.0',
+        skillPath: 'skills/modern-web-guidance/SKILL.md',
+        skillFolderHash: '2bafd62db079eae1a4b6c34d0af4f9c3490266a2',
+      };
+      const repoBase = 'https://github.com/GoogleChrome/modern-web-guidance';
+      const skills = Object.fromEntries([
+        ['modern-web-guidance', locked.sourceUrl],
+        ['different-url-pin', `${repoBase}/tree/${'a'.repeat(40)}/unrelated/url-folder`],
+        ['encoded-url-path', `${repoBase}/tree/${'b'.repeat(40)}/%73kills/modern-web-guidance`],
+        ['bare-source', repoBase],
+        ['bare-slash-source', `${repoBase}/`],
+        ['git-source', `${repoBase}.git`],
+        ['git-slash-source', `${repoBase}.git/`],
+      ].map(([name, sourceUrl]) => [name, { ...locked, sourceUrl }]));
+      const prefix = '/gh/repos/GoogleChrome/modern-web-guidance';
+      for (const releaseMode of [true, false]) {
+        handler = url => {
+          if (url.pathname === `${prefix}/releases`) return [200, releaseMode ? [
+            { tag_name: 'v2.0.0', draft: false, prerelease: false, published_at: old30, html_url: 'release-2' },
+            { tag_name: 'v1.0.0', draft: false, prerelease: false, published_at: old30, html_url: 'release-1' },
+          ] : []];
+          if (url.pathname === `${prefix}/git/trees/v1.0.0` || url.pathname === `${prefix}/git/trees/v2.0.0`)
+            return [200, { tree: [{ path: 'skills/modern-web-guidance', type: 'tree', sha: 'upstream-folder' }] }];
+          if (url.pathname === `${prefix}/commits`)
+            return [200, [{ sha: 'upstream-head', commit: { committer: { date: old30 } }, html_url: 'head-url' }]];
+          if (url.pathname === `${prefix}/compare/v1.0.0...v2.0.0`) return [200, { files: [] }];
+          return null;
+        };
+        hits.length = 0;
+        const db = await run({ 'upstreams.json': UP([]), 'user/agents/.skill-lock.json': { skills } });
+        try {
+          const r = rows(db);
+          for (const [name, entry] of Object.entries(skills)) {
+            assert.deepEqual([r[name].origin, r[name].kind, r[name].error ?? null, r[name].removed ?? false],
+              [entry.sourceUrl, 'skill', null, false], `${name}, releaseMode=${releaseMode}`);
+            assert.deepEqual([r[name].current, r[name].latest, r[name].target],
+              releaseMode ? ['v1.0.0', 'v2.0.0', 'v2.0.0'] : [locked.skillFolderHash, 'upstream-head', null],
+              `${name}: lock ref/path control the row`);
+          }
+          const ownHits = hits.filter(h => h.p.startsWith(`${prefix}/`));
+          const expectedPaths = releaseMode
+            ? [`${prefix}/releases`, `${prefix}/git/trees/v1.0.0`, `${prefix}/git/trees/v2.0.0`, `${prefix}/compare/v1.0.0...v2.0.0`]
+            : [`${prefix}/releases`, `${prefix}/commits`, `${prefix}/git/trees/v1.0.0`];
+          assert.deepEqual([...new Set(ownHits.map(h => h.p))].sort(), expectedPaths.sort(),
+            'neither the URL commit nor the URL path controls upstream requests');
+          if (!releaseMode) {
+            const commitHits = ownHits.filter(h => h.p === `${prefix}/commits`);
+            assert.equal(commitHits.length, Object.keys(skills).length);
+            for (const h of commitHits)
+              assert.deepEqual(h.q, { per_page: '1', path: 'skills/modern-web-guidance', sha: locked.ref });
+          }
+        } finally { db.close(); }
+      }
+    }
+
+    // Seeded boundary properties use one snapshot batch, not one update run per sample.
+    {
+      const samples = [];
+      forAll(rand => {
+        const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+        const word = () => Array.from({ length: 8 }, () => chars[Math.floor(rand() * chars.length)]).join('');
+        const owner = `Owner-${word()}`, repo = `repo_${word()}`;
+        const commit = Array.from({ length: 40 }, () => '0123456789abcdef'[Math.floor(rand() * 16)]).join('');
+        const base = `https://github.com/${owner}/${repo}`;
+        const formats = [base, `${base}/`, `${base}.git`, `${base}.git/`, `${base}/tree/${commit}/url/${word()}`];
+        const badBase = `https://github.com/invalid-${owner}/${repo}`;
+        const mutations = [
+          `${badBase}?ref=${word()}`,
+          `${badBase}#${word()}`,
+          `${badBase}/tree/${commit}/url/../${word()}`,
+          `${badBase}/tree/${commit}/url/%2e%2E/${word()}`,
+          `${badBase}/tree/${commit}/url%2F${word()}`,
+          `${badBase}/tree/${commit}/url%5c${word()}`,
+          `${badBase}/tree/${commit.slice(1)}/url`,
+          `${badBase}/tree/${commit}/`,
+          `${badBase}/tree/${commit}/url//${word()}`,
+          badBase.replace('github.com', 'github.com.example.invalid'),
+          badBase.replace('github.com', 'user@github.com'),
+          `${badBase} `,
+        ];
+        return { owner, repo, sourceUrl: formats[Math.floor(rand() * formats.length)], invalid: mutations[Math.floor(rand() * mutations.length)] };
+      }, sample => { samples.push(sample); });
+      const skills = Object.fromEntries(samples.flatMap((s, i) => [
+        [`property-valid-${i}`, { sourceUrl: s.sourceUrl, ref: 'v1.0.0', skillPath: 'skills/locked/SKILL.md', skillFolderHash: 'installed' }],
+        [`property-invalid-${i}`, { sourceUrl: s.invalid, ref: 'v1.0.0', skillPath: 'skills/locked/SKILL.md', skillFolderHash: 'installed' }],
+      ]));
+      const allowedPaths = new Set(samples.flatMap(s => [
+        `/gh/repos/${s.owner}/${s.repo}/releases`,
+        `/gh/repos/${s.owner}/${s.repo}/git/trees/v1.0.0`,
+      ]));
+      handler = url => {
+        if (!allowedPaths.has(url.pathname)) return null;
+        if (url.pathname.endsWith('/releases'))
+          return [200, [{ tag_name: 'v1.0.0', draft: false, prerelease: false, published_at: old30, html_url: 'property-release' }]];
+        return [200, { tree: [{ path: 'skills/locked', type: 'tree', sha: 'installed' }] }];
+      };
+      const realFetch = globalThis.fetch;
+      const requested = [];
+      globalThis.fetch = (input, init) => {
+        const url = String(input);
+        requested.push(url);
+        return url.startsWith(`${upBase}/`)
+          ? realFetch(input, init)
+          : Promise.reject(new Error('unexpected external request'));
+      };
+      hits.length = 0;
+      let db;
+      try {
+        db = await run({ 'upstreams.json': UP([]), 'user/agents/.skill-lock.json': { skills } });
+        const r = rows(db);
+        for (const [i, s] of samples.entries()) {
+          assert.deepEqual([r[`property-valid-${i}`].origin, r[`property-valid-${i}`].current,
+            r[`property-valid-${i}`].latest, r[`property-valid-${i}`].error ?? null],
+          [s.sourceUrl, 'v1.0.0', 'v1.0.0', null], JSON.stringify(s));
+          assert.equal(r[`property-invalid-${i}`].error, `cannot parse repo from sourceUrl ${s.invalid}`, JSON.stringify(s));
+        }
+        const ownPaths = requested.filter(u => !u.startsWith(`${upBase}/gh/repos/${SHIPPED_PIN.repo}/`));
+        assert.ok(ownPaths.every(u => u.startsWith(`${upBase}/`) && allowedPaths.has(new URL(u).pathname)),
+          'only generated valid repositories receive requests');
+        assert.deepEqual(new Set(ownPaths.map(u => new URL(u).pathname)), allowedPaths,
+          'every valid format extracts the exact owner and repository');
+      } finally {
+        globalThis.fetch = realFetch;
+        db?.close();
+      }
+    }
+
     // Skills: tree-hash compare, branch plumbing, gone folders, origin from sourceUrl, taken set.
     {
       handler = url => {
