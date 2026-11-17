@@ -7207,7 +7207,7 @@ try {
     {
       const envNames = ['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'SystemDrive', 'ComSpec', 'PATHEXT', 'PI_CODING_AGENT_DIR', 'ALATE_DATA', 'ALATE_KEEP_TEMP', 'SKILLSPECTOR_BIN', 'SKILLSPECTOR_VENV', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'NODE_USE_ENV_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'];
       const capFile = join(tmp, 'child-env.json');
-      const functional = { PATH: process.env.PATH, HOME: tmpHome, USERPROFILE: tmpHome, TEMP: serverTmp, TMP: serverTmp, TMPDIR: serverTmp };
+      const functional = { PATH: process.env.PATH, HOME: tmpHome, USERPROFILE: tmpHome, TEMP: serverTmp, TMP: serverTmp, TMPDIR: serverTmp, LANG: 'C', LC_ALL: 'C' };
       const E = mut10Spawn(['--port', '0', '--config', join(tmp, 'server-config-env.json'), '--db', join(tmp, 'state-env.db'), '--interval', '100000'],
         { ALATE_TEST_CHILD_ENV: capFile, ...functional, ...Object.fromEntries(envNames.filter(k => !(k in functional)).map((k, i) => [k, join(tmp, `allow-${i}`)])) });
       const { base, key } = await E.up;
