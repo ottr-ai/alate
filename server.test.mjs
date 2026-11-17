@@ -15,6 +15,356 @@ import { diffLines } from './web/diff.mjs';
 import { checkUpdates, cmpVer, initUpdates, isValidUpdateRecord, loadUpdates, rowErrorText } from './lib/updates.mjs';
 import { SHIPPED_REPO, SHIPPED_PIN, shippedSkills } from './lib/shipped.mjs';
 
+// ALAT-191 digest regressions start
+{
+  // The public seam is checkUpdates -> loadUpdates. All source bytes stay in this fixture.
+  const savedEnv = new Map(['ALATE_TEST_GITHUB_API_BASE', 'ALATE_TEST_FETCH_TIMEOUT_MS'].map(key => [key, process.env[key]]));
+  const savedFetch = globalThis.fetch;
+  const stalledResponses = new Map();
+  const finishStalledResponses = () => {
+    for (const [res, body] of stalledResponses) res.end(body);
+    stalledResponses.clear();
+  };
+  const commit = '72d06f52a2482885d9a64bd24b291c6e8628942c';
+  const folderSha = 'd'.repeat(40);
+  const oldFolderSha = 'e'.repeat(40);
+  const oldDate = '2020-01-01T00:00:00Z';
+  const repositories = new Map();
+  const requests = [];
+  const databases = [];
+  const regular = (path, bytes, mode = '100644') => ({ path, bytes: Buffer.from(bytes), mode });
+  const installed = [regular('SKILL.md', '# Test skill\n'), regular('nested/run.sh', '#!/bin/sh\n', '100755')];
+
+  // This oracle builds a directory hierarchy, then hashes one concatenated byte sequence.
+  // The production checker instead reads GitHub trees and blobs.
+  const cliDigest = files => {
+    const root = new Map();
+    for (const file of files) {
+      if (!['100644', '100755'].includes(file.mode)) continue;
+      const parts = file.path.split('/');
+      if (parts.slice(0, -1).some(part => part === '.git' || part === 'node_modules')) continue;
+      let dir = root;
+      for (const part of parts.slice(0, -1)) {
+        if (!dir.has(part)) dir.set(part, new Map());
+        dir = dir.get(part);
+      }
+      dir.set(parts.at(-1), file.bytes);
+    }
+    const flat = new Map();
+    const walk = (dir, prefix) => {
+      for (const [name, value] of dir) {
+        const path = prefix ? `${prefix}/${name}` : name;
+        if (value instanceof Map) walk(value, path);
+        else flat.set(path, value);
+      }
+    };
+    walk(root, '');
+    const bytes = [...flat.keys()].sort((a, b) => a.localeCompare(b))
+      .flatMap(path => [Buffer.from(path), flat.get(path)]);
+    return createHash('sha256').update(Buffer.concat(bytes)).digest('hex');
+  };
+
+  const sourceTree = (files, dir = 'skills/k', sha = folderSha) => {
+    const entries = new Map([[dir, { path: dir, type: 'tree', mode: '040000', sha }]]);
+    const blobs = new Map();
+    for (const file of files) {
+      const path = `${dir}/${file.path}`;
+      const parts = path.split('/');
+      for (let i = 1; i < parts.length; i++) {
+        const parent = parts.slice(0, i).join('/');
+        if (!entries.has(parent)) entries.set(parent, { path: parent, type: 'tree', mode: '040000', sha: folderSha });
+      }
+      const objectSha = createHash('sha1').update(file.bytes).digest('hex');
+      entries.set(path, {
+        path, type: file.mode === '160000' ? 'commit' : 'blob', mode: file.mode, sha: objectSha,
+        url: `http://127.0.0.1:${gh.address().port}/untrusted/do-not-fetch`,
+      });
+      blobs.set(objectSha, { encoding: 'base64', content: file.bytes.toString('base64'), size: file.bytes.length });
+    }
+    return { tree: [...entries.values()], blobs, truncated: false };
+  };
+  const release = (tag, publishedAt = oldDate) => ({
+    tag_name: tag, draft: false, prerelease: false, published_at: publishedAt,
+    html_url: `https://github.com/fake/digest/releases/tag/${tag}`,
+  });
+  const addRepo = (name, files, { mode = 'path', recent = false, missing = false, previous = installed } = {}) => {
+    const currentTree = missing ? { tree: [], blobs: new Map(), truncated: false } : sourceTree(files);
+    const repo = {
+      releases: mode === 'release' ? [release('v2.0.0', recent ? new Date().toISOString() : oldDate), release('v1.0.0')] : [],
+      trees: new Map([[commit, currentTree], ['HEAD', currentTree], ['v2.0.0', currentTree], ['v1.0.0', sourceTree(previous, 'skills/k', oldFolderSha)]]),
+      fault: null,
+    };
+    repositories.set(name, repo);
+    return repo;
+  };
+  const makeDb = skills => {
+    const db = new DatabaseSync(':memory:');
+    databases.push(db);
+    db.exec('CREATE TABLE files (path TEXT PRIMARY KEY, content BLOB NOT NULL)');
+    initUpdates(db);
+    db.prepare('INSERT INTO files (path, content) VALUES (?, ?)').run('user/agents/.skill-lock.json', JSON.stringify({ skills }));
+    return db;
+  };
+  const lock = (name, hash, dir = 'skills/k') => ({
+    sourceUrl: `https://github.com/fake/${name}`, skillPath: `${dir}/SKILL.md`, skillFolderHash: hash, ref: commit,
+  });
+  const age = (db, name) => db.prepare('INSERT OR REPLACE INTO update_seen (key, seenAt) VALUES (?, ?)').run(`skill:${name}|${commit}`, oldDate);
+  const read = async (db, name) => {
+    await checkUpdates(db, { securityFastPath: false });
+    const row = loadUpdates(db).updates.find(value => value.name === name);
+    assert.ok(row, `${name}: the checker returns the skill row`);
+    return row;
+  };
+  const expectState = (name, row, current, latest, target) => {
+    assert.deepEqual([row.current, row.latest, row.target, row.error ?? null], [current, latest, target, null], `${name}: comparison and target state`);
+  };
+  const gh = createServer((req, res) => {
+    const url = new URL(req.url, 'http://fixture');
+    requests.push({ path: url.pathname, sha: url.searchParams.get('sha'), folder: url.searchParams.get('path') });
+    res.setHeader('content-type', 'application/json');
+    const match = /^\/repos\/fake\/([^/]+)(.*)$/.exec(url.pathname);
+    const repo = match && repositories.get(match[1]);
+    const send = body => res.end(JSON.stringify(body));
+    if (repo) {
+      const path = match[2];
+      if (path === '/releases') return send(repo.releases);
+      if (path === '') return send({ archived: false });
+      if (path === '/commits') return send([{ sha: commit, html_url: `https://github.com/fake/${match[1]}/commit/${commit}` }]);
+      if (path.startsWith('/commits/')) return send({ sha: commit });
+      if (path.startsWith('/compare/')) return send({ files: [] });
+      if (path.startsWith('/git/trees/')) {
+        const tree = repo.trees.get(decodeURIComponent(path.slice('/git/trees/'.length)));
+        if (tree) {
+          if (repo.fault === 'missing-tree') return send({ truncated: false });
+          const invalidFile = {
+            'invalid-tree-path': { path: null },
+            'invalid-tree-type': { type: null },
+            'invalid-blob-sha': { sha: 'not-a-blob-sha' },
+            'unsupported-file-mode': { mode: '100600' },
+            'missing-file-sha': { sha: undefined },
+          }[repo.fault];
+          if (invalidFile) return send({
+            tree: tree.tree.map(entry => entry.type === 'blob' ? { ...entry, ...invalidFile } : entry),
+            truncated: false,
+          });
+          return send({ tree: tree.tree, truncated: repo.fault === 'truncated' || tree.truncated });
+        }
+      }
+      if (path.startsWith('/git/blobs/')) {
+        const sha = path.slice('/git/blobs/'.length);
+        const blob = [...repo.trees.values()].map(tree => tree.blobs.get(sha)).find(Boolean);
+        if (blob) {
+          if (repo.fault === 'failed-blob') { res.statusCode = 503; return send({ message: 'fixture blob failure' }); }
+          if (repo.fault === 'invalid-blob-shape') return send(null);
+          if (repo.fault === 'blob-timeout-headers' || repo.fault === 'blob-timeout-body') {
+            const body = JSON.stringify(blob);
+            const split = repo.fault === 'blob-timeout-body' ? Math.floor(body.length / 2) : 0;
+            if (split) {
+              res.flushHeaders();
+              res.write(body.slice(0, split));
+            }
+            stalledResponses.set(res, body.slice(split));
+            return;
+          }
+          if (repo.fault === 'invalid-base64') return send({ ...blob, content: '@@not-base64@@' });
+          if (repo.fault === 'invalid-encoding') return send({ ...blob, encoding: 'utf-8' });
+          if (repo.fault === 'invalid-size') return send({ ...blob, size: blob.size + 1 });
+          return send(blob);
+        }
+      }
+    }
+    res.statusCode = 404;
+    send({ message: 'fixture route not found' });
+  });
+  await new Promise(resolve => gh.listen(0, '127.0.0.1', resolve));
+  try {
+    process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${gh.address().port}`;
+
+    // Keep the two original failures first. The ref is a full commit, not a release tag.
+    for (const mode of ['path', 'release']) {
+      const name = `sha256-unchanged-${mode}`;
+      addRepo(name, installed, { mode });
+      const db = makeDb({ [name]: lock(name, cliDigest(installed)) });
+      age(db, name);
+      const row = await read(db, name);
+      expectState(name, row, mode === 'path' ? commit : 'v2.0.0', mode === 'path' ? commit : 'v2.0.0', null);
+      if (mode === 'path') {
+        assert.ok(requests.some(hit => hit.path === `/repos/fake/${name}/commits` && hit.sha === commit && hit.folder === 'skills/k'), `${name}: the exact commit ref and folder reach the commits endpoint`);
+        assert.ok(requests.some(hit => hit.path === `/repos/fake/${name}/git/trees/${commit}`), `${name}: the exact commit ref reaches the tree endpoint`);
+      }
+    }
+
+    const changes = [
+      ['nested', [...installed, regular('nested/deep/value.txt', 'new nested bytes\n')]],
+      ['binary', [installed[0], regular('nested/run.sh', [0, 255, 128, 10, 0], '100755')]],
+      ['rename', [installed[0], { ...installed[1], path: 'nested/renamed.sh' }]],
+    ];
+    for (const [change, files] of changes) {
+      for (const mode of ['path', 'release']) {
+        const name = `sha256-changed-${change}-${mode}`;
+        addRepo(name, files, { mode });
+        const db = makeDb({ [name]: lock(name, cliDigest(installed)) });
+        age(db, name);
+        const row = await read(db, name);
+        expectState(name, row, mode === 'path' ? cliDigest(installed) : 'v1.0.0', mode === 'path' ? commit : 'v2.0.0', mode === 'path' ? commit : 'v2.0.0');
+      }
+    }
+
+    {
+      const name = 'sha256-first-seen-path';
+      addRepo(name, changes[0][1]);
+      const db = makeDb({ [name]: lock(name, cliDigest(installed)) });
+      expectState(name, await read(db, name), cliDigest(installed), commit, null);
+      age(db, name);
+      expectState(`${name}-mature`, await read(db, name), cliDigest(installed), commit, commit);
+    }
+    {
+      const name = 'sha256-release-age';
+      const repo = addRepo(name, changes[0][1], { mode: 'release', recent: true });
+      const db = makeDb({ [name]: lock(name, cliDigest(installed)) });
+      expectState(name, await read(db, name), 'v1.0.0', 'v2.0.0', null);
+      repo.releases[0].published_at = oldDate;
+      expectState(`${name}-mature`, await read(db, name), 'v1.0.0', 'v2.0.0', 'v2.0.0');
+    }
+
+    for (const mode of ['path', 'release']) {
+      for (const changed of [false, true]) {
+        const name = `legacy-40hex-${changed ? 'changed' : 'unchanged'}-${mode}`;
+        addRepo(name, installed, { mode });
+        const hash = changed ? oldFolderSha : folderSha;
+        const db = makeDb({ [name]: lock(name, hash) });
+        age(db, name);
+        const latest = mode === 'path' ? commit : 'v2.0.0';
+        expectState(name, await read(db, name), changed ? (mode === 'path' ? hash : 'v1.0.0') : latest, latest, changed ? latest : null);
+        assert.equal(requests.filter(hit => hit.path.startsWith(`/repos/fake/${name}/git/blobs/`)).length, 0, `${name}: tree SHA locks do not fetch blob bytes`);
+      }
+      const name = `sha256-missing-folder-${mode}`;
+      addRepo(name, installed, { mode, missing: true });
+      const db = makeDb({ [name]: lock(name, cliDigest(installed)) });
+      age(db, name);
+      const row = await read(db, name);
+      assert.deepEqual([row.removed, row.target, row.error ?? null], [true, null, null], `${name}: a missing folder remains a removal notice`);
+    }
+
+    for (const mode of ['path', 'release']) {
+      const name = `sha256-ignored-entries-${mode}`;
+      const ignored = [
+        regular('.git/config', 'ignored root git'), regular('node_modules/a/index.js', 'ignored root dependency'),
+        regular('nested/.git/config', 'ignored nested git'), regular('nested/node_modules/a/index.js', 'ignored nested dependency'),
+        regular('linked', '../SKILL.md', '120000'), regular('submodule', 'submodule commit', '160000'),
+      ];
+      addRepo(name, [...ignored, ...installed].reverse(), { mode });
+      const db = makeDb({ [name]: lock(name, cliDigest(installed)) });
+      age(db, name);
+      const latest = mode === 'path' ? commit : 'v2.0.0';
+      expectState(name, await read(db, name), latest, latest, null);
+      const ignoredShas = ignored.map(file => createHash('sha1').update(file.bytes).digest('hex'));
+      assert.equal(requests.filter(hit => ignoredShas.some(sha => hit.path === `/repos/fake/${name}/git/blobs/${sha}`)).length, 0, `${name}: excluded entries never fetch blobs`);
+    }
+
+    for (const fault of [
+      'truncated', 'missing-tree', 'invalid-tree-path', 'invalid-tree-type',
+      'invalid-blob-sha', 'unsupported-file-mode', 'missing-file-sha',
+      'failed-blob', 'invalid-blob-shape', 'invalid-base64', 'invalid-encoding', 'invalid-size',
+      'blob-timeout-connect', 'blob-timeout-headers', 'blob-timeout-body',
+    ]) {
+      for (const mode of ['path', 'release']) {
+        const name = `sha256-${fault}-${mode}`;
+        const repo = addRepo(name, changes[0][1], { mode });
+        const db = makeDb({ [name]: lock(name, cliDigest(installed)) });
+        age(db, name);
+        const target = mode === 'path' ? commit : 'v2.0.0';
+        assert.equal((await read(db, name)).target, target, `${name}: a successful check seeds the stale target`);
+        repo.fault = fault;
+        let connectAttempts = 0;
+        try {
+          if (fault.startsWith('blob-timeout-')) process.env.ALATE_TEST_FETCH_TIMEOUT_MS = '300';
+          if (fault === 'blob-timeout-connect') {
+            const prefix = `${process.env.ALATE_TEST_GITHUB_API_BASE}/repos/fake/${name}/git/blobs/`;
+            globalThis.fetch = (url, options) => {
+              if (!String(url).startsWith(prefix)) return savedFetch(url, options);
+              connectAttempts++;
+              return new Promise((resolve, reject) => {
+                const { signal } = options;
+                if (signal.aborted) reject(signal.reason);
+                else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+              });
+            };
+          }
+          const row = await read(db, name);
+          assert.ok(row.error, `${name}: an incomplete source produces an error`);
+          assert.equal(row.target, null, `${name}: a source error clears the previous target`);
+          if (fault === 'blob-timeout-connect') assert.ok(connectAttempts > 0, `${name}: the blob connect seam receives the request`);
+          if (fault === 'blob-timeout-headers' || fault === 'blob-timeout-body') {
+            assert.ok(stalledResponses.size > 0, `${name}: the blob response reaches the stalled read point`);
+          }
+        } finally {
+          globalThis.fetch = savedFetch;
+          const timeout = savedEnv.get('ALATE_TEST_FETCH_TIMEOUT_MS');
+          if (timeout === undefined) delete process.env.ALATE_TEST_FETCH_TIMEOUT_MS;
+          else process.env.ALATE_TEST_FETCH_TIMEOUT_MS = timeout;
+          finishStalledResponses();
+        }
+      }
+    }
+
+    // Generate each input once. Replay the saved inputs without a second random draw.
+    let sampleIndex = 0;
+    const generate = rand => {
+      const name = `sha256-property-${sampleIndex++}`;
+      const files = [regular('SKILL.md', `# ${name}\n`)];
+      const count = 1 + Math.floor(rand() * 4);
+      for (let i = 0; i < count; i++) {
+        const prefix = ['a', 'Z', 'é', 'nested/deep', 'space dir'][Math.floor(rand() * 5)];
+        files.push(regular(`${prefix}/${i}-${Math.floor(rand() * 1000)}.bin`,
+          Array.from({ length: Math.floor(rand() * 25) }, () => Math.floor(rand() * 256)), rand() < 0.5 ? '100644' : '100755'));
+      }
+      const variant = Math.floor(rand() * 3);
+      const upstream = files.map(file => ({ ...file, bytes: Buffer.from(file.bytes) }));
+      if (variant === 1) upstream.at(-1).path += '.renamed';
+      if (variant === 2) upstream.at(-1).bytes = Buffer.concat([upstream.at(-1).bytes, Buffer.from([255])]);
+      for (let i = upstream.length - 1; i > 0; i--) {
+        const j = Math.floor(rand() * (i + 1));
+        [upstream[i], upstream[j]] = [upstream[j], upstream[i]];
+      }
+      return { name, files, upstream };
+    };
+    const samples = [];
+    forAll(generate, sample => samples.push(sample));
+    const propertyRepo = addRepo('digest-property', []);
+    const combined = { tree: [], blobs: new Map(), truncated: false };
+    const locks = {};
+    for (const sample of samples) {
+      const dir = `skills/${sample.name}`;
+      const tree = sourceTree(sample.upstream, dir);
+      combined.tree.push(...tree.tree);
+      for (const [sha, blob] of tree.blobs) combined.blobs.set(sha, blob);
+      locks[sample.name] = lock('digest-property', cliDigest(sample.files), dir);
+    }
+    propertyRepo.trees.set(commit, combined);
+    const db = makeDb(locks);
+    for (const sample of samples) age(db, sample.name);
+    await checkUpdates(db, { securityFastPath: false });
+    const rows = new Map(loadUpdates(db).updates.map(row => [row.name, row]));
+    let checkedSampleIndex = 0;
+    forAll(() => samples[checkedSampleIndex++], sample => {
+      const unchanged = cliDigest(sample.files) === cliDigest(sample.upstream);
+      expectState(sample.name, rows.get(sample.name), unchanged ? commit : cliDigest(sample.files), commit, unchanged ? null : commit);
+    });
+    assert.equal(requests.filter(hit => hit.path.startsWith('/untrusted/')).length, 0, 'sha256-source-boundary: blob reads use constructed API paths, not response URLs');
+  } finally {
+    globalThis.fetch = savedFetch;
+    finishStalledResponses();
+    for (const db of databases) db.close();
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await new Promise((resolve, reject) => gh.close(err => err ? reject(err) : resolve()));
+  }
+}
+// ALAT-191 digest regressions end
+
 // Proof-mark diff: change, pure addition, pure deletion, and no change.
 assert.deepEqual(diffLines(['a', 'b', 'c'], ['a', 'B', 'c']), [{ start: 1, count: 1, old: ['b'] }]);
 assert.deepEqual(diffLines(['a', 'c'], ['a', 'b', 'c']), [{ start: 1, count: 1, old: [] }]);

@@ -84,6 +84,14 @@ With `ALATE_LAYER=1` (compose.yaml sets it), `install-user.mjs` installs each pr
 - The dashboard shows upstream updates with a 7-day age gate. For a GitHub path or branch item, including skill and plugin heads, the 7 days run from the checker's first sight of the head commit. Every new commit restarts the wait. A GitHub release waits only 2 days when it marks a security fix: its notes cite a CVE or GHSA id or have a security-release line (for example `## Security release`), or a published advisory of its repository names it as patched. It waits 0 days when a live OSV record for a cited CVE binds an affected package to its GitHub repository, and that package's ranges cover the installed version but not the release. Only SemVer versions (`SEMVER` ranges, and the `npm` and `crates.io` ecosystems) can remove the gate. Other ecosystems, such as PyPI or Debian, keep the 2-day gate. It also waits 0 days when a [CISA](https://www.cisa.gov/cybersecurity-advisories/all.xml) alert or a [CERT-EU](https://cert.europa.eu/publications/security-advisories-rss) advisory names a cited CVE and, in its title, the product that the item's `check.advisoryProduct` in `upstreams.json` names (for example `"advisoryProduct": "PHP"`). Without that field, alerts do not count. A Node.js release that `index.json` marks as a security release gets the same tiers: its release announcement supplies the CVE ids, and the OSV record must bind `nodejs/node`. Set `securityFastPath` to `false` in `server-config.json` to keep the 7-day gate for all releases.
 - Skill update checks accept `https://github.com/<owner>/<repo>` with an optional `.git` suffix or trailing slash. They also accept `/tree/<commit>/<path>` after the repository, with a full 40-character hexadecimal commit and a nonempty path. The lock keeps its original `sourceUrl`. Checks use the lock's `ref` or fallback `branch`, plus `skillPath`, not the URL's commit or path.
 
+  A 64-character hexadecimal `skillFolderHash` selects the `skills@1.7.0` SHA-256 digest. Other values keep the GitHub tree SHA comparison.
+  Both path and release checks use the selected hash type. The digest sorts relative file paths with `localeCompare`.
+  It hashes each path, then its raw bytes. It excludes `.git` and `node_modules` directories at any depth, symlinks, and submodules.
+
+  Release checks match the installed folder against at most ten newest tags in the selected stream.
+  For SHA-256 locks, incomplete trees and failed or invalid blob reads produce an error. The error clears any previous target.
+  These checks compare upstream source bytes, not local patches. They do not approve replacement of local files.
+
 ## Data repo layout
 
 - Root `*.md` and `*.mdc` files: the rules, each with a `description:` frontmatter line.
