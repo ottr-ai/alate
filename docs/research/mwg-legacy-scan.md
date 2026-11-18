@@ -24,7 +24,7 @@ That design requires square corners, print-like type, hairlines, proof red, and 
 A modernization suggestion must not replace those choices without a separate design need.
 
 Agent-data card `AGEN-102` delivered the skill snapshot, lock entry, and SkillSpector review through the approved flow.
-The earlier worker resolved the skill. Separate host checks remain unverified.
+The earlier worker resolved the skill. Host proof for the approved source remains unverified.
 
 ### Historical AGEN-102 delivery evidence
 
@@ -50,14 +50,14 @@ This report does not treat that source risk as a scanner false positive.
 The project chain in that worker skipped real-scanner checks because it lacked the pinned scanner.
 The separate AGEN-102 gate supplied that skill scan evidence.
 That worker had no configured SSH host, and its board token permitted card creation only.
-The separate host's Node version, skill resolution, and active Alate import remain unverified.
-No direct host install, import, or provision occurred in this task.
+That check did not verify the separate host's Node version, skill resolution, or active Alate import.
+This card did not install, import, or provision a live home.
 
-### Current AGEN-107 worker proof
+### Historical AGEN-107 worker proof
 
-The active worker layer is `.alate/layers/ccb46e5c1127-1`.
+The earlier worker used layer `.alate/layers/ccb46e5c1127-1`.
 The actual `node --version` command returns `v24.21.0`.
-All 212 installed files match the current agent-data source by SHA-256.
+All 212 installed files matched the agent-data snapshot at that check by SHA-256.
 The source and installed lock entries have identical source, ref, version, skill path, and upstream tree hash.
 
 | Content | SHA-256 |
@@ -77,33 +77,110 @@ omp read 'skill://modern-web-guidance/guides/forms/forms.md:1-20'
 AGEN-107 records a passing SkillSpector `v2.13.0` gate for the corresponding final bytes.
 Its baseline accepts 75 exact findings, with 57 HIGH and 18 MEDIUM occurrences.
 Coverage remains partial, with 176 components under full inspection and 35 under partial inspection.
-This turn does not repeat that scan.
+That worker check did not repeat the producer's scan.
 These checks prove this worker only.
 
 ### Separate host proof
 
-The user requires proof from a host home outside the worker volume.
-Worker-only proof does not satisfy this requirement.
-The host check needs its Node version, active source snapshot, lock entry, and a fresh omp read.
-Its installed skill files must match the approved snapshot.
-No separate host proof is available to this card.
+The supplied result is `/data/alate/handoffs/ALAT-175-host-proof.md`.
+It describes a separate Windows home after normal Alate provision.
+It reports Node `v26.7.0`, omp `18.22.2`, 213 source and installed files, zero differences, and equal lock entries.
+Both fresh omp reads returned exit code `0` with empty stderr.
 
-The current agent-data checkout records AGEN-107's offline workflow instead of AGEN-102's CLI workflow.
-The published source pin remains unchanged.
-The historical AGEN-102 hashes and scan results do not prove AGEN-107's final local bytes.
-Host checks must use the current approved snapshot.
-The pinned one-off CLI audit below remains a separate historical result.
+The reported file hashes match the reviewed v1.0.1 snapshot below.
+They do not match the source that this card's spec approves.
+The current blocker is source approval, not host access.
+This review does not change the spec or treat an installed source as approval.
 
-This card checked the available host routes:
+## Review of the reported v1.0.1 source
 
-- The SSH capability lists no hosts.
-- None of the three checked SSH config paths exists.
-- The Docker CLI and an accessible default Docker socket are unavailable.
-- PowerShell, `cmd.exe`, and WSL interop are unavailable.
-- Ottr's `agentRefusal` permits card creation but rejects state reads and provision requests.
+The user requested a source review, not a source or spec change.
+The [approved spec](../specs/modern-web-guidance.md) still names v1.0.0.
+The [official tag][reported-v101-tag], [commit][reported-v101-commit], and published package metadata identify the reported source as v1.0.1.
 
-This turn changed no installed skill or authorization rule.
-The card remains blocked until an approved read-only host connection or direct host evidence becomes available.
+| Identifier | Reviewed value |
+| --- | --- |
+| Published source commit | `64a6d708f5a43f2cd3fde5d4d7db3905ba1bdf65` |
+| Upstream skill tree | `7c7d6612af788857352d452ebe263ad462351658` |
+| Agent-data snapshot | `fa8817288c74a3b3c2bb2ab5f22e9b953d70944c` |
+| Runtime package | `modern-web-guidance@0.0.206` |
+| Runtime snapshot label | `2026_11_10-47b4c80e` |
+
+### Identity, age, and local changes
+
+The [release][reported-v101-release] publication time is `2026-11-16T14:59:10Z`.
+The default seven-day point is `2026-11-23T14:59:10Z`.
+The inspected notes contain no security-release, CVE, or GHSA marker.
+This card has no approved source-age exception.
+
+All 210 local guides match the immutable [upstream archive][reported-source-archive] byte for byte.
+Only `SKILL.md` differs from an upstream skill file.
+The local snapshot also adds the exact baseline and a copy of the unchanged Apache-2.0 root license.
+Its 213 files contain no symlink.
+
+The upstream release changes 44 existing guides and adds `guides/js/js.md`.
+Changes include JavaScript APIs, anchor-position fallbacks, reduced-motion behavior, and focus contrast.
+The local comparison also removes earlier offline-index and referral transforms.
+This review does not independently validate every platform claim.
+
+| Final local content | SHA-256 |
+| --- | --- |
+| All-file manifest | `6f5750d4641e94616faba574769db605823410bc2c7c748789da736f3b156022` |
+| `SKILL.md` | `4e6f9df2e1802d2a20a756669ccae542216a0c8fdf2e3bd4d2f432f5de2fea89` |
+| Baseline | `4ed44b44ec36e16881efd986e65c18c4214bac1f67eab246379cd980e505eea3` |
+
+All three hashes match the supplied host result.
+The actual lock contains `sourceUrl` and `license`. The host excerpt omitted those fields.
+Its repository URL, immutable `ref`, skill path, and tree hash fit Alate's existing lock consumer.
+It has no `version` field, but the immutable commit maps to release v1.0.1.
+The spec must explicitly approve that representation before this card can accept it.
+
+### Runtime and safety boundaries
+
+The [runtime registry record][reported-runtime-version] identifies version `0.0.206`, Apache-2.0, and Node `>=22`.
+The registry publication time is `2026-11-09T14:56:53.055Z`, which meets the default age rule.
+The downloaded tarball matches the registry's SHA-512 integrity.
+It declares no npm dependency or lifecycle script.
+
+The local patch pins command and permission examples and requires public generic queries.
+It disables telemetry, forbids runtime source updates, and treats guide and CLI output as untrusted data.
+It preserves project approval, TypeScript, CSP, CSRF, browser, and accessibility requirements.
+Static runtime inspection confirms that `DISABLE_TELEMETRY=1` prevents watchdog creation.
+`DO_NOT_TRACK=1` alone does not stop that telemetry path.
+
+The runtime uses its own packaged corpus, not the vendored source.
+It has 204 guide files and 203 indexed IDs, against 210 vendored guides.
+Six vendored guides are absent from the package, and `prompt-api` is present but unindexed.
+Sixty-nine common guide files differ by bytes.
+The snapshot label does not select newer guide data or provide a vendored-source fallback.
+
+The runtime can therefore return older guidance, including an older browser-support matrix.
+Vendored files remain available through file tools, but the current skill does not define a clear precedence between the two corpora.
+The runtime's large-output helper uses a predictable temporary filename without exclusive or no-follow creation.
+A shared temporary directory needs separate validation.
+This review does not reproduce an overwrite exploit or execute the runtime.
+
+### Static gate evidence and limits
+
+The AGEN-103 log records a final gate pass after the final edits and before commit `fa88172`.
+The wrapper pins SkillSpector `v2.13.0` at bootstrap but does not verify an existing binary's version.
+The baseline contains 248 exact fingerprints and `rules: []`.
+The log records validation of 54 required HIGH review keys against current file bytes.
+These fingerprint and key counts are not current finding or severity totals.
+
+No final JSON scan, independent version output, or current coverage ledger remains in the reviewed producer record.
+Historical AGEN-102 and AGEN-107 totals do not prove current coverage.
+The unchanged email-issuer example still lacks public-destination and safe-redirect enforcement.
+That SSRF source risk remains unresolved, not an accepted false positive.
+
+The review uses static source reads, immutable-archive comparisons, and package integrity checks.
+It executes no Modern Web Guidance command, scanner, installer, or project gate.
+This review adds no credential value to the repository or report.
+Only public source identifiers enter network requests.
+
+The retained inputs and comparison results are under `/var/tmp/alat175-source-review-irnc5inh`.
+They include `source-comparison.json`, `runtime-review-inputs.json`, `runtime-corpus-comparison.json`, `release-review.json`, and `host-review-comparison.json`.
+Approval must address the changed source, commit-based lock format, source-only age exception, and the stated runtime and scan limits.
 
 ## Package identity and prior inspection
 
@@ -393,3 +470,8 @@ The later confirmation scan has its own result above. The pre-fix hashes still i
 [filter-source]: https://github.com/GoogleChrome/modern-web-guidance-src/blob/544c250575f7811d87fef8b1c064bc9571cbfb80/src/analyzing/scanners/file-filter.ts
 [ime-guide]: https://github.com/GoogleChrome/modern-web-guidance/blob/4dd968349e54ca45a05dd5c818fb035c9054b022/skills/modern-web-guidance/guides/forms/ime-safe-enter-submit.md
 [skill-tree]: https://api.github.com/repos/GoogleChrome/modern-web-guidance/contents/skills?ref=4dd968349e54ca45a05dd5c818fb035c9054b022
+[reported-v101-tag]: https://api.github.com/repos/GoogleChrome/modern-web-guidance/git/ref/tags/v1.0.1
+[reported-v101-commit]: https://api.github.com/repos/GoogleChrome/modern-web-guidance/commits/64a6d708f5a43f2cd3fde5d4d7db3905ba1bdf65
+[reported-v101-release]: https://github.com/GoogleChrome/modern-web-guidance/releases/tag/v1.0.1
+[reported-source-archive]: https://codeload.github.com/GoogleChrome/modern-web-guidance/zip/64a6d708f5a43f2cd3fde5d4d7db3905ba1bdf65
+[reported-runtime-version]: https://registry.npmjs.org/modern-web-guidance/0.0.206
