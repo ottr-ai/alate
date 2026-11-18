@@ -2899,9 +2899,120 @@ exit 0
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(readdirSync(llayers).sort(), ['nogit-2', 'nogit-3'], 'cleanup keeps the current layer and the one before it');
 
+    // Every case provisions a scratch home through the installer, with an older lease,
+    // an unleased stale layer, and a previous target. No case uses the machine home.
+    const leaseFailures = [];
+    const leaseCheck = (name, check) => {
+      try {
+        check();
+        console.log(`lease cleanup PASS: ${name}`);
+      } catch (error) {
+        leaseFailures.push(name);
+        console.log(`lease cleanup FAIL: ${name}: ${error.message}`);
+      }
+    };
+    let leaseCaseNumber = 0;
+    const leaseSentinel = Buffer.from('live lease sentinel\n\0unchanged bytes\n');
+    const provisionLeases = (registry, extraLeased = []) => {
+      const h = join(tmpReal, `lease-home-${++leaseCaseNumber}`);
+      const base = join(h, '.alate');
+      const layers = join(base, 'layers');
+      for (const id of ['nogit-1', 'nogit-2', 'nogit-3', ...extraLeased]) {
+        mkdirSync(join(layers, id), { recursive: true });
+        writeFileSync(join(layers, id, 'sentinel'), leaseSentinel);
+      }
+      symlinkSync(join(layers, 'nogit-3'), join(base, 'current'));
+      const record = join(base, 'in-use.json');
+      if (registry === 'directory') mkdirSync(record);
+      else if (registry === 'dangling') symlinkSync(join(base, 'missing-record'), record);
+      else if (registry !== undefined) writeFileSync(record, registry);
+      const result = runL(h, ['--skip-plugins', '--layer']);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(realpathSync(join(base, 'current')), join(layers, 'nogit-4'));
+      assert.deepEqual(readFileSync(join(layers, 'nogit-3', 'sentinel')), leaseSentinel,
+        'the previous layer retains its bytes');
+      assert.equal(lgot(join(layers, 'nogit-4'), '.omp/agent/config.yml'), lconfig,
+        'the current layer contains the new provision');
+      return { layers, record, h, result };
+    };
+    const retained = (layers, ids) => {
+      for (const id of ids) assert.deepEqual(readFileSync(join(layers, id, 'sentinel')), leaseSentinel,
+        `leased layer ${id} retains its sentinel bytes`);
+    };
+    const leaseRecord = ids => JSON.stringify({ layers: ids.map(id => ({ id, since: 1795000000000 })) });
+    let primaryLease;
+    leaseCheck('older-than-previous runner lease retains sentinel bytes', () => {
+      primaryLease = provisionLeases(leaseRecord(['nogit-1']));
+      retained(primaryLease.layers, ['nogit-1']);
+    });
+    leaseCheck('unleased stale layer is deleted beside a live lease', () => {
+      assert.ok(primaryLease, 'the primary lease provision succeeds');
+      assert.ok(!existsSync(join(primaryLease.layers, 'nogit-2')), 'cleanup deletes the unleased stale layer');
+    });
+    leaseCheck('multiple and duplicate runner leases retain every id', () => {
+      const ids = ['nogit-1', 'abcdefabcdef-5', 'nogit-1'];
+      const { layers } = provisionLeases(leaseRecord(ids), ['abcdefabcdef-5']);
+      retained(layers, ids);
+      assert.ok(!existsSync(join(layers, 'nogit-2')), 'multiple leases do not disable cleanup');
+    });
+    for (const [name, registry] of [
+      ['absent registry permits cleanup', undefined],
+      ['valid empty registry permits cleanup', leaseRecord([])],
+    ]) leaseCheck(name, () => {
+      const { layers } = provisionLeases(registry);
+      for (const id of ['nogit-1', 'nogit-2']) assert.ok(!existsSync(join(layers, id)), `${id} is stale`);
+    });
+    for (const [name, registry] of [
+      ['unreadable JSON', '{'],
+      ['unreadable registry directory', 'directory'],
+      ['dangling registry link', 'dangling'],
+      ['null root', 'null'],
+      ['boolean root', 'false'],
+      ['array root', '[]'],
+      ['missing layers', '{}'],
+      ['null layers', '{"layers":null}'],
+      ['object layers', '{"layers":{}}'],
+      ['string layers', '{"layers":"nogit-1"}'],
+      ['null entry', '{"layers":[null]}'],
+      ['obsolete string entry', '{"layers":["nogit-1"]}'],
+      ['array entry', '{"layers":[[]]}'],
+      ['missing id', '{"layers":[{"since":1795000000000}]}'],
+      ['non-string id', '{"layers":[{"id":1,"since":1795000000000}]}'],
+      ['invalid id', leaseRecord(['../nogit-1'])],
+      ['id with trailing newline', leaseRecord(['nogit-1\n'])],
+      ['mixed valid and invalid entries', JSON.stringify({ layers: [{ id: 'nogit-1', since: 1795000000000 }, null] })],
+    ]) leaseCheck(`${name} preserves every layer`, () => {
+      const { layers, result } = provisionLeases(registry);
+      retained(layers, ['nogit-1', 'nogit-2', 'nogit-3']);
+      assert.match(result.stdout, /in-use\.json (?:unreadable|unusable); keeping every layer/);
+    });
+    leaseCheck('valid empty registry resumes cleanup after an invalid record', () => {
+      const { h, layers, record } = provisionLeases('{');
+      retained(layers, ['nogit-1', 'nogit-2', 'nogit-3']);
+      writeFileSync(record, leaseRecord([]));
+      const result = runL(h, ['--skip-plugins', '--layer']);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(readdirSync(layers).sort(), ['nogit-4', 'nogit-5']);
+    });
+    leaseCheck('generated runner lease ids retain bytes without disabling cleanup', () => {
+      forAll(rand => {
+        const hex = Array.from({ length: 12 }, () => Math.floor(rand() * 16).toString(16)).join('');
+        const id = `${hex}-${1 + Math.floor(rand() * 100000)}`;
+        const since = Math.floor(rand() * 1800000000000);
+        return { id, since, duplicate: rand() < 0.5 };
+      }, ({ id, since, duplicate }) => {
+        const entry = { id, since };
+        const registry = JSON.stringify({ layers: [{ id: 'nogit-1', since: 0 }, entry, ...(duplicate ? [entry] : [])] });
+        const { layers } = provisionLeases(registry, [id]);
+        retained(layers, ['nogit-1', id]);
+        assert.ok(!existsSync(join(layers, 'nogit-2')), 'generated leases do not disable cleanup');
+      });
+    });
+    assert.deepEqual(leaseFailures, [], 'all runner lease cleanup cases pass');
+
     // A layer a running turn holds (in-use.json, the runner's record) survives clean-up; an
     // unreadable record stops deletion, safety over disk space.
-    writeFileSync(join(lbase, 'in-use.json'), JSON.stringify({ layers: ['nogit-2'] }));
+    writeFileSync(join(lbase, 'in-use.json'), JSON.stringify({ layers: [{ id: 'nogit-2', since: 1795000000000 }] }));
     r = runL(layerHome, ['--skip-plugins', '--layer']);
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(readdirSync(llayers).sort(), ['nogit-2', 'nogit-3', 'nogit-4'], 'an in-use layer survives cleanup');

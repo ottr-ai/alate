@@ -2206,20 +2206,34 @@ try {
       console.log(`switched ${currentLink} -> ${newLayerDir}`);
       // Clean-up keeps the live layer, the one before it, the new one, and anything a pinned
       // turn holds (in-use.json; absent means no runner has pinned a layer yet). An unreadable
-      // record stops deletion: safety over disk space. Keep entries are layer ids, never full
+      // or unusable record stops deletion: safety over disk space. Keep entries are layer ids, never full
       // paths: realpath values and join-built paths must never disagree about the spelling of
       // the same layer, or clean-up deletes the layer current points at.
       const keep = new Set([basename(/** @type {string} */ (newLayerDir))]);
       try { keep.add(basename(realpathSync(currentLink))); } catch { /* dangling: kept via newLayerDir */ }
       if (previousTarget) keep.add(basename(previousTarget));
       const inUsePath = join(base, 'in-use.json');
-      let inUse = null;
       let stopCleanup = false;
-      if (existsSync(inUsePath)) {
-        try { inUse = JSON.parse(readFileSync(inUsePath, 'utf8')); }
-        catch { console.log('in-use.json unreadable; keeping every layer'); stopCleanup = true; }
+      try {
+        // lstat distinguishes an absent registry from an unreadable dangling symlink.
+        if (lstatSync(inUsePath, { throwIfNoEntry: false })) {
+          /** @type {unknown} */
+          const inUse = JSON.parse(readFileSync(inUsePath, 'utf8'));
+          if (!inUse || typeof inUse !== 'object' || Array.isArray(inUse) ||
+              !('layers' in inUse) || !Array.isArray(inUse.layers) ||
+              !inUse.layers.every(lease => lease && typeof lease === 'object' && !Array.isArray(lease) &&
+                typeof lease.id === 'string' && lease.id === lease.id.trim() &&
+                /^(?:[0-9a-f]{12}|nogit)-\d+$/.test(lease.id))) {
+            console.log('in-use.json unusable; keeping every layer');
+            stopCleanup = true;
+          } else {
+            for (const lease of inUse.layers) keep.add(lease.id);
+          }
+        }
+      } catch {
+        console.log('in-use.json unreadable; keeping every layer');
+        stopCleanup = true;
       }
-      if (inUse) for (const id of inUse.layers ?? []) keep.add(id);
       if (!stopCleanup) for (const name of readdirSync(layersDir)) {
         if (!/^(?:[0-9a-f]{12}|nogit)-\d+$/.test(name) || keep.has(name)) continue;
         rmSync(join(layersDir, name), { recursive: true });

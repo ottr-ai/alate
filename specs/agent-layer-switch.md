@@ -31,8 +31,9 @@ running turn reads: it installs into a new folder, then one atomic rename makes 
   next name back onto the planted name.
 - Switch link: `<home>/.alate/current`, a symlink with an absolute target. It exists only as
   absent or as a symlink; anything else refuses the run before any write.
-- In-use record: `<home>/.alate/in-use.json`, shape `{"layers": ["<id>", ...]}`. The turn
-  runner maintains it (see "Turn pinning").
+- In-use record: `<home>/.alate/in-use.json`, shape `{"layers": [{"id": "<id>", "since": 1795000000000}]}`.
+  The runner maintains these lease entries (see "Turn pinning"). Alate uses each entry's `id` for retention.
+  The `since` timestamp is runner metadata. Alate does not expire leases from this value.
 
 ## Layer contents (the allowlist)
 
@@ -190,9 +191,9 @@ and no re-root can repair a foreign layer id.
 - At turn start the runner resolves `realpath(<home>/.alate/current)` once and passes that
   absolute path as the turn's `HOME` for the whole turn (`PI_CODING_AGENT_DIR` derives from
   it). It never re-reads `current`, so a later switch never touches the turn.
-- Before it spawns the turn, the runner adds the layer id to `in-use.json`; when the turn
-  ends, it removes the id again. This record is what makes clean-up safe. A runner that
-  does not record must not run turns against `current`.
+- Before it spawns the turn, the runner adds a lease entry with `id` and `since` to `in-use.json`.
+  When the turn ends, the runner releases its lease. A runner without a lease must not use `current`.
+- Runner lease acquisition and release remain outside this Alate change.
 
 ## Clean-up
 
@@ -200,12 +201,19 @@ After a successful switch, delete `<home>/.alate/layers/<name>` only when all of
 
 - `<name>` matches the layer-id shape (`<12-hex|nogit>-<digits>`),
 - it is not the new layer, not the realpath of `current`, and not the previous target,
-- it is not listed in `in-use.json`.
+- no lease entry in `in-use.json` names it through the entry's `id`.
 
-`current` and the one before it are always kept. If `in-use.json` exists but is unreadable,
-delete nothing and say so. If it is absent, no runner has recorded a pin yet, so no turn can
-hold a layer, and deletion proceeds. Stale entries only cost disk space; the runner prunes
-them at turn end.
+`current` and the previous target always remain. Multiple entries protect all their layer ids.
+Duplicate ids have the same effect as one entry. Alate does not use lease age to authorize deletion.
+
+Alate accepts a registry object with a `layers` array. Each entry must be an object with a valid layer `id`.
+An array entry, a missing id, a non-string id, or an id outside the layer-id shape makes the registry unusable.
+A null root, an array root, or a missing or non-array `layers` field also makes it unusable.
+The obsolete string-entry shape is not a second registry protocol.
+
+If the registry is unreadable or unusable, delete no layers and report the reason.
+An absent registry permits cleanup, as before. A valid empty `layers` array also permits cleanup.
+These rules assume that the runner records every live lease. Stale leases cost disk space but do not authorize deletion.
 
 ## Activation
 
@@ -232,8 +240,10 @@ them at turn end.
 - A failed rules install (bad data-root rule) behaves the same.
 - A second provision switches to `<commit>-2` and keeps the previous layer; a third deletes
   the oldest one.
-- Clean-up protects a layer listed in `in-use.json`; an unreadable `in-use.json` stops
-  deletion.
+- Clean-up preserves the exact sentinel bytes in a leased layer older than the previous target.
+  A separate assertion proves that clean-up deletes an unleased stale layer.
+- Runner-shaped records cover multiple entries and duplicate ids.
+- Unreadable and unusable registries preserve all layers. Absent and valid empty registries permit cleanup.
 - A pinned turn: resolve `current` before the provision, snapshot the tree, provision, the
   pinned tree is byte-identical and still resolves.
 - Machine part: a machine-edited `config.yml` with deployment blocks carries the blocks and
