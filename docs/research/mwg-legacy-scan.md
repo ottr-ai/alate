@@ -24,9 +24,9 @@ That design requires square corners, print-like type, hairlines, proof red, and 
 A modernization suggestion must not replace those choices without a separate design need.
 
 Agent-data card `AGEN-102` delivered the skill snapshot, lock entry, and SkillSpector review through the approved flow.
-The current worker resolves the skill. Separate host checks remain unverified.
+The earlier worker resolved the skill. Separate host checks remain unverified.
 
-### Skill delivery evidence
+### Historical AGEN-102 delivery evidence
 
 The lock records version `1.0.0`, ref `v1.0.0`, and the commit-pinned companion URL named in the task spec.
 Its Git tree hash is `2bafd62db079eae1a4b6c34d0af4f9c3490266a2`.
@@ -34,24 +34,49 @@ The [GitHub contents record][skill-tree] confirms that hash for the skill direct
 The snapshot retains all 209 upstream guides and the Apache-2.0 license.
 Local changes pin CLI commands and disable telemetry. Each changed file has a notice.
 
-The current worker's 212 skill files match the agent-data snapshot bytes.
+The earlier worker's 212 skill files matched the agent-data snapshot bytes.
 Its `SKILL.md` SHA-256 is `b454f9563ac7c7f172ae6661cb14db4c00db8112128288184e9ff0f45f9a5fd7`.
 A fresh `omp read 'skill://modern-web-guidance:1-30'` process returned exit code `0` and the local runtime rules.
 Bun launched that command directly, because the shell URI resolver rejects the ranged skill argument.
-The worker runs Node `v24.21.0`. The approved flow uses the universal `.agents/skills` root, not a second installer.
+That worker ran Node `v24.21.0`. The approved flow uses the universal `.agents/skills` root, not a second installer.
 
-The AGEN-102 record reports a passing SkillSpector `v2.13.0` static gate on the final snapshot.
+The AGEN-102 record reports a passing SkillSpector `v2.13.0` static gate on its final snapshot.
 It records zero active findings and 73 exact accepted findings, with 54 HIGH and 19 MEDIUM occurrences.
 The baseline has no broad rule. The external registry holds all 54 required HIGH review keys.
 Scan coverage remains partial, with 174 fully inspected components and 37 partly inspected components.
 The existing triage also records an unchanged SSRF risk in the email-ownership guide.
 This report does not treat that source risk as a scanner false positive.
 
-The project chain in this worker skips real-scanner checks because it lacks the pinned scanner.
-The separate AGEN-102 gate supplies the final skill scan evidence.
-This worker has no configured SSH host, and its board token permits card creation only.
+The project chain in that worker skipped real-scanner checks because it lacked the pinned scanner.
+The separate AGEN-102 gate supplied that skill scan evidence.
+That worker had no configured SSH host, and its board token permitted card creation only.
 The separate host's Node version, skill resolution, and active Alate import remain unverified.
 No direct host install, import, or provision occurred in this task.
+
+### Separate host proof
+
+The user requires proof from a host home outside the worker volume.
+Worker-only proof does not satisfy this requirement.
+The host check needs its Node version, active source snapshot, lock entry, and a fresh omp read.
+Its installed skill files must match the approved snapshot.
+No separate host proof is available to this card.
+
+The current agent-data checkout records AGEN-107's offline workflow instead of AGEN-102's CLI workflow.
+The published source pin remains unchanged.
+The historical AGEN-102 hashes and scan results do not prove AGEN-107's final local bytes.
+Host checks must use the current approved snapshot.
+The pinned one-off CLI audit below remains a separate historical result.
+
+This card checked the available host routes:
+
+- The SSH capability lists no hosts.
+- None of the three checked SSH config paths exists.
+- The Docker CLI and an accessible default Docker socket are unavailable.
+- PowerShell, `cmd.exe`, and WSL interop are unavailable.
+- Ottr's `agentRefusal` permits card creation but rejects state reads and provision requests.
+
+This turn changed no live home or authorization rule.
+The card remains blocked until an approved read-only host connection or direct host evidence becomes available.
 
 ## Package identity and prior inspection
 
@@ -248,7 +273,7 @@ The two IME cases preserved the field value, focus, and default behavior in both
 The empty-Enter request contained only the empty token field and produced the existing remove-key status.
 The browser reported no console messages or page errors.
 Both themes kept the same control geometry and showed no horizontal overflow.
-The current result file is `/tmp/alat-175-browser-ime-KCOHrZ/smoke-results.json`.
+That turn's result file was `/tmp/alat-175-browser-ime-KCOHrZ/smoke-results.json`.
 It records request metadata, not credentials. The owned browser session and fixture closed through their normal APIs.
 
 The two IME checks use synthetic `KeyboardEvent` events in a browser.

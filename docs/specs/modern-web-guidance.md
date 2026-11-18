@@ -66,6 +66,9 @@ Do not store credentials in the report, skill, lock, or dashboard code.
 1. Omp lists the skill after the agent-data import and provision.
    The lock names version `1.0.0`, the immutable published source, and its content hash.
    Record the host and worker Node versions and the pinned SkillSpector result.
+   Use separate fresh omp processes for the host home and each distinct worker home.
+   Record each home's source snapshot and installed file hashes.
+   A worker result does not satisfy the separate host requirement.
 2. The report exists and accounts for every scan finding across all five files.
 3. Any dashboard fixes pass `node server.test.mjs` and `npx tsc --noEmit`.
    Verify changed browser behavior in the rendered dashboard.
