@@ -53,6 +53,33 @@ That worker had no configured SSH host, and its board token permitted card creat
 The separate host's Node version, skill resolution, and active Alate import remain unverified.
 No direct host install, import, or provision occurred in this task.
 
+### Current AGEN-107 worker proof
+
+The active worker layer is `.alate/layers/ccb46e5c1127-1`.
+The actual `node --version` command returns `v24.21.0`.
+All 212 installed files match the current agent-data source by SHA-256.
+The source and installed lock entries have identical source, ref, version, skill path, and upstream tree hash.
+
+| Content | SHA-256 |
+| --- | --- |
+| All-file manifest | `8f5863de0ec2e5b4ef857bdfde9f8d0914f25ba7d09ad088c794ae314bc1c12e` |
+| `SKILL.md` | `2eccf5b7ad52412a34586296e734b5bb294f39c330c12089a3de2af937a7d2ce` |
+| `.skillspector-baseline.yaml` | `2aec50f80b87e6414932a9ac40ead494c23bf8c07325f9f3600ecd3ccadd88eb` |
+
+Bun launched a fresh omp process for each read with an explicit environment without credential variables.
+Both commands returned exit code `0`, the expected installed path and local file text, and no stderr:
+
+```sh
+omp read 'skill://modern-web-guidance:1-45'
+omp read 'skill://modern-web-guidance/guides/forms/forms.md:1-20'
+```
+
+AGEN-107 records a passing SkillSpector `v2.13.0` gate for the corresponding final bytes.
+Its baseline accepts 75 exact findings, with 57 HIGH and 18 MEDIUM occurrences.
+Coverage remains partial, with 176 components under full inspection and 35 under partial inspection.
+This turn does not repeat that scan.
+These checks prove this worker only.
+
 ### Separate host proof
 
 The user requires proof from a host home outside the worker volume.
@@ -75,7 +102,7 @@ This card checked the available host routes:
 - PowerShell, `cmd.exe`, and WSL interop are unavailable.
 - Ottr's `agentRefusal` permits card creation but rejects state reads and provision requests.
 
-This turn changed no live home or authorization rule.
+This turn changed no installed skill or authorization rule.
 The card remains blocked until an approved read-only host connection or direct host evidence becomes available.
 
 ## Package identity and prior inspection
