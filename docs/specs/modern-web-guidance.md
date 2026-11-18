@@ -2,25 +2,40 @@
 
 ## Behavior
 
-Use the published `modern-web-guidance` skill at version `1.0.0` under Apache-2.0.
-The published repository pin is `4dd968349e54ca45a05dd5c818fb035c9054b022`.
-The source URL is <https://github.com/GoogleChrome/modern-web-guidance/tree/4dd968349e54ca45a05dd5c818fb035c9054b022/skills/modern-web-guidance>.
-The npm CLI pin is `modern-web-guidance@1.0.0`.
-The registry published this version on 2026-11-10, more than seven days before this task.
+Use the published `modern-web-guidance` skill at release `v1.0.1` under Apache-2.0.
+The published repository pin is `64a6d708f5a43f2cd3fde5d4d7db3905ba1bdf65`.
+The upstream skill tree is `7c7d6612af788857352d452ebe263ad462351658`.
+The source repository is <https://github.com/GoogleChrome/modern-web-guidance.git>.
+The skill folder is `skills/modern-web-guidance`.
+The separate runtime pin is `modern-web-guidance@0.0.206`.
+Its snapshot label is `2026_11_10-47b4c80e`, not a selector for the executable or guide data.
+
+The user approved this exact source, runtime, and commit-based lock format after the source review.
+The approval includes only a source-age exception for the release published at `2026-11-16T14:59:10Z`.
+It does not waive SkillSpector findings, the scanner pin, Node requirements, or any other safeguard.
+Runtime acquisition and future source or runtime changes retain the default seven-day age rule.
 
 Install the skill through the `add-third-party-skill` board flow.
 That flow stores the skill and its lock entry in agent-data, not alate.
-Agent-data card `AGEN-102` owns those edits and the SkillSpector review.
+Agent-data owns the source, lock, and SkillSpector review. AGEN-103 supplies the approved v1.0.1 snapshot.
 Alate then imports and provisions the snapshot through its existing path after integration.
 The install must make the skill available to omp and the intended Ottr workers.
-The lock must name the immutable source, version, and content hash.
-Any skill command that uses the CLI must use the same version pin.
-Set `DISABLE_TELEMETRY=1` in each skill command example.
-The upstream CLI sends raw search queries by default, so private project details must not enter that path.
-The lock uses the commit-pinned `sourceUrl` and the published tag `v1.0.0` in `ref`.
-For a GitHub source, record the skill directory's Git tree hash, not the `SKILL.md` SHA-256.
+The lock must retain the repository `sourceUrl`, immutable commit in `ref`, skill path, and upstream tree hash.
+The immutable commit identifies release v1.0.1 without a separate `version` field.
+For a GitHub source, use the skill directory's Git tree hash, not the `SKILL.md` SHA-256.
+Any executable skill command must use the exact runtime pin.
+Set `DISABLE_TELEMETRY=1` and `DO_NOT_TRACK=1` for each runtime command.
+Use only generic public queries. Do not send source code, private project details, paths, credentials, or personal data.
+Preserve existing approval and sandbox requirements before package acquisition or execution.
+Do not use runtime `install`, `update`, or `uninstall` commands.
 
-Run the pinned CLI's `legacy-scan` before the fix on these files:
+The vendored source has 210 guides. The runtime has a separate, older packaged corpus.
+The source pin and snapshot label do not make the runtime use the vendored files.
+Record the corpus difference and the static review limits without claiming complete platform or security validation.
+
+The completed dashboard audit uses the reviewed `modern-web-guidance@1.0.0` artifact, not the skill's separate runtime pin.
+Keep its original version, source hashes, and findings as historical audit evidence.
+The pre-fix and confirmation scans cover these files:
 
 - `web/index.html`
 - `web/style.css`
@@ -64,8 +79,11 @@ Do not store credentials in the report, skill, lock, or dashboard code.
 ## Acceptance checks
 
 1. Omp lists the skill after the agent-data import and provision.
-   The lock names version `1.0.0`, the immutable published source, and its content hash.
-   Record the host and worker Node versions and the pinned SkillSpector result.
+   The lock identifies the approved release through its immutable commit and upstream tree hash.
+   Record host and worker Node versions of 22 or later.
+   Record the pinned SkillSpector v2.13.0 result and its coverage limits.
+   Preserve exact baseline reasons and every required external review key.
+   Source-age approval is not approval of a scanner finding or a weaker scanner gate.
    Use separate fresh omp processes for the host home and each distinct worker home.
    Record each home's source snapshot and installed file hashes.
    A worker result does not satisfy the separate host requirement.

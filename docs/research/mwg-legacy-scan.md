@@ -24,7 +24,7 @@ That design requires square corners, print-like type, hairlines, proof red, and 
 A modernization suggestion must not replace those choices without a separate design need.
 
 Agent-data card `AGEN-102` delivered the skill snapshot, lock entry, and SkillSpector review through the approved flow.
-The earlier worker resolved the skill. Host proof for the approved source remains unverified.
+The host and shared worker home now match the approved v1.0.1 snapshot, as the final evidence below records.
 
 ### Historical AGEN-102 delivery evidence
 
@@ -87,15 +87,15 @@ It describes a separate Windows home after normal Alate provision.
 It reports Node `v26.7.0`, omp `18.22.2`, 213 source and installed files, zero differences, and equal lock entries.
 Both fresh omp reads returned exit code `0` with empty stderr.
 
-The reported file hashes match the reviewed v1.0.1 snapshot below.
-They do not match the source that this card's spec approves.
-The current blocker is source approval, not host access.
-This review does not change the spec or treat an installed source as approval.
+The reported file hashes match the approved v1.0.1 snapshot below.
+The result passes the source, file-equality, lock-equality, Node, and fresh-read checks.
+This card accepts the supplied host result as data without a new live-host command.
 
-## Review of the reported v1.0.1 source
+## Approved v1.0.1 source and review
 
-The user requested a source review, not a source or spec change.
-The [approved spec](../specs/modern-web-guidance.md) still names v1.0.0.
+The user first requested a review before approval.
+The user then approved the reviewed v1.0.1 contract.
+The [approved spec](../specs/modern-web-guidance.md) now records that source, its separate runtime, and the source-only age exception.
 The [official tag][reported-v101-tag], [commit][reported-v101-commit], and published package metadata identify the reported source as v1.0.1.
 
 | Identifier | Reviewed value |
@@ -111,7 +111,8 @@ The [official tag][reported-v101-tag], [commit][reported-v101-commit], and publi
 The [release][reported-v101-release] publication time is `2026-11-16T14:59:10Z`.
 The default seven-day point is `2026-11-23T14:59:10Z`.
 The inspected notes contain no security-release, CVE, or GHSA marker.
-This card has no approved source-age exception.
+The user approved a source-only age exception for this exact pin.
+The approval does not waive a SkillSpector finding, the scanner pin, or Node requirements.
 
 All 210 local guides match the immutable [upstream archive][reported-source-archive] byte for byte.
 Only `SKILL.md` differs from an upstream skill file.
@@ -133,7 +134,7 @@ All three hashes match the supplied host result.
 The actual lock contains `sourceUrl` and `license`. The host excerpt omitted those fields.
 Its repository URL, immutable `ref`, skill path, and tree hash fit Alate's existing lock consumer.
 It has no `version` field, but the immutable commit maps to release v1.0.1.
-The spec must explicitly approve that representation before this card can accept it.
+The user approved this commit-based representation without a separate `version` field.
 
 ### Runtime and safety boundaries
 
@@ -178,9 +179,112 @@ It executes no Modern Web Guidance command, scanner, installer, or project gate.
 This review adds no credential value to the repository or report.
 Only public source identifiers enter network requests.
 
-The retained inputs and comparison results are under `/var/tmp/alat175-source-review-irnc5inh`.
-They include `source-comparison.json`, `runtime-review-inputs.json`, `runtime-corpus-comparison.json`, `release-review.json`, and `host-review-comparison.json`.
-Approval must address the changed source, commit-based lock format, source-only age exception, and the stated runtime and scan limits.
+The earlier review wrote its inputs and comparisons under `/var/tmp/alat175-source-review-irnc5inh`.
+Those temporary files are absent from the current worker.
+The hashes and observations above preserve that review's results without a reconstructed raw artifact.
+
+### Final host and worker acceptance
+
+The final checks wrote their results under `/tmp/alat175-final-j8kRVl`.
+`accepted-host-proof.json` records acceptance of the separate Windows host result against the updated spec.
+It confirms the approved pin, zero differences, equal lock entries, matching hashes, Node `v26.7.0`, and both successful fresh reads.
+
+The current worker uses the approved agent-data layer.
+All 213 installed files match the source bytes and the host manifest.
+The complete source and installed lock entries are equal.
+The actual `node --version` command returns `v24.21.0`.
+Fresh omp processes read the skill and `guides/forms/forms.md`, each with exit code `0` and empty stderr.
+`delivery-and-cache.json` and `fresh-worker-reads.json` record these checks.
+
+The final pinned gate evidence is an existing Alate cache pass, not a fresh scan.
+The check rebuilt the exact `skill-pass-fmt-3` key with canonical rendered bytes and all 103 matching review entries.
+That exact entry in `/root/.alate/skillspector-pass.json` has value `true`.
+
+| Cached verdict component | Value |
+| --- | --- |
+| Skill content hash | `f1f646e4b317253d5d434727c7d1c8799a47a771778069a6a74462a801b9a53f` |
+| Scanner pin | `v2.13.0` |
+| Recorded scanner version | `SkillSpector v2.13.0` |
+| Review-entry digest | `31633d3973fc595b6f3c73f9a3d05f3664e0633ee7b37f5ace03d3773ef83670` |
+| Scan arguments | `--no-llm --fail-on-findings --use-shipped-baseline --show-suppressed --format json` |
+
+The installer probes the exact scanner version before it trusts a cached verdict.
+It records a pass only after no active issue or unreviewed acceptance remains.
+The approved baseline has 248 distinct exact fingerprints, scanner version `2.13.0`, and `rules: []`.
+The check changed no baseline, review entry, severity rule, or gate threshold.
+`pinned-scan-cache-proof.json` records the key and result.
+
+The cache contains no raw finding totals or parser coverage ledger.
+These limits remain explicit.
+The namespace probe refused a new isolated scan, so this check did not execute the scanner inside the shared home.
+
+### Approval interpretation
+
+The explicit user choice approves only the reviewed source-age exception.
+The prompt gate's default interpretation as a SkillSpector finding exception conflicts with that choice and was not used.
+No gate-generated assumption replaces the user's approval.
+
+## Final project verification
+
+### Acceptance review
+
+| Requirement | Evidence |
+| --- | --- |
+| Skill available on the separate host and intended workers, with a pinned source and hash | The supplied Windows host result and fresh reads in the shared worker home match all 213 approved files. The lock identifies v1.0.1 through commit `64a6d708f5a43f2cd3fde5d4d7db3905ba1bdf65` and tree `7c7d6612af788857352d452ebe263ad462351658`. Host Node is `v26.7.0`; worker Node is `v24.21.0`. The exact pinned SkillSpector cache verdict and its limits are recorded above. |
+| Report covers every finding in all five requested files | The complete observed-result table lists each file. The only occurrence was the GitHub key field's Enter handler in `web/app.js`; the fix guards both composition signals. The post-fix scan returned zero occurrences across the same five inputs. No finding received a justified exemption. |
+| Dashboard fix preserves behavior and passes server and TypeScript checks | The browser regression table records the fail-before and pass-after results. All twelve resumed browser checks passed across light and dark themes. The full chain below passed `node server.test.mjs` and `npx tsc --noEmit`. |
+| No added dependency and the exact verified chain passes | `npm ls --depth=0` lists the same six direct dependencies as the initial inventory. Both manifest hashes below equal the initial hashes. The full chain returned exit code `0`, including its final home guard. |
+| README checked against the result | The task changes no setup, dependency, dashboard layout, style, or copy. Those README instructions remain unchanged. The independently observed layer-retention defects are tracked separately below. |
+
+The final direct dependency inventory is `@fontsource-variable/jetbrains-mono@5.3.0`, `@fontsource-variable/source-serif-4@5.3.0`, `@stryker-mutator/core@10.0.0`, `@types/node@24.19.1`, `fastify@5.12.7`, and `typescript@5.9.3`.
+
+| Unchanged file | SHA-256 |
+| --- | --- |
+| `package.json` | `d2e8830c999603d76a0234c52ec350329e566d8a940f843c0129d9bc64872758` |
+| `package-lock.json` | `5dc16a0f99f2883850dea25d1aa667ea27b974bbef17ce529ba84baa4db98841` |
+
+### Exact chain
+
+The final run used this command verbatim from `AGENTS.md`:
+
+```sh
+npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && node zero-deps.test.mjs && node license-gate.test.mjs && node crlf.test.mjs && node home-guard.test.mjs && node home-guard.test.mjs record && node sync.mjs "$(mktemp -d)" --data examples/data && node sync.test.mjs && node install-user.test.mjs && node sync-user.test.mjs && node sync-projects.test.mjs && node install-projects.test.mjs && node lib/bundles.test.mjs && node lib/canonical.test.mjs && node install-bundles.test.mjs && node canonical-form.test.mjs && node architecture.test.mjs && node clone.test.mjs && node skills/create-data-repo/scan-secrets.test.mjs && node scripts/mutant-run.test.mjs && npx tsc --noEmit && node lib/env-proxy.test.mjs && node server.test.mjs && node home-guard.test.mjs check
+```
+
+It returned exit code `0` in 135.09 seconds.
+The log is `/tmp/alat175-final-j8kRVl/verified-chain-active.log`.
+`verified-chain-active-result.json` records the exact command and result.
+The production-only npm audit reported zero vulnerabilities.
+`npm ci` still reported two existing moderate development-tooling vulnerabilities; this task changed no dependency.
+The chain's optional real-scanner checks skipped because no pinned scanner was available to that test environment.
+The skill verdict is the exact Alate cache pass described above, not a new scan.
+Mutation gates did not run in this work turn.
+
+### Home-guard failure and unchanged retry
+
+The preceding full run passed the application checks but failed its final home guard.
+The guard reported 31,285 removed entries from this long-running turn's pinned layer.
+That layer's skill files were gone while the turn remained live, and the live lease registry contained no layer ids.
+The grievance query for the failure interval returned no rows.
+
+The final run used a fresh process with the current active layer, `/root/.alate/layers/0e5a09857bae-6`, as `HOME` and `USERPROFILE`, with its `.omp/agent` as `PI_CODING_AGENT_DIR`.
+Before the chain, all 213 skill files matched the approved manifest and both fresh omp reads passed.
+`active-chain-home.json` records these checks.
+The guard snapshot was `/tmp/alat175-final-j8kRVl/home-guard-active.json`.
+The skill remained present after the final guard.
+The retry added no guard exemption and changed no live lease or installed file. It did not manually stop a process.
+
+`ALAT-195` owns the Alate cleanup consumer's mismatch with Ottr's object-shaped lease entries.
+`OTTR-1132` owns the independent shared-layer acquisition and release lifetime defect.
+These defects are outside the dashboard handler change and remain separate tasks.
+
+### Delivery deviations
+
+- The approved flow installs into the universal `.agents/skills` directory, not a second managed-skills copy. Fresh omp processes resolve that directory.
+- After review, the user approved source v1.0.1, its commit-based lock representation, runtime `0.0.206`, and only the exact source-age exception. The dashboard audit remains evidence for its originally inspected `1.0.0` artifact.
+- The final SkillSpector proof uses the installer's exact cached-pass mechanism. Raw current finding totals and coverage remain unavailable; no finding, severity, scanner-version, or Node requirement was waived.
+- The real-browser regression check replaces a new permanent DOM test because the existing Node suite has no DOM runner. The two composition checks were red before the fix. Ordinary Enter and Escape already passed before the fix and remain controls for unchanged behavior. Save key and empty Enter were checked after the fix, not claimed as fail-before cases.
+- The fix changes keyboard behavior only. It adds no visual layout, style, or copy change, so this task adds no UI screenshot or README screenshot.
 
 ## Package identity and prior inspection
 
@@ -353,6 +457,15 @@ The README remains accurate because no layout, style, or copy changed.
 The browser used the actual dashboard static assets against an isolated API fixture.
 It used no live backend or real credential.
 The fixture counted settings POST requests. The retained files are `ime-before.json` and `ime-after.json` under the scratch root.
+
+The original red-before check used this browser invocation with JavaScript on stdin:
+
+```sh
+agent-browser --session alat175-mwg-ime-20261117 --profile /var/tmp/alat175-mwg-browser-20261117 eval --stdin
+```
+
+The JavaScript dispatched the four events below to the actual GitHub key field and counted the fixture's settings POST requests.
+The recorded before-fix results are historical; this final acceptance turn did not repeat them.
 
 Before the fix, both IME cases failed their expected zero-POST result:
 
