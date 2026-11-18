@@ -5517,6 +5517,67 @@ try {
       assert.equal(hits.filter(h => h.p === '/gh/repos/o/rel/compare/v1.0.0...v2.0.0').length, 1);
     }
 
+    // Root skills (skillPath `SKILL.md`): the lock holds the blob SHA of the root SKILL.md, so
+    // that blob stands in for the folder at each tag and at HEAD.
+    {
+      const blob = sha => [200, { tree: [
+        { path: 'SKILL.md', type: 'blob', mode: '100644', sha },
+        { path: 'docs', type: 'tree', sha: `tree-${sha}` },
+      ] }];
+      const noSkill = [200, { tree: [{ path: 'README.md', type: 'blob', mode: '100644', sha: 'R0' }] }];
+      handler = url => {
+        if (url.pathname === '/gh/repos/o/root/releases') return [200, [
+          { tag_name: 'v3.0.0', draft: false, prerelease: false, published_at: old30, html_url: 'r3' },
+          { tag_name: 'v4.0.0', draft: false, prerelease: false, published_at: old30, html_url: 'r4' },
+        ]];
+        if (url.pathname === '/gh/repos/o/root/git/trees/v3.0.0') return blob('B3');
+        if (url.pathname === '/gh/repos/o/root/git/trees/v4.0.0') return blob('B4');
+        if (url.pathname === '/gh/repos/o/root/compare/v3.0.0...v4.0.0') return [200, { files: [{ filename: 'SKILL.md' }] }];
+        if (url.pathname === '/gh/repos/o/rootgone/releases') return [200, [
+          { tag_name: 'v2.0.0', draft: false, prerelease: false, published_at: old30, html_url: 'rg2' },
+          { tag_name: 'v1.0.0', draft: false, prerelease: false, published_at: old30, html_url: 'rg1' },
+        ]];
+        if (url.pathname === '/gh/repos/o/rootgone/git/trees/v2.0.0') return noSkill;
+        if (url.pathname === '/gh/repos/o/rootgone/git/trees/v1.0.0') return blob('BG');
+        if (url.pathname === '/gh/repos/o/roothead/releases') return [200, []];
+        if (url.pathname === '/gh/repos/o/roothead/commits')
+          return [200, [{ sha: 'H1', commit: { committer: { date: old30 } }, html_url: 'rh' }]];
+        if (url.pathname === '/gh/repos/o/roothead/git/trees/HEAD') return blob('BH');
+        if (url.pathname === '/gh/repos/o/rootheadgone/releases') return [200, []];
+        if (url.pathname === '/gh/repos/o/rootheadgone/commits')
+          return [200, [{ sha: 'H2', commit: { committer: { date: old30 } }, html_url: 'rhg' }]];
+        if (url.pathname === '/gh/repos/o/rootheadgone/git/trees/HEAD') return noSkill;
+        return null;
+      };
+      hits.length = 0;
+      const at = (repo, hash) => ({ sourceUrl: `https://github.com/o/${repo}`, skillPath: 'SKILL.md', skillFolderHash: hash });
+      const db = await run({
+        'upstreams.json': UP([]),
+        'user/agents/.skill-lock.json': JSON.stringify({ skills: {
+          ra: at('root', 'B3'), // installed SKILL.md = older tag; the newer week-old tag targets
+          rb: at('root', 'B4'), // installed SKILL.md = newest tag
+          rc: at('rootgone', 'BG'), // no SKILL.md at the newest release
+          rd: at('roothead', 'BH'), // no releases: HEAD SKILL.md equals the install
+          re: at('roothead', 'OLD'), // no releases: HEAD SKILL.md differs
+          rf: at('rootheadgone', 'BG'), // no releases: no SKILL.md at HEAD
+          rg: at('rootgone', 'a'.repeat(64)), // digest lock: no SKILL.md at the newest release
+        } }),
+      });
+      const r = rows(db);
+      assert.deepEqual([r.ra.current, r.ra.latest, r.ra.target, r.ra.removed ?? null, r.ra.notesUrl, r.ra.error ?? null],
+        ['v3.0.0', 'v4.0.0', 'v4.0.0', null, 'r4', null], JSON.stringify(r.ra));
+      assert.deepEqual(r.ra.diffs, [{ file: 'SKILL.md',
+        url: `https://github.com/o/root/compare/v3.0.0...v4.0.0#diff-${createHash('sha256').update('SKILL.md').digest('hex')}` }]);
+      assert.deepEqual([r.rb.current, r.rb.latest, r.rb.target, r.rb.removed ?? null], ['v4.0.0', 'v4.0.0', null, null], JSON.stringify(r.rb));
+      assert.deepEqual([r.rc.current, r.rc.latest, r.rc.target, r.rc.removed, r.rc.error ?? null],
+        ['BG', 'v2.0.0', null, true, null], JSON.stringify(r.rc));
+      assert.deepEqual([r.rd.current, r.rd.target, r.rd.removed ?? null, r.rd.error ?? null], ['H1', null, null, null], JSON.stringify(r.rd));
+      // Outdated (current stays the lock hash); the first-seen soak holds the target back.
+      assert.deepEqual([r.re.current, r.re.target, r.re.removed ?? null], ['OLD', null, null], JSON.stringify(r.re));
+      assert.deepEqual([r.rf.current, r.rf.target, r.rf.removed, r.rf.error ?? null], ['BG', null, true, null], JSON.stringify(r.rf));
+      assert.deepEqual([r.rg.latest, r.rg.target, r.rg.removed, r.rg.error ?? null], ['v2.0.0', null, true, null], JSON.stringify(r.rg));
+    }
+
     // Release streams: one repo publishes several release lines (`skill-v4.7.0`, `cli-v4.7.0`,
     // `engine-v0.1.16`). The row tracks one stream, picked by the upstreams tagPrefix, the lock
     // ref, the `skill` prefix, the empty prefix or the single stream; versions compare parsed,

@@ -93,6 +93,7 @@ An absent registry or a valid empty `layers` array permits cleanup.
   A 64-character hexadecimal `skillFolderHash` selects the `skills@1.7.0` SHA-256 digest. Other values keep the GitHub tree SHA comparison.
   Both path and release checks use the selected hash type. The digest sorts relative file paths with `localeCompare`.
   It hashes each path, then its raw bytes. It excludes `.git` and `node_modules` directories at any depth, symlinks, and submodules.
+  A skill with `SKILL.md` at the repository root has no folder tree SHA. For that skill, the check compares the blob SHA of the root `SKILL.md`, the value that the skills CLI writes. The digest also needs a root `SKILL.md`. A tag without a root `SKILL.md` counts as removed.
 
   Release checks match the installed folder against at most ten newest tags in the selected stream.
   For SHA-256 locks, incomplete trees and failed or invalid blob reads produce an error. The error clears any previous target.
