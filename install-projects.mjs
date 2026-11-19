@@ -88,17 +88,22 @@ function install(root, manifestPath) {
   const plan = [];
   /** @type {Set<string>} */
   const touched = new Set();
+  let absentContext = 0;
   for (const [name, extras] of validated) {
     const liveDir = join(root, name);
     if (!existsSync(liveDir) || !statSync(liveDir).isDirectory()) {
       console.log(`projects/${name}: no checkout at ${liveDir}; skipped`);
       continue;
     }
+    const extraSet = new Set(extras);
     for (const rel of [...new Set([...contextFiles, ...extras])]) {
       const snapFile = join(data.dir, 'projects', name, ...rel.split('/'));
       if (!existsSync(snapFile)) {
         // contextFiles names are alternatives; a missing one is normal, never an error.
-        console.log(`projects/${name}/${rel} is not in the snapshot; skipped`);
+        // Only a missing extra (a name in both lists counts as an extra) names a real
+        // gap and keeps its own line; the rest is one summary line after this pass.
+        if (extraSet.has(rel)) console.log(`projects/${name}/${rel} is not in the snapshot; skipped`);
+        else absentContext++;
         continue;
       }
       assertSourceInside(data.dir, snapFile);
@@ -161,6 +166,7 @@ function install(root, manifestPath) {
       plan.push({ key, dest, snapBytes, fpSnap, status, log });
     }
   }
+  if (absentContext) console.log(`context files absent in the snapshot: ${absentContext} (normal, contextFiles lists alternatives)`);
 
   // ponytail: preflight is not a transaction: one copy may land before a later write fails;
   // rerun after fixing the cause. Upgrade to staging+rename if atomicity matters.

@@ -91,12 +91,24 @@ try {
   assert.equal((r.stdout.match(/added projects\/beta\/AGENTS\.md/g) || []).length, 1, `deduped name installed twice: ${r.stdout}`);
   assert.match(r.stdout, /3 added, 0 updated, 0 unchanged across 1 projects/, r.stdout);
 
-  // (e) A listed file with no snapshot copy is skipped with a note (contextFiles are
-  // alternatives), exit 0.
-  manifest({ contextFiles: ['AGENTS.md', 'ghost.md'], projects: { beta: [] } });
+  // (e) Missing contextFiles names are summarized, never logged per name (they are
+  // alternatives): a manifest with three alternative names and a snapshot holding only
+  // AGENTS.md prints one summary line with count 2 and no per-name line. Fails on main,
+  // which prints one line per name.
+  manifest({ contextFiles: ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md'], projects: { beta: [] } });
+  r = run(withRoot);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes('context files absent in the snapshot: 2 (normal, contextFiles lists alternatives)'), r.stdout);
+  assert.ok(!r.stdout.includes('is not in the snapshot; skipped'), `per-name line leaked: ${r.stdout}`);
+  assert.match(r.stdout, /0 added, 0 updated, 1 unchanged across 1 projects/, r.stdout);
+
+  // (e3) A missing extra keeps its own line: it names a real gap. A name in both lists
+  // counts as an extra, so it never joins the summary count (count 0 prints no summary).
+  manifest({ contextFiles: ['AGENTS.md', 'ghost.md'], projects: { beta: ['ghost.md'] } });
   r = run(withRoot);
   assert.equal(r.status, 0, r.stderr);
   assert.ok(r.stdout.includes('projects/beta/ghost.md is not in the snapshot; skipped'), r.stdout);
+  assert.ok(!r.stdout.includes('context files absent in the snapshot'), `summary line leaked: ${r.stdout}`);
   assert.match(r.stdout, /0 added, 0 updated, 1 unchanged across 1 projects/, r.stdout);
 
   // (e2) Object project values (specs/bundles.md): extras install exactly like the array

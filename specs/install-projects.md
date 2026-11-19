@@ -33,8 +33,13 @@ installed; its files stay untouched (never deleted) — the same rule capture us
 Per listed file `<name>/<rel>` (the snapshot-relative key format of
 `sync-projects.mjs`, so both scripts share one baseline record):
 
-1. Source `<data>/projects/<name>/<rel>` missing: note
-   `projects/<name>/<rel> is not in the snapshot; skipped`. No item result.
+1. Source `<data>/projects/<name>/<rel>` missing: a name the project lists in its
+   own extras gets the note `projects/<name>/<rel> is not in the snapshot; skipped`
+   (it names a real gap; a name in both lists counts as an extra). A name that
+   comes only from `contextFiles` gets no line: the plan pass counts it and the
+   run prints one summary line after the plan pass,
+   `context files absent in the snapshot: <count> (normal, contextFiles lists
+   alternatives)` — nothing when the count is 0. No item result.
    (`contextFiles` names are alternatives; a missing one is normal.)
 2. Checkout dir `<root>/<name>` missing: note `projects/<name>: no checkout at <path>; skipped`.
 3. Path guards (refusal class, whole run, nothing written, exit 1, fatal results):
