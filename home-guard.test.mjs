@@ -9,7 +9,8 @@
 // .omp/agent/memories, .omp/oauth, .omp/install-id,
 // .omp/marketplaces.json, .omp/natives, the .omp/autoqa.db database with its -wal and
 // -journal files, the alate rules install record .omp/agent/rules/.alate-installed.json,
-// the two bookkeeping files under .alate, and the
+// the bookkeeping files under .alate (in-use.json, in-use.owners.json,
+// skillspector-pass.json), and the
 // live worker's layer runtime (each layer's .omp tree under .alate/layers — the same
 // ignore set as .omp, plus its puppeteer browser-tooling install; the layer's own
 // manifest files stay checked))
@@ -72,7 +73,7 @@ const layerOmpLive = rel => {
   return m !== null && (OMP_LIVE(m[1]) || m[1] === 'puppeteer' || m[1].startsWith('puppeteer/'));
 };
 const LIVE = {
-  '.alate': rel => rel === 'in-use.json' || rel === 'skillspector-pass.json' || layerOmpLive(rel),
+  '.alate': rel => rel === 'in-use.json' || rel === 'in-use.owners.json' || rel === 'skillspector-pass.json' || layerOmpLive(rel),
   '.agents': () => false,
   '.omp': OMP_LIVE,
 };
@@ -171,7 +172,7 @@ const check = (snapPathArg) => {
 const selfCheck = () => {
   const tmp = mkdtempSync(join(tmpdir(), 'alate-home-guard-'));
   const fake = join(tmp, 'home');
-  for (const rel of ['.alate/state.json', '.alate/in-use.json', '.alate/skillspector-pass.json',
+  for (const rel of ['.alate/state.json', '.alate/in-use.json', '.alate/in-use.owners.json', '.alate/skillspector-pass.json',
     '.omp/browser-profiles/chrome-x/Default/Preferences',
     '.omp/browser-profiles/chrome-x/Default/Cache/Cache_Data/sqldb',
     '.omp/browser-profiles/chrome-x/Default/Code Cache/js',
@@ -297,6 +298,7 @@ const selfCheck = () => {
       'plugins', 'plugins/installed', 'plugins/installed/p', 'plugins/installed/p/manifest.json',
       'skills', 'skills/x', 'skills/x/SKILL.md', 'state.json']);
     assert.ok(!('agent/agent.db' in recorded.mtime) && !('logs' in recorded.mtime) && !('in-use.json' in recorded.mtime)
+      && !('in-use.owners.json' in recorded.mtime)
       && !('context-mode' in recorded.mtime) && !('snapcompact-savings.jsonl' in recorded.mtime)
       && !('plugins/cache' in recorded.mtime) && !('memories' in recorded.mtime) && !('oauth' in recorded.mtime)
       && !('install-id' in recorded.mtime) && !('marketplaces.json' in recorded.mtime) && !('natives' in recorded.mtime)
