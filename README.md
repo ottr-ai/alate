@@ -176,7 +176,7 @@ The dashboard also edits. It creates a bundle, adds or removes a skill or plugin
 
 ## Skills alate ships
 
-Alate vendors the whole `.agents/skills` tree of [github.com/ottr-ai/ottr](https://github.com/ottr-ai/ottr) at the pinned commit `a7191d7fab8bbe337e918aa15f0a8e53df3e323a`, and installs every skill folder in that tree into every provisioned home. Today this tree holds seven skills:
+Alate vendors the whole `.agents/skills` tree of [github.com/ottr-ai/ottr](https://github.com/ottr-ai/ottr) at the pinned commit `d8de00e808d32e7c893b010e7587d13156f80a27`, and installs every skill folder in that tree into every provisioned home. Today this tree holds seven skills:
 
 - `check-ottr-board`
 - `diff-security-review`

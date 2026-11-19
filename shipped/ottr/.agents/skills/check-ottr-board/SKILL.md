@@ -55,32 +55,18 @@ const post = (path, body) => fetch(base + path, { method: 'POST', headers: { ori
 - Ask the user with the `ask` tool. The answer comes as your next message.
 - At the end, call `report_outcome` `answered`: the summary is one line, and `details` hold the report from step 7.
 
-## 2. List the open cards
+## 2. Run the board report
 
-```js
-console.log(await board(HEAD + `
-const s = await (await fetch(base + '/api/state')).json();
-console.log('drainUntil', s.drainUntil ?? '-', 'maxTotal', s.maxTotal);
-for (const t of s.tasks.filter((x) => x.cancelledAt === null && x.stage !== 'done'))
-  console.log(t.project, t.id, t.stage + '/' + t.state, new Date(t.updatedAt).toISOString(), JSON.stringify(t.title), t.needsReason ?? '', t.asked ? 'ASKED' : '');
-`));
-```
+The script `scripts/board-report.ts` in this skill's folder (`<skill-dir>` below) does steps 2 and 3 in one run. It reads only `GET /api/state`, the log mtimes, `mergeHold` from `src/scheduler.ts` and `git status`. It prints one markdown table (card, stage/state, verdict, note, reason), the main checkouts with an `ahead` flag, and the asked questions. Options appear next to each question; `*` marks the recommended one.
+
+- Board mode: `bun <skill-dir>/scripts/board-report.ts`
+- Host mode: `docker exec -i ottr-server-1 bun - < <skill-dir>/scripts/board-report.ts`
+
+Work only the rows with the verdict `stuck` or `check`, and the questions in the `## Questions` section. Rows with `OK`, `waits`, `question` or `decision` need no model turn.
 
 For one card, `GET /api/projects/<project>/tasks/<id>` gives the card and its `turns` (kind, startedAt, endedAt, outcome, error, summary). The `asked` field holds the question and its options.
 
-Then check each project's main checkout for uncommitted files and for unpushed commits. `GET /api/state` lists the projects with the checkout path in `projects[].path`. `git status --porcelain --branch` in the main checkout lists the files, and its first line shows `[ahead N]` or `[behind N]` against the last fetch of origin:
-
-```js
-console.log(await board(HEAD + `
-const s = await (await fetch(base + '/api/state')).json();
-for (const p of s.projects) {
-  if (p.gitless) { console.log(p.name, 'gitless'); continue; }
-  const r = Bun.spawnSync(['git', '-C', p.path, 'status', '--porcelain', '--branch']);
-  const [head, ...files] = (r.stdout.toString() + r.stderr.toString()).trim().split(String.fromCharCode(10));
-  console.log(p.name, head, files.length ? files.join(' | ') : 'clean');
-}
-`));
-```
+Then read the `## Main checkouts` section. `git status --porcelain --branch` lists the files, and its first line shows `[ahead N]` or `[behind N]` against the last fetch of origin.
 
 A project whose main checkout has uncommitted files is a finding on its own: the board banner warns that a pull or a stash on the main checkout can collide with commits from tasks. The files are usually scratch that an earlier turn left in the main checkout, or the user's own edits. Never delete or move them yourself: name the files, and ask the user.
 
@@ -88,17 +74,20 @@ A main checkout that is `ahead` of origin while no merge turn of that project ru
 
 ## 3. Sort each card
 
+The script sorted the cards with this table; the table is the rule.
+
 | Card | Verdict |
 |---|---|
 | `needs_you` with `asked` | A question for the user. Not stuck. |
-| `needs_you` with an approval reason: "Update card: read the summary, then reply to approve the merge.", "Fork-research-born task: the merge is held. …", or a held proposal that ends with "Accept to start it, edit the prompt first, or cancel to decline." | A decision for the user. Not stuck. |
+| `needs_you` with an approval reason: "Update card: read the summary, then reply to approve the merge.", "Fork-research-born task: the merge is held. …", or a proposal that ends with "Accept starts it. Edit task changes the prompt first. Cancel task declines it." (stored reasons from before 2026-11 end with "Accept to start it, edit the prompt first, or cancel to decline.") | A decision for the user. Not stuck. |
+| `needs_you` with a resume reason: "Please resume … after `<date>`" or "Re-run this card's … after `<date>`" | Waits by design: it resumes on the condition in its reason. Not stuck. |
 | `needs_you` with any other reason | Stuck. Go to step 4. |
 | `running` or `preparing` | Stuck only when the log does not grow for 20 minutes, or when a check runs past its limit of 30 minutes (`maxTime` 1800 s). The board sweeps dead runs by itself, so wait one 60 s tick before you act. |
 | `queued` | Find the hold: a board drain (`drainUntil` is set), a full cap (`maxTotal` or the `maxParallel` of the project), a `dependsOn` card that is not done, a merge that runs in the same project, an open release or review (`mergeHold` in `src/scheduler.ts`), or no rules file for a todo card. Stuck only when no hold explains the wait, or when the hold itself is stuck. |
 | `merging/idle` with "waiting for the review's findings to be implemented" | A review or a release that waits for its finding cards (their `followUpOf` is its id). Stuck only when a finding card is stuck. |
 | Any other state, for example `in_progress/idle` | Stuck. |
 
-To see if a log grows, compare its time stamp with `date +%s`. In host mode, use `docker exec ottr-server-1 stat -c %Y /data/<project>/logs/<id>.log`. In board mode, run `stat -c %Y` on the log directly.
+The script's `verdict()` in `scripts/board-report.ts` implements this table from `GET /api/state`, the log mtimes, `mergeHold` and `git status`. A change to this table must change `scripts/board-report.ts` in the same commit. The script reads no turn list. The 20-minute log rule covers a `running` row. When a running card's log stays young but the card runs long, check the 30-minute limit with the turn list of `GET /api/projects/<project>/tasks/<id>`.
 
 ## 4. Find the cause
 
@@ -143,7 +132,7 @@ The id in the example is the card's handle on the board. `<task-id>` stands for 
 
 When the cause can also stop other cards (a board bug, a gap in a prompt or a rule, a tool that the worker image does not have, a gap in Alate), make sure that a card exists for it:
 
-1. Search the titles of all cards in `GET /api/state`, open and done. If a card exists, do not file a second one.
+1. Search the card titles before you file. The open cards are in `GET /api/state`. The state carries only each project's Done window: the newest 20 done and cancelled cards, plus the pinned ones (unread answers, starred cards). Page the done history with `GET /api/projects/<project>/done?page=N`; each page holds 20 cards, and `total` holds the project's full done and cancelled count. Stop at the first match. If a card exists, do not file a second one.
 2. File the card in the project that owns the cause: `ottr` for the board, `alate` for provisioning, `agent-data` for rules and skills, or the app repo for its own code.
 3. Write the card in STE: the goal, the facts with evidence (card ids, log lines, `file:line`), the change, what is out of scope, and an acceptance test that fails before the fix.
 4. Obey the hard stops of the project. For Ottr: no new npm dependency, no new wording in `src/prompts.ts`, and a migration for each schema change.

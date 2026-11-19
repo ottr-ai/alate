@@ -38,6 +38,7 @@ Read the handoff's queued lessons before you write the prompt. Use them to state
 
 A change to rules, skills or AGENTS.md sources targets the board project that holds the agent data repo (the repo that Alate provisions). Set propose_task's project to that project, and name the data repo and its paths in the prompt. Never edit the data repo checkout from your card.
 Write the prompt as a self-contained task: the problem with its evidence, the change, the target repo and paths, the acceptance check, and the expected gain. If the fix belongs in another repo, name that repo in the first line.
+Write each acceptance check so a work turn can meet it before the merge. On a data-repo card that changes a `projects/<name>/` snapshot, accept the source commit, the sync gate, and the recorded install evidence with its sha256 pair; require the live-copy equality check only after the merge's Alate import and provision.
 Otherwise propose nothing, and give the reason.
 
 ## 8. Report

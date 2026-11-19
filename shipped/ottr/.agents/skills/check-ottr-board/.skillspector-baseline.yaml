@@ -4,11 +4,23 @@ version: 2
 scanner_version: 2.13.0
 rules: []
 fingerprints:
-- hash: sha256:0356724e5a1d77ae395f8dedd6f69e45f096278960c5315eb2e91beae67a510c
+- hash: sha256:5c142f7000d46fb102220ed2b49fd11f1dfd8af667600a74556e10c5738f47ee
   rule_id: LP3
   file: SKILL.md
-  reason: "Accepted 2026-11-06: an omp managed skill has no allowed-tools frontmatter; the tool scope comes from the session, and the skill text asks the user before every write outside the board API (same family as impeccable LP3). Hash regenerated 2026-11-11 for alate's --no-llm scan of the vendored a7191d7 bytes."
-- hash: sha256:d2d1a029a23b1553ad7b8952062e5cf8fab91a613d28984d32e59d7f37fd86e1
+  reason: "Accepted 2026-11-06: an omp managed skill has no allowed-tools frontmatter; the tool scope comes from the session, and the skill text asks the user before every write outside the board API (same family as impeccable LP3). Fingerprint from the single-folder scan context; regenerated 2026-11-19 for the vendored d8de00e bytes."
+- hash: sha256:036524512efb4c5a8e4851636baae8b822ed651fb421a0fb75b405804519d699
+  rule_id: LP3
+  file: SKILL.md
+  reason: "Accepted 2026-11-19 (ALAT-193): the same undeclared-tool-scope LP3 finding as the entry above, emitted by the MCP least-privilege analyzer when the scan runs in the install gate's staged multi-skill context (several skill folders side by side). The install gate scans every staged copy, so the baseline carries both context fingerprints. MEDIUM severity, no review entry needed."
+- hash: sha256:d12b83526a828dc079a5b6adecad8288ef939d541be2260bd91466efb6c315e4
   rule_id: TM1
   file: SKILL.md
-  reason: "Accepted 2026-11-06: the flagged step 4 rows are prose for a manual repair that the user approves first (drain, rebase onto origin/main, push with a token, end the drain); the skill runs no tool with these parameters itself. Hash regenerated 2026-11-11 for alate's --no-llm scan of the vendored a7191d7 bytes."
+  reason: "Accepted 2026-11-06: the step 4 row 'local main diverged' is prose for a manual repair that the user approves first (drain, rebase onto origin/main, push with a token, end the drain); the skill runs no tool with these parameters itself. Hash regenerated 2026-11-19 for the vendored d8de00e bytes."
+- hash: sha256:16e92d4e784378712b4882ae664475e9cf01917a666b1b3a406c60b405d5e1c1
+  rule_id: AE1
+  file: SKILL.md
+  reason: "Accepted 2026-11-19 (ALAT-193): static_parse_limit coverage note; the bounded static parser cannot fully parse scripts/board-report.ts, so the analyzer reports the SKILL.md reference as partially inspected. The script is a read-only reporter (GET /api/state, stat, git status) and the scan found no misuse. Review entry in shipped/skillspector-reviews.json."
+- hash: sha256:2e122671277d2ff4b4dfb3d48248353a008a31085a9427598deea7ea3ef2809e
+  rule_id: AE1
+  file: SKILL.md
+  reason: "Accepted 2026-11-19 (ALAT-193): static_parse_limit coverage note; same coverage gap as the other AE1 entry, flagged at the second SKILL.md reference to scripts/board-report.ts. Review entry in shipped/skillspector-reviews.json."
