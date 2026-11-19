@@ -336,23 +336,25 @@ notes and the refresh behave as for a file edit.
   names the commit subject and says that nothing changes until items move out
   of core; Cancel hides it and writes nothing. The confirmed action creates
   `bundles/core/` in one commit through the same save path as every other
-  action:
-  - `skills.txt` and `plugins.txt` with the standard two-line header and every
-    skill and plugin that installs today (the inventory's known universe), one
-    name per line, sorted;
-  - each of the four fleet worker lists (`apt.txt`, `tools.json`, `env.txt`,
-    `requirements.txt`) that `workers/_all/` holds, copied byte for byte. Core
-    is the only bundle whose worker lists merge into every project, so the
-    fleet lists keep reaching every project through the merge, and the
-    dashboard's per-project effective lists — which never merge `workers/_all/`
-    — keep showing them.
+  action: `skills.txt` and `plugins.txt` with the standard two-line header and
+  every skill and plugin that installs today (the inventory's known universe),
+  one name per line, sorted.
+  The action copies no worker list. Core merges first for every project and the
+  first pin or tool wins, so a fleet list copied into core would let a fleet
+  entry beat a project's own entry — today the project wins (`mergeRequirements`
+  reads `[...project, ...all]`, and the tools readers put the project's tools
+  before `_all`). `workers/_all/apt.txt` has no consumer today ("there is no
+  aptAll"), so a copy would add installs that never happened. With no worker
+  files in core, every project's merged worker lists are its own lists, the
+  fleet folder keeps its verbatim install, and the turn-time merge keeps
+  today's precedence — every project's items stay exactly the list before.
   After the action, the computed effective item list of every project equals
   the list before: every skill and plugin stays global through core, and each
-  project's worker items stay its own lists plus the fleet lists. The fleet
-  folder `workers/_all/` itself stays in place and keeps today's verbatim
-  install. A `turn-on` on a repo that already holds `bundles/` content refuses
-  with 409 and writes nothing, so a second click does nothing. The commit
-  subject is `alate: turn on bundles with core`; the confirm text quotes it.
+  project's worker items are its own lists, with the fleet lists still merged
+  at turn time as today. A `turn-on` on a repo that already holds `bundles/`
+  content refuses with 409 and writes nothing, so a second click does nothing.
+  The commit subject is `alate: turn on bundles with core`; the confirm text
+  quotes it.
 - Display: each bundle block lists its items by kind (skills, plugins, apt
   lines, tool names, env lines, requirement pins), and every item carries
   remove and move controls; each list-file name links to the file editor. Each project
@@ -401,13 +403,16 @@ Tests use a temp data repo and a temp home, and each fails before the change:
 11. With no `bundles/`, the dashboard shows the turn-on note and button, and
    the confirm names the commit subject and the "nothing changes until items
    move out of core" sentence (a DOM test). Cancel writes nothing.
-12. The turn-on action creates `bundles/core/` with every skill and plugin and
-   the four `workers/_all/` copies in one commit; after it, the computed
-   effective list of each project equals the list before; a second click
-   refuses with 409 and no new commit.
+12. The turn-on action creates `bundles/core/` with only `skills.txt` and
+   `plugins.txt` in one commit; after it, the computed effective list of each
+   project equals the list before, with a project entry that shares a fleet
+   entry's name keeping the project's own line; a second click refuses with
+   409 and no new commit.
 13. A repo turned on this way installs like the repo before the action: every
-   skill global, no shelf, per-project worker items still the project's own
-   lists plus the fleet lists.
+   skill global, no shelf, each project's merged worker lists hold its own
+   entries only (a project pin keeps beating a fleet pin of the same name at
+   turn time, `workers/_all/` untouched, no fleet apt package joins a project
+   that never installed it).
 
 The repo check and test commands (the verified chain in `AGENTS.md`, `npm test`)
 exit 0 with the new test files joined into the chain, `package.json`, and

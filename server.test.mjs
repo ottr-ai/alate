@@ -12,6 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { forAll, keepTemp } from './lib/data.mjs';
 
 import { diffLines } from './web/diff.mjs';
+import { mergeLineSources, mergeNamedSources } from './lib/bundles.mjs';
 import { checkUpdates, cmpVer, initUpdates, isValidUpdateRecord, loadUpdates, rowErrorText } from './lib/updates.mjs';
 import { SHIPPED_REPO, SHIPPED_PIN, shippedSkills } from './lib/shipped.mjs';
 
@@ -3696,9 +3697,11 @@ try {
   assert.equal(bundleRemoteText('bundles/hold/skills.txt', bundleBare2), '');
 
   // t. turn-on (specs/bundles.md "Editing", ALAT-192): a repo with no bundles/
-  // gets bundles/core/ holding every skill and plugin plus the four fleet worker
-  // lists, in exactly one commit; after it, the computed effective list of every
-  // project equals the list before; a second click refuses with 409 and no commit.
+  // gets bundles/core/ holding every skill and plugin and nothing else, in
+  // exactly one commit; no worker list is copied, so a project entry that
+  // shares a fleet entry's name keeps the project's own line, and the computed
+  // effective list of every project equals the list before; a second click
+  // refuses with 409 and no commit.
   const turnSeed = join(tmp, 'turn-seed');
   const turnDir = join(tmp, 'turn-dir');
   const turnBare = join(tmp, 'gh', 'demo', 'turndata.git');
@@ -3710,6 +3713,12 @@ try {
   }
   mkdirSync(join(turnSeed, 'workers', 'alpha'), { recursive: true });
   writeFileSync(join(turnSeed, 'workers', 'alpha', 'apt.txt'), 'alpha-pkg\n');
+  const turnOwnPin = 'ruff==0.5.0 --hash=sha256:' + 'd'.repeat(64);
+  writeFileSync(join(turnSeed, 'workers', 'alpha', 'requirements.txt'), `${turnOwnPin}\n`);
+  // alpha's own tools.json holds a fleet-tool name with its own body: the exact
+  // override case the turn-on must not invert.
+  const turnOwnTool = { name: 'fleet-tool', url: { linux: 'https://example/own.tar.gz', win32: 'https://example/own.zip' }, sha256: 'e'.repeat(64), unpack: 'zip', bin: { linux: 'own', win32: 'own.exe' } };
+  writeFileSync(join(turnSeed, 'workers', 'alpha', 'tools.json'), `${JSON.stringify([turnOwnTool])}\n`);
   mkdirSync(join(turnSeed, 'workers', 'beta'), { recursive: true });
   writeFileSync(join(turnSeed, 'workers', 'beta', 'env.txt'), 'BETA_VAR\r\n');
   mkdirSync(join(turnSeed, 'workers', '_all'), { recursive: true });
@@ -3756,17 +3765,13 @@ try {
   assert.equal(turnSubject(), 'alate: turn on bundles with core');
   assert.equal(turnSeedSubject(), 'alate: turn on bundles with core', 'the commit pushed to the origin');
   assert.equal(turnCommitCount(), turnCommitsBefore + 1, 'the turn-on is exactly one commit');
-  assert.deepEqual(turnStatFiles(body.commit), [
-    'bundles/core/apt.txt', 'bundles/core/env.txt', 'bundles/core/plugins.txt',
-    'bundles/core/requirements.txt', 'bundles/core/skills.txt', 'bundles/core/tools.json',
-  ], 'the one commit carries the two name lists and the four fleet copies');
+  assert.deepEqual(turnStatFiles(body.commit), ['bundles/core/plugins.txt', 'bundles/core/skills.txt'], 'the one commit carries only the two name lists');
   assert.equal(turnDisk('bundles/core/skills.txt'), '# skills of bundle core\n# one name per line; # comments and blank lines are ignored\nalpha\nzeta\n', 'every skill that installs today, sorted');
   assert.equal(turnDisk('bundles/core/plugins.txt'), '# plugins of bundle core\n# one name per line; # comments and blank lines are ignored\n@scope/web-b\npony-a\n', 'every plugin that installs today, sorted');
-  assert.equal(turnDisk('bundles/core/apt.txt'), 'fleet-pkg\n');
-  assert.equal(turnDisk('bundles/core/env.txt'), 'FLEET_VAR\r\n', 'the fleet copy keeps the checkout bytes');
-  assert.equal(turnDisk('bundles/core/requirements.txt'), `${turnFleetPin}\n`);
-  assert.equal(turnDisk('bundles/core/tools.json'), `${JSON.stringify([turnFleetTool])}\n`, 'the fleet tools.json copy keeps the raw per-OS form');
-  assert.equal(turnDisk('workers/_all/apt.txt'), 'fleet-pkg\n', 'the fleet folder stays in place');
+  for (const file of ['apt.txt', 'tools.json', 'env.txt', 'requirements.txt']) {
+    assert.ok(!existsSync(join(turnDir, 'bundles', 'core', file)), `no ${file} lands in core: core merges first and would flip the project-first fleet precedence, and fleet apt has no consumer`);
+    assert.equal(turnDisk(`workers/_all/${file}`), readFileSync(join(turnSeed, 'workers', '_all', file), 'utf8'), `the fleet ${file} stays untouched`);
+  }
 
   const turnInv = body.state.inventory;
   assert.deepEqual(turnInv.warnings, [], 'the turned-on repo scans without warnings');
@@ -3775,21 +3780,26 @@ try {
   assert.deepEqual(turnInv.user.plugins.map(p => [p.name, p.bundles, p.shelf]), [['pony-a', ['core'], false], ['@scope/web-b', ['core'], false]], 'every plugin rides core');
   // The computed effective list of every project equals the list before the
   // action: all skills and plugins (global through core), and the worker items
-  // stay the project's own lists plus the fleet lists, core merging first.
+  // are exactly the project's own lists, computed here from the fixture bytes —
+  // a project pin or tool that shares a fleet name keeps the project's line.
+  const ownLines = (project, file) => mergeLineSources([[`workers/${project}`, readFileSync(join(turnSeed, 'workers', project, file))]], file === 'requirements.txt' ? { keyOf: line => line.trim().split(/\s+/)[0].split('==')[0].toLowerCase() } : file === 'env.txt' ? { lastWins: true } : {});
+  const ownTools = project => mergeNamedSources([[`workers/${project}`, JSON.parse(readFileSync(join(turnSeed, 'workers', project, 'tools.json'), 'utf8')).map(e => e.name)]]);
   const alphaEff = turnInv.projects.named.find(p => p.name === 'alpha').effective;
   const betaEff = turnInv.projects.named.find(p => p.name === 'beta').effective;
   assert.deepEqual(alphaEff.skills, [{ item: 'alpha', source: 'core' }, { item: 'zeta', source: 'core' }]);
   assert.deepEqual(alphaEff.plugins, [{ item: '@scope/web-b', source: 'core' }, { item: 'pony-a', source: 'core' }], 'the effective list keeps the core file order');
-  assert.deepEqual(alphaEff.apt, [{ item: 'fleet-pkg', source: 'core' }, { item: 'alpha-pkg', source: 'workers/alpha' }]);
-  assert.deepEqual(alphaEff.env, [{ item: 'FLEET_VAR', source: 'core' }]);
-  assert.deepEqual(alphaEff.requirements, [{ item: turnFleetPin, source: 'core' }]);
-  assert.deepEqual(alphaEff.tools, [{ item: 'fleet-tool', source: 'core' }]);
+  assert.deepEqual(alphaEff.apt, ownLines('alpha', 'apt.txt'), 'alpha apt stays its own list, no fleet package joins');
+  assert.deepEqual(alphaEff.env, [], 'alpha has no own env list and gains none');
+  assert.deepEqual(alphaEff.requirements, ownLines('alpha', 'requirements.txt'), 'the project pin beats the fleet pin of the same package');
+  assert.deepEqual(alphaEff.requirements[0].item, turnOwnPin);
+  assert.notEqual(alphaEff.requirements[0].item, turnFleetPin, 'the fleet pin never replaces the project pin');
+  assert.deepEqual(alphaEff.tools, ownTools('alpha'), 'the project tool entry with a fleet name keeps its own body');
   assert.deepEqual(betaEff.skills, [{ item: 'alpha', source: 'core' }, { item: 'zeta', source: 'core' }]);
   assert.deepEqual(betaEff.plugins, [{ item: '@scope/web-b', source: 'core' }, { item: 'pony-a', source: 'core' }]);
-  assert.deepEqual(betaEff.apt, [{ item: 'fleet-pkg', source: 'core' }]);
-  assert.deepEqual(betaEff.env, [{ item: 'FLEET_VAR', source: 'core' }, { item: 'BETA_VAR', source: 'workers/beta' }]);
-  assert.deepEqual(betaEff.requirements, [{ item: turnFleetPin, source: 'core' }]);
-  assert.deepEqual(betaEff.tools, [{ item: 'fleet-tool', source: 'core' }]);
+  assert.deepEqual(betaEff.apt, []);
+  assert.deepEqual(betaEff.env, ownLines('beta', 'env.txt'), 'beta env stays its own list');
+  assert.deepEqual(betaEff.requirements, []);
+  assert.deepEqual(betaEff.tools, []);
 
   const turnCommitsAfter = turnCommitCount();
   r = await postBundle({ action: 'turn-on' });

@@ -530,7 +530,7 @@ function overviewView() {
     const turnYes = h('button', { type: 'button', class: 'btn', text: 'Turn on bundles' });
     const turnCancel = h('button', { type: 'button', class: 'btn quiet', text: 'Cancel' });
     const turnConfirm = h('div', { class: 'confirm', id: 'turn-on-confirm' },
-      h('p', { text: 'This makes one commit, "alate: turn on bundles with core", that creates bundles/core/ holding every skill and plugin that installs today, plus the fleet worker lists from workers/_all/.' }),
+      h('p', { text: 'This makes one commit, "alate: turn on bundles with core", that creates bundles/core/ holding every skill and plugin that installs today.' }),
       h('p', { text: 'Nothing changes until items move out of core.' }),
       h('div', { class: 'row' }, turnYes, turnCancel));
     turnConfirm.hidden = true;
