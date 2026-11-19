@@ -486,7 +486,8 @@ function overviewView() {
   // Bundles: the editing surface for the bundles/<name>/ list files. Each block
   // links its files into the editor and lists its items by kind, with remove and
   // move controls on the two name lists. Without bundles content the section
-  // shows nothing (specs/bundles.md).
+  // shows the turn-on note, the confirm step, and its button instead of the
+  // board (specs/bundles.md, "Turn on bundles").
   if (bundles.length) {
     const bundleStatus = h('p', { class: 'status', role: 'alert' });
     const newInput = h('input', { type: 'text', id: 'new-bundle-name', autocomplete: 'off', spellcheck: 'false', placeholder: 'gamedev-2d' });
@@ -519,6 +520,31 @@ function overviewView() {
       }))
       : h('p', { class: 'note', text: 'Nothing is on the shelf.' }),
       shelfStatus));
+  } else {
+    // The migration action of specs/bundles.md "Turn on bundles": a repo with no
+    // bundles gets the note, one button, and a confirm step that names the commit
+    // and says that nothing changes until items move out of core. The commit
+    // subject here must match the one web/dashboard.mjs composes for turn-on.
+    const turnStatus = h('p', { class: 'status', role: 'alert' });
+    const turnBtn = h('button', { type: 'button', class: 'btn', id: 'turn-on-bundles', 'aria-controls': 'turn-on-confirm', text: 'Turn on bundles' });
+    const turnYes = h('button', { type: 'button', class: 'btn', text: 'Turn on bundles' });
+    const turnCancel = h('button', { type: 'button', class: 'btn quiet', text: 'Cancel' });
+    const turnConfirm = h('div', { class: 'confirm', id: 'turn-on-confirm' },
+      h('p', { text: 'This makes one commit, "alate: turn on bundles with core", that creates bundles/core/ holding every skill and plugin that installs today, plus the fleet worker lists from workers/_all/.' }),
+      h('p', { text: 'Nothing changes until items move out of core.' }),
+      h('div', { class: 'row' }, turnYes, turnCancel));
+    turnConfirm.hidden = true;
+    turnBtn.addEventListener('click', () => { turnBtn.hidden = true; turnConfirm.hidden = false; turnYes.focus(); });
+    turnCancel.addEventListener('click', () => {
+      turnConfirm.hidden = true;
+      turnBtn.hidden = false;
+      turnStatus.className = 'status';
+      turnStatus.textContent = '';
+    });
+    turnYes.addEventListener('click', () => runBundleAction({ action: 'turn-on' }, turnYes, turnStatus));
+    sheet.append(part('Bundles', String(bundles.length),
+      h('p', { class: 'note', text: 'Bundles mode assigns skills, plugins, and worker lists per project. Without bundles, every item loads for every project.' }),
+      turnBtn, turnConfirm, turnStatus));
   }
 
   const projectsStatus = h('p', { class: 'status', role: 'alert' });

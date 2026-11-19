@@ -3550,6 +3550,15 @@ try {
   r = await postBundle({ action: 'teleport', name: 'web' });
   assert.equal(r.status, 400);
   assert.equal((await r.json()).error, 'unknown bundle action');
+  r = await postBundle({ action: 'turn-on' });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, 'bundles: the data repo already holds bundles content');
+  const commitsAtRefusal = bundleCommitCount();
+  const coreSkillsBeforeRefusal = bundleDisk('bundles/core/skills.txt');
+  r = await postBundle({ action: 'turn-on' });
+  assert.equal(r.status, 409, 'a second turn-on refuses with 409');
+  assert.equal(bundleCommitCount(), commitsAtRefusal, 'the turn-on refusals make no commit');
+  assert.equal(bundleDisk('bundles/core/skills.txt'), coreSkillsBeforeRefusal, 'the turn-on refusal wrote nothing');
 
   // k. worker add (apt): an existing file takes the line as its last line without a
   // header, and the response inventory shows both lines in file order.
@@ -3685,6 +3694,109 @@ try {
   assert.deepEqual(bundleStatFiles(body.commit, bundleBare2), ['bundles/core/skills.txt', 'bundles/hold/skills.txt']);
   assert.equal(bundleRemoteText('bundles/core/skills.txt', bundleBare2), 'shared\nnomad\n');
   assert.equal(bundleRemoteText('bundles/hold/skills.txt', bundleBare2), '');
+
+  // t. turn-on (specs/bundles.md "Editing", ALAT-192): a repo with no bundles/
+  // gets bundles/core/ holding every skill and plugin plus the four fleet worker
+  // lists, in exactly one commit; after it, the computed effective list of every
+  // project equals the list before; a second click refuses with 409 and no commit.
+  const turnSeed = join(tmp, 'turn-seed');
+  const turnDir = join(tmp, 'turn-dir');
+  const turnBare = join(tmp, 'gh', 'demo', 'turndata.git');
+  mkdirSync(join(turnSeed, 'user', 'omp', 'plugins'), { recursive: true });
+  writeFileSync(join(turnSeed, 'user', 'omp', 'plugins', 'package.json'), `${JSON.stringify({ dependencies: { 'pony-a': '^1.0.0', '@scope/web-b': '^2.0.0' } }, null, 2)}\n`);
+  for (const skill of ['zeta', 'alpha']) {
+    mkdirSync(join(turnSeed, 'user', 'omp', 'agent', 'skills', skill), { recursive: true });
+    writeFileSync(join(turnSeed, 'user', 'omp', 'agent', 'skills', skill, 'SKILL.md'), fm(`${skill} skill`));
+  }
+  mkdirSync(join(turnSeed, 'workers', 'alpha'), { recursive: true });
+  writeFileSync(join(turnSeed, 'workers', 'alpha', 'apt.txt'), 'alpha-pkg\n');
+  mkdirSync(join(turnSeed, 'workers', 'beta'), { recursive: true });
+  writeFileSync(join(turnSeed, 'workers', 'beta', 'env.txt'), 'BETA_VAR\r\n');
+  mkdirSync(join(turnSeed, 'workers', '_all'), { recursive: true });
+  writeFileSync(join(turnSeed, 'workers', '_all', 'apt.txt'), 'fleet-pkg\n');
+  writeFileSync(join(turnSeed, 'workers', '_all', 'env.txt'), 'FLEET_VAR\r\n');
+  const turnFleetPin = 'ruff==0.4.0 --hash=sha256:' + 'a'.repeat(64);
+  writeFileSync(join(turnSeed, 'workers', '_all', 'requirements.txt'), `${turnFleetPin}\n`);
+  const turnFleetTool = { name: 'fleet-tool', url: { linux: 'https://example/f.tar.gz', win32: 'https://example/f.zip' }, sha256: 'b'.repeat(64), unpack: 'zip', bin: { linux: 'fleet', win32: 'fleet.exe' } };
+  writeFileSync(join(turnSeed, 'workers', '_all', 'tools.json'), `${JSON.stringify([turnFleetTool])}\n`);
+  mkdirSync(join(turnSeed, 'projects', 'alpha'), { recursive: true });
+  mkdirSync(join(turnSeed, 'projects', 'beta'), { recursive: true });
+  writeFileSync(join(turnSeed, 'projects', 'alpha', 's.md'), 'alpha context\n');
+  writeFileSync(join(turnSeed, 'projects', 'beta', 's.md'), 'beta context\n');
+  writeFileSync(join(turnSeed, 'projects', 'projects.json'), `${JSON.stringify({ contextFiles: [], projects: { alpha: ['s.md'], beta: ['s.md'] } }, null, 2)}\n`);
+  assert.equal(git(['init', '-q', '-b', 'main', turnSeed]).status, 0);
+  git(['-C', turnSeed, 'config', 'user.name', 't']);
+  git(['-C', turnSeed, 'config', 'user.email', 't@t']);
+  assert.equal(git(['-C', turnSeed, 'add', '-A']).status, 0);
+  assert.equal(git(['-C', turnSeed, 'commit', '-qm', 'seed']).status, 0);
+  assert.equal(git(['init', '-q', '--bare', '-b', 'main', turnBare]).status, 0);
+  assert.equal(git(['-C', turnSeed, 'push', '-q', turnBare, 'main']).status, 0);
+  assert.equal(git(['clone', '-q', turnBare, turnDir]).status, 0);
+  git(['-C', turnDir, 'config', 'user.name', 't']);
+  git(['-C', turnDir, 'config', 'user.email', 't@t']);
+  const turnDisk = rel => readFileSync(join(turnDir, ...rel.split('/')), 'utf8');
+  const turnSubject = () => git(['-C', turnDir, 'log', '-1', '--format=%s'], { encoding: 'utf8' }).stdout.trim();
+  const turnSeedSubject = () => git(['--git-dir', turnBare, 'log', '-1', '--format=%s'], { encoding: 'utf8' }).stdout.trim();
+  const turnStatFiles = sha => git(['-C', turnDir, 'show', '--stat', '--format=', sha], { encoding: 'utf8' })
+    .stdout.split('\n').filter(l => l.includes(' | ')).map(l => l.split(' | ')[0].trim()).sort();
+  const turnCommitCount = () => Number(git(['-C', turnDir, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).stdout.trim());
+  r = await postImport(JSON.stringify({ source: turnDir }));
+  assert.equal(r.status, 200);
+  body = await r.json();
+  assert.equal(body.state.inventory.bundles.length, 0, 'the pre-state holds no bundles');
+  assert.ok(body.state.inventory.user.skills.every(s => s.shelf === false), 'nothing is on the shelf before turn-on');
+
+  const turnCommitsBefore = turnCommitCount();
+  r = await postBundle({ action: 'turn-on' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(body.ok, true);
+  assert.match(body.commit, /^[0-9a-f]{40}$/);
+  assert.equal(body.pushed, true);
+  assert.equal(turnSubject(), 'alate: turn on bundles with core');
+  assert.equal(turnSeedSubject(), 'alate: turn on bundles with core', 'the commit pushed to the origin');
+  assert.equal(turnCommitCount(), turnCommitsBefore + 1, 'the turn-on is exactly one commit');
+  assert.deepEqual(turnStatFiles(body.commit), [
+    'bundles/core/apt.txt', 'bundles/core/env.txt', 'bundles/core/plugins.txt',
+    'bundles/core/requirements.txt', 'bundles/core/skills.txt', 'bundles/core/tools.json',
+  ], 'the one commit carries the two name lists and the four fleet copies');
+  assert.equal(turnDisk('bundles/core/skills.txt'), '# skills of bundle core\n# one name per line; # comments and blank lines are ignored\nalpha\nzeta\n', 'every skill that installs today, sorted');
+  assert.equal(turnDisk('bundles/core/plugins.txt'), '# plugins of bundle core\n# one name per line; # comments and blank lines are ignored\n@scope/web-b\npony-a\n', 'every plugin that installs today, sorted');
+  assert.equal(turnDisk('bundles/core/apt.txt'), 'fleet-pkg\n');
+  assert.equal(turnDisk('bundles/core/env.txt'), 'FLEET_VAR\r\n', 'the fleet copy keeps the checkout bytes');
+  assert.equal(turnDisk('bundles/core/requirements.txt'), `${turnFleetPin}\n`);
+  assert.equal(turnDisk('bundles/core/tools.json'), `${JSON.stringify([turnFleetTool])}\n`, 'the fleet tools.json copy keeps the raw per-OS form');
+  assert.equal(turnDisk('workers/_all/apt.txt'), 'fleet-pkg\n', 'the fleet folder stays in place');
+
+  const turnInv = body.state.inventory;
+  assert.deepEqual(turnInv.warnings, [], 'the turned-on repo scans without warnings');
+  assert.deepEqual(turnInv.bundles.map(b => b.name), ['core']);
+  assert.deepEqual(turnInv.user.skills.map(s => [s.name, s.bundles, s.shelf]), [['alpha', ['core'], false], ['zeta', ['core'], false]], 'every skill is global through core, none on the shelf');
+  assert.deepEqual(turnInv.user.plugins.map(p => [p.name, p.bundles, p.shelf]), [['pony-a', ['core'], false], ['@scope/web-b', ['core'], false]], 'every plugin rides core');
+  // The computed effective list of every project equals the list before the
+  // action: all skills and plugins (global through core), and the worker items
+  // stay the project's own lists plus the fleet lists, core merging first.
+  const alphaEff = turnInv.projects.named.find(p => p.name === 'alpha').effective;
+  const betaEff = turnInv.projects.named.find(p => p.name === 'beta').effective;
+  assert.deepEqual(alphaEff.skills, [{ item: 'alpha', source: 'core' }, { item: 'zeta', source: 'core' }]);
+  assert.deepEqual(alphaEff.plugins, [{ item: '@scope/web-b', source: 'core' }, { item: 'pony-a', source: 'core' }], 'the effective list keeps the core file order');
+  assert.deepEqual(alphaEff.apt, [{ item: 'fleet-pkg', source: 'core' }, { item: 'alpha-pkg', source: 'workers/alpha' }]);
+  assert.deepEqual(alphaEff.env, [{ item: 'FLEET_VAR', source: 'core' }]);
+  assert.deepEqual(alphaEff.requirements, [{ item: turnFleetPin, source: 'core' }]);
+  assert.deepEqual(alphaEff.tools, [{ item: 'fleet-tool', source: 'core' }]);
+  assert.deepEqual(betaEff.skills, [{ item: 'alpha', source: 'core' }, { item: 'zeta', source: 'core' }]);
+  assert.deepEqual(betaEff.plugins, [{ item: '@scope/web-b', source: 'core' }, { item: 'pony-a', source: 'core' }]);
+  assert.deepEqual(betaEff.apt, [{ item: 'fleet-pkg', source: 'core' }]);
+  assert.deepEqual(betaEff.env, [{ item: 'FLEET_VAR', source: 'core' }, { item: 'BETA_VAR', source: 'workers/beta' }]);
+  assert.deepEqual(betaEff.requirements, [{ item: turnFleetPin, source: 'core' }]);
+  assert.deepEqual(betaEff.tools, [{ item: 'fleet-tool', source: 'core' }]);
+
+  const turnCommitsAfter = turnCommitCount();
+  r = await postBundle({ action: 'turn-on' });
+  assert.equal(r.status, 409, 'a second turn-on click does nothing');
+  assert.equal((await r.json()).error, 'bundles: the data repo already holds bundles content');
+  assert.equal(turnCommitCount(), turnCommitsAfter, 'the second click makes no commit');
+  assert.equal(turnDisk('bundles/core/skills.txt'), '# skills of bundle core\n# one name per line; # comments and blank lines are ignored\nalpha\nzeta\n');
 
   assert.deepEqual(readdirSync(serverTmp).filter(name => /^alate-(?:dashboard|snapshot)-/.test(name)), [], 'the editor removed its temp clones');
 
@@ -7816,7 +7928,8 @@ try {
   // their addEventListener listeners, so clicks, change events, and form submits actually
   // fire, and the fetch stub records every POST /api/bundle body, so each action's exact
   // payload is asserted. A second import boots app.js over a state without bundles, where
-  // none of the three surfaces may render.
+  // the three surfaces render nothing and the Bundles part shows only the turn-on note,
+  // the confirm step, and its button (specs/bundles.md "Turn on bundles", ALAT-192).
   {
     const ids180 = new Map();
     const globals180 = ['document', 'window', 'Node', 'navigator', 'matchMedia', 'localStorage', 'location', 'setInterval', 'fetch'];
@@ -8154,7 +8267,9 @@ try {
       assert.equal(status5.className, 'status error');
       assert.equal(status5.textContent, 'bundles/web: unknown skill "ghost"');
 
-      // 6. Without bundles in the state, none of the three surfaces renders.
+      // 6. Without bundles in the state, the Bundles part shows the turn-on note,
+      // the confirm step, and its button instead of the board (specs/bundles.md
+      // "Turn on bundles", ALAT-192); the Shelf and every picker stay away.
       const beforePlain6 = galley180.children[0];
       globalThis.fetch = plainFetch180;
       await import('./web/app.js?alat180plain');
@@ -8163,9 +8278,83 @@ try {
         return s && s !== beforePlain6 && part180('Projects', flat180(s)) && !part180('Shelf', flat180(s));
       }), 'the plain overview rendered');
       const plain6 = flat180(galley180.children[0]);
-      assert.ok(!part180('Bundles', plain6) && !part180('Shelf', plain6), 'no Bundles or Shelf part without bundles');
+      const bundlesPart6 = part180('Bundles', plain6);
+      assert.ok(bundlesPart6, 'the Bundles part renders without bundles');
+      assert.ok(!part180('Shelf', plain6), 'no Shelf part without bundles');
       assert.ok(!plain6.some((e) => e.textContent === 'New bundle name'), 'no create-bundle field without bundles');
       assert.ok(plain6.every((e) => e.tag !== 'select'), 'no assign picker anywhere without bundles');
+      assert.ok(plain6.some((e) => e.attrs && e.attrs.class === 'note' && e.textContent.includes('Bundles mode assigns')), 'the note explains what bundles mode does');
+      const turnOn6 = flat180(bundlesPart6).find((e) => e.tag === 'button' && e.attrs.id === 'turn-on-bundles');
+      assert.ok(turnOn6 && !turnOn6.hidden, 'the Turn on bundles button renders visible');
+      const confirm6 = () => flat180(bundlesPart6).find((e) => e.attrs && e.attrs.class === 'confirm');
+      assert.ok(confirm6() && confirm6().hidden, 'the confirm starts hidden');
+      turnOn6.fire('click');
+      assert.ok(confirm6() && !confirm6().hidden, 'the press reveals the confirm');
+      const confirmText6 = confirm6().textContent;
+      assert.ok(confirmText6.includes('alate: turn on bundles with core'), 'the confirm names the commit');
+      assert.ok(confirmText6.includes('Nothing changes until items move out of core'), 'the confirm says nothing changes until items move out of core');
+      const cancel6 = flat180(confirm6()).find((e) => e.tag === 'button' && e.textContent === 'Cancel');
+      const yes6 = flat180(confirm6()).find((e) => e.tag === 'button' && e.textContent === 'Turn on bundles');
+      assert.ok(cancel6 && yes6, 'the confirm carries its two buttons');
+      const plainPosts180 = [];
+      const turnFetch180 = async (url, opts = {}) => {
+        const u = String(url);
+        if (String(opts.method || 'GET').toUpperCase() === 'POST' && u.includes('/api/bundle')) {
+          plainPosts180.push(JSON.parse(opts.body));
+          return plainPosts180.length === 1
+            ? { ok: true, status: 200, json: async () => ({ ok: true, commit: 'e'.repeat(64), pushed: true, state: state180 }) }
+            : { ok: false, status: 409, json: async () => ({ error: 'bundles: the data repo already holds bundles content' }) };
+        }
+        return plainFetch180(url, opts);
+      };
+      const plainPosts0 = plainPosts180.length;
+      globalThis.fetch = turnFetch180;
+      cancel6.fire('click');
+      assert.ok(confirm6().hidden, 'Cancel hides the confirm');
+      assert.equal(plainPosts180.length, plainPosts0, 'Cancel POSTs nothing');
+      turnOn6.fire('click');
+      assert.ok(!confirm6().hidden, 'the confirm reveals again for the real press');
+      const sheetBeforeTurn = galley180.children[0];
+      yes6.fire('click');
+      assert.ok(await settle180(() => plainPosts180.length > plainPosts0), 'the confirmed action POSTed /api/bundle');
+      assert.deepEqual(plainPosts180[plainPosts0], { action: 'turn-on' });
+      assert.ok(await settle180(() => galley180.children[0] !== sheetBeforeTurn), 'the success answer re-rendered the overview');
+      const afterTurn6 = flat180(galley180.children[0]);
+      const board6 = part180('Bundles', afterTurn6);
+      assert.ok(board6, 'the success answer shows the bundles board');
+      assert.ok(flat180(board6).some((e) => e.attrs && e.attrs.class === 'project' && e.children[0].children[0].textContent === 'core'), 'the board lists the core block from the answer state');
+      assert.ok(!afterTurn6.some((e) => e.attrs && e.attrs.id === 'turn-on-bundles'), 'no turn-on button after bundles exist');
+      // A refused turn-on (a stale page racing a second click): the refusal lands
+      // in the section status, the button unlocks, and nothing re-renders.
+      const refusedFetch192 = async (url, opts = {}) => {
+        const u = String(url);
+        if (String(opts.method || 'GET').toUpperCase() === 'POST' && u.includes('/api/bundle')) {
+          plainPosts180.push(JSON.parse(opts.body));
+          return { ok: false, status: 409, json: async () => ({ error: 'bundles: the data repo already holds bundles content' }) };
+        }
+        return plainFetch180(url, opts);
+      };
+      globalThis.fetch = refusedFetch192;
+      const beforeRefused6 = galley180.children[0];
+      await import('./web/app.js?alat192refused');
+      assert.ok(await settle180(() => {
+        const s = galley180.children[0];
+        return s && s !== beforeRefused6 && part180('Bundles', flat180(s)) &&
+          flat180(part180('Bundles', flat180(s))).some((e) => e.attrs && e.attrs.id === 'turn-on-bundles');
+      }), 'the plain overview with the turn-on section rendered again');
+      const turnOnRefused6 = flat180(part180('Bundles', flat180(galley180.children[0]))).find((e) => e.attrs && e.attrs.id === 'turn-on-bundles');
+      turnOnRefused6.fire('click');
+      const confirmRefused6 = () => flat180(part180('Bundles', flat180(galley180.children[0]))).find((e) => e.attrs && e.attrs.class === 'confirm');
+      assert.ok(await settle180(() => confirmRefused6() && !confirmRefused6().hidden), 'the confirm revealed again');
+      const yesRefused6 = flat180(confirmRefused6()).find((e) => e.tag === 'button' && e.textContent === 'Turn on bundles');
+      const nRefused = plainPosts180.length;
+      yesRefused6.fire('click');
+      assert.ok(await settle180(() => plainPosts180.length > nRefused), 'the refused click still POSTed');
+      assert.deepEqual(plainPosts180[nRefused], { action: 'turn-on' });
+      assert.ok(await settle180(() => yesRefused6.disabled === false), 'the refused button is re-enabled');
+      const statusRefused6 = flat180(part180('Bundles', flat180(galley180.children[0]))).find((e) => e.attrs && e.attrs.class === 'status error' && e.attrs.role === 'alert');
+      assert.ok(statusRefused6, 'the refusal lands in the section status');
+      assert.equal(statusRefused6.textContent, 'bundles: the data repo already holds bundles content');
       const plainBlocks6 = plain6.filter((e) => e.attrs && e.attrs.class === 'project');
       assert.equal(plainBlocks6.length, 2, 'the project blocks still render read-only');
     } finally {

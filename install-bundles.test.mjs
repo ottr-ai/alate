@@ -278,6 +278,51 @@ try {
     assert.ok(!existsSync(join(homeDir, '.ottr/project-skills')), 'a repo without bundles installs no per-project skills');
     assert.ok(!existsSync(join(homeDir, '.ottr/plugins')), 'a repo without bundles installs no per-project plugin lists');
     assert.equal(got(homeDir, '.ottr/workers/alpha/apt.txt'), 'pkg-three\n', 'worker lists stay verbatim without bundles');
+
+    // Turn-on equivalence (specs/bundles.md "Turn on bundles", ALAT-192): the
+    // writes the dashboard's turn-on action stages turn the no-bundles repo into
+    // bundles mode, and every project's effective items stay the ones the run
+    // before planned: every skill global, no shelf, per-project worker items
+    // still the project's own lists plus the fleet lists. The test applies the
+    // exact staged tree (every skill and plugin in core, the four fleet lists
+    // copied byte for byte); the action itself is judged in server.test.mjs.
+    ({ dataDir, homeDir, run } = fixture({ bundles: false }));
+    put(dataDir, 'projects/projects.json', JSON.stringify({ contextFiles: [], projects: { alpha: ['a.md'], beta: [] } }));
+    r = run([]);
+    assert.equal(r.status, 0, `turn-on baseline install: ${r.stderr}`);
+    for (const name of SKILLS) assert.ok(existsSync(join(homeDir, '.omp/agent/skills', name)), `the baseline installs every skill globally (${name})`);
+    assert.equal(got(homeDir, '.ottr/workers/alpha/apt.txt'), 'pkg-three\n');
+    assert.equal(got(homeDir, '.ottr/workers/_all/apt.txt'), 'fleet-pkg\n');
+    assert.equal(got(homeDir, '.ottr/workers/_all/env.txt'), 'FLEET_VAR\n');
+    mkdirSync(join(dataDir, 'bundles', 'core'), { recursive: true });
+    put(dataDir, 'bundles/core/skills.txt', 'core-skill\ngamedev-skill\nshelf-skill\n');
+    put(dataDir, 'bundles/core/plugins.txt', '@scope/web-b\npony-a\n');
+    for (const file of ['apt.txt', 'env.txt', 'tools.json']) copyFileSync(join(dataDir, 'workers/_all', file), join(dataDir, 'bundles/core', file));
+    r = run([]);
+    assert.equal(r.status, 0, `turn-on install: ${r.stderr}`);
+    for (const name of SKILLS) assert.ok(existsSync(join(homeDir, '.omp/agent/skills', name)), `every skill stays global after turn-on (${name})`);
+    assert.ok(!existsSync(join(homeDir, '.ottr/project-skills')), 'turn-on plans no per-project skill');
+    assert.equal(got(homeDir, '.ottr/plugins/alpha.txt'), '@scope/web-b\npony-a\n', 'alpha keeps every plugin');
+    assert.equal(got(homeDir, '.ottr/plugins/beta.txt'), '@scope/web-b\npony-a\n', 'beta keeps every plugin');
+    // Worker items: alpha's effective apt set is still {pkg-three, fleet-pkg} and
+    // beta's still {fleet-pkg} — the merge moved the fleet lines into the
+    // per-project files, and the verbatim _all copies stay, so the turn-time
+    // union per project is unchanged.
+    assert.equal(got(homeDir, '.ottr/workers/alpha/apt.txt'), 'fleet-pkg\npkg-three\n');
+    assert.equal(got(homeDir, '.ottr/workers/beta/apt.txt'), 'fleet-pkg\n');
+    assert.equal(got(homeDir, '.ottr/workers/_all/apt.txt'), 'fleet-pkg\n', 'the fleet folder keeps its verbatim install');
+    assert.equal(got(homeDir, '.ottr/workers/alpha/env.txt'), 'FLEET_VAR\n');
+    assert.equal(got(homeDir, '.ottr/workers/beta/env.txt'), 'FLEET_VAR\n');
+    assert.equal(got(homeDir, '.ottr/workers/_all/env.txt'), 'FLEET_VAR\n');
+    const alphaToolsOn = JSON.parse(got(homeDir, '.ottr/workers/alpha/tools.json'));
+    assert.deepEqual(alphaToolsOn, [
+      { name: 'fleet-tool', url: onWin ? 'https://example/fleet-win.zip' : 'https://example/fleet-linux.tar.gz', sha256: 'a'.repeat(64), unpack: 'zip', bin: onWin ? 'fleet.exe' : 'fleet' },
+      { name: 'own-tool', url: onWin ? 'https://example/own-win.zip' : 'https://example/own-linux.tar.gz', sha256: 'e'.repeat(64), unpack: 'zip', bin: onWin ? 'own.exe' : 'own' },
+    ], 'alpha keeps the fleet tool plus its own, core merging first');
+    const betaToolsOn = JSON.parse(got(homeDir, '.ottr/workers/beta/tools.json'));
+    assert.deepEqual(betaToolsOn, [
+      { name: 'fleet-tool', url: onWin ? 'https://example/fleet-win.zip' : 'https://example/fleet-linux.tar.gz', sha256: 'a'.repeat(64), unpack: 'zip', bin: onWin ? 'fleet.exe' : 'fleet' },
+    ], 'beta keeps the fleet tool');
   }
   console.log('install-bundles.test.mjs: all checks passed');
 } finally {

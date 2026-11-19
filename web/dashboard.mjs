@@ -1322,6 +1322,27 @@ function applyBundleAction(state, db, body, token, known) {
     }
     table[project] = entry;
     stage(manifestRel, sha256(manifestBytes), Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'));
+  } else if (action === 'turn-on') {
+    // The migration action of specs/bundles.md "Turn on bundles" (ALAT-192): on a
+    // repo with no bundles content it creates bundles/core/ holding every skill
+    // and plugin that installs today plus the four fleet worker lists, so the
+    // effective item list of every project stays the list before. Any stored
+    // bundles/ path refuses, so a second click does nothing.
+    if (listStoredFiles(db).some(f => f.path.startsWith('bundles/'))) fail(409, 'bundles: the data repo already holds bundles content');
+    message = 'alate: turn on bundles with core';
+    const turnSkills = [...known.skills].sort();
+    const turnPlugins = [...known.plugins].sort();
+    stage('bundles/core/skills.txt', null, Buffer.from(`${bundleListHeader('skill', 'core')}${turnSkills.map(n => `${n}\n`).join('')}`, 'utf8'));
+    stage('bundles/core/plugins.txt', null, Buffer.from(`${bundleListHeader('plugin', 'core')}${turnPlugins.map(n => `${n}\n`).join('')}`, 'utf8'));
+    // Core is the only bundle whose worker lists merge into every project, so the
+    // fleet lists keep reaching every project through the merge, and the dashboard's
+    // per-project effective lists — which never merge workers/_all/ — keep showing
+    // them. The copies stay byte-for-byte: every bundle worker list validates raw at
+    // install, and the _all copies are raw checkout bytes like any bundle source.
+    for (const file of ['apt.txt', 'tools.json', 'env.txt', 'requirements.txt']) {
+      const fleetBytes = storedBytes(db, `workers/_all/${file}`);
+      if (fleetBytes !== null) stage(`bundles/core/${file}`, null, fleetBytes);
+    }
   } else {
     fail(400, 'unknown bundle action');
   }

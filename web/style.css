@@ -480,6 +480,13 @@ input[type="password"]::placeholder { color: var(--ink-2); opacity: 1; }
 .form-error { margin: 0; color: var(--red); }
 .form-status { margin: 0; color: var(--ink-2); min-height: 1.4em; }
 
+/* The turn-on confirm (specs/bundles.md "Turn on bundles"): a bordered box that
+   names the one commit the action makes, with its two buttons. */
+.sheet .confirm { border: 1px solid var(--ink); border-radius: 4px; padding: 0.8rem 1rem; margin: 0.6rem 0 0; max-width: 70ch; }
+.sheet .confirm p { margin: 0 0 0.5rem; font-size: 0.9375rem; }
+.sheet .confirm p:last-of-type { margin-bottom: 0.75rem; }
+.sheet .confirm .row { margin: 0; }
+
 .kv { display: grid; grid-template-columns: 10rem minmax(0, 1fr); margin: 0.6rem 0 1rem; }
 .kv dt, .kv dd { padding: 0.45rem 0; border-bottom: 1px solid var(--rule); margin: 0; }
 .kv dt { color: var(--ink-2); font-size: 0.9375rem; }

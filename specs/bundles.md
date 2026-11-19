@@ -159,6 +159,9 @@ spec. The acceptance tests judge the installed trees, not a live session.
   `workers/<p>/` lists. With no `core` bundle, such a project gets only its own
   lists; every skill sits on the shelf for it. A `workers/<dir>/` folder with no
   `projects.json` entry is a project with no `bundles` key.
+- The dashboard's "Turn on bundles" action (below) creates `bundles/core/` on a
+  repo that holds no bundles, so the user can start bundles mode from the UI
+  without unloading any skill.
 
 ## Merge order
 
@@ -326,6 +329,30 @@ notes and the refresh behave as for a file edit.
 - A move to the shelf does not touch `workers/<p>/` lists. A name that a
   project's own list still holds stays off the shelf for it, and the row says
   so.
+- `turn-on` (`{ action: 'turn-on' }`): the migration action for a repo with no
+  bundles. With no `bundles/` content in the stored snapshot, the Bundles
+  section shows a short note on what bundles mode does and one "Turn on
+  bundles" button instead of the board. The press reveals a confirm step that
+  names the commit subject and says that nothing changes until items move out
+  of core; Cancel hides it and writes nothing. The confirmed action creates
+  `bundles/core/` in one commit through the same save path as every other
+  action:
+  - `skills.txt` and `plugins.txt` with the standard two-line header and every
+    skill and plugin that installs today (the inventory's known universe), one
+    name per line, sorted;
+  - each of the four fleet worker lists (`apt.txt`, `tools.json`, `env.txt`,
+    `requirements.txt`) that `workers/_all/` holds, copied byte for byte. Core
+    is the only bundle whose worker lists merge into every project, so the
+    fleet lists keep reaching every project through the merge, and the
+    dashboard's per-project effective lists — which never merge `workers/_all/`
+    — keep showing them.
+  After the action, the computed effective item list of every project equals
+  the list before: every skill and plugin stays global through core, and each
+  project's worker items stay its own lists plus the fleet lists. The fleet
+  folder `workers/_all/` itself stays in place and keeps today's verbatim
+  install. A `turn-on` on a repo that already holds `bundles/` content refuses
+  with 409 and writes nothing, so a second click does nothing. The commit
+  subject is `alate: turn on bundles with core`; the confirm text quotes it.
 - Display: each bundle block lists its items by kind (skills, plugins, apt
   lines, tool names, env lines, requirement pins), and every item carries
   remove and move controls; each list-file name links to the file editor. Each project
@@ -337,7 +364,9 @@ notes and the refresh behave as for a file edit.
   is the merge order made visible. The Shelf section lists the skills and
   plugins that no bundle and no worker list names, each with an "Add to
   bundle" picker. Without `bundles/` in the data repo the three editing
-  surfaces render nothing; today's read-only overview stays.
+  surfaces render nothing; the Bundles section then shows only the turn-on
+  note, the confirm step, and its button (above), and today's read-only
+  overview stays for every other section.
 - Accessibility stays at the dashboard's level: a visible label per control,
   keyboard operation, visible focus, state in text rather than color alone.
   At 900 px and below the new blocks stack per the design's responsive rules.
@@ -369,6 +398,16 @@ Tests use a temp data repo and a temp home, and each fails before the change:
    line to another bundle in one save, and removes both; a broken
    requirements pin and a bundle folder that holds only `apt.txt` refuse as
    this section says.
+11. With no `bundles/`, the dashboard shows the turn-on note and button, and
+   the confirm names the commit subject and the "nothing changes until items
+   move out of core" sentence (a DOM test). Cancel writes nothing.
+12. The turn-on action creates `bundles/core/` with every skill and plugin and
+   the four `workers/_all/` copies in one commit; after it, the computed
+   effective list of each project equals the list before; a second click
+   refuses with 409 and no new commit.
+13. A repo turned on this way installs like the repo before the action: every
+   skill global, no shelf, per-project worker items still the project's own
+   lists plus the fleet lists.
 
 The repo check and test commands (the verified chain in `AGENTS.md`, `npm test`)
 exit 0 with the new test files joined into the chain, `package.json`, and
