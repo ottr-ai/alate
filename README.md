@@ -178,7 +178,7 @@ The file index also creates and deletes whole entries (specs/index-create-delete
 
 ## Skills alate ships
 
-Alate vendors the whole `.agents/skills` tree of [github.com/ottr-ai/ottr](https://github.com/ottr-ai/ottr) at the pinned commit `d8de00e808d32e7c893b010e7587d13156f80a27`, and installs every skill folder in that tree into every provisioned home. Today this tree holds seven skills:
+Alate vendors the whole `.agents/skills` tree of [github.com/ottr-ai/ottr](https://github.com/ottr-ai/ottr) at the pinned commit `137cad33cd40d6e0d37c59ae8d1785e4053515bd`, and installs every skill folder in that tree into every provisioned home. Today this tree holds seven skills:
 
 - `check-ottr-board`
 - `diff-security-review`

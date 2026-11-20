@@ -5,15 +5,15 @@
       "skill": "user/agents/skills/check-ottr-board",
       "rule": "TM1",
       "file": "SKILL.md",
-      "key": "sha256:50611ad3707d3c6436a7e9ceea10c9f540c46a8b122ec6948d00f9d482901387",
-      "reason": "Reviewed 2026-11-15 (ALAT-142): the flagged step 4 rows (DELETE /api/drain) are prose for a manual repair that the user approves first (drain, rebase onto origin/main, push with a token, end the drain); the skill runs no tool with these parameters itself. Key recomputed 2026-11-19 (ALAT-193) for the vendored d8de00e bytes; the flagged step 4 row 'local main diverged' is materially the same prose."
+      "key": "sha256:6665e086a3c7a715fe6e2c83e8d4a8ab91a9535037c48d0644d09d6158e9363b",
+      "reason": "Reviewed 2026-11-15 (ALAT-142): the flagged step 4 rows (DELETE /api/drain) are prose for a manual repair that the user approves first (drain, rebase onto origin/main, push with a token, end the drain); the skill runs no tool with these parameters itself. Key recomputed 2026-11-20 (ALAT-199) for the vendored 137cad33 bytes; the flagged step 4 row 'local main diverged' is materially the same prose."
     },
     {
       "skill": "user/agents/skills/check-ottr-board",
       "rule": "AE1",
       "file": "SKILL.md",
-      "key": "sha256:c2145d6e31ba5e0be7abe49567f2c5c1b4dffeb857d6d4b3f3a9c00b88eb8bc7",
-      "reason": "Reviewed 2026-11-19 (ALAT-193): both AE1 findings share this key; each is the static_parse_limit coverage note for scripts/board-report.ts reported at a SKILL.md reference. The script is a read-only reporter (GET /api/state, stat, git status); the analyzer flagged its own parse limit, not a misuse."
+      "key": "sha256:3692ebf1aa45b005f3646e723d192ad552dd6e0484f93ca6703836ca3f4f937b",
+      "reason": "Reviewed 2026-11-19 (ALAT-193): both AE1 findings share this key; each is the static_parse_limit coverage note for scripts/board-report.ts reported at a SKILL.md reference. The script is a read-only reporter (GET /api/state, stat, git status); the analyzer flagged its own parse limit, not a misuse. Key recomputed 2026-11-20 (ALAT-199) for the vendored 137cad33 bytes; the script keeps its single GET /api/state call and gains no write."
     }
   ]
 }

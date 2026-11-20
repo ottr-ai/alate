@@ -1,6 +1,6 @@
 ---
 name: check-ottr-board
-description: "Use to check the Ottr board: list the open cards, find stuck ones and their cause, fix them, file a card when the cause can stop other cards too, and check each project's main checkout for uncommitted files. Runs on the host against the Docker board, or in the board as the card of its Check the board button."
+description: "Use to check the Ottr board: list the open cards, find stuck ones and their cause, fix them, file a card when the cause can stop other cards too, and check each project's main checkout for uncommitted files, or to call the local board API from the host (hold turns, move or start cards). Runs on the host against the Docker board, or in the board as the card of its Check the board button."
 ---
 
 # Check the Ottr board
@@ -80,7 +80,7 @@ The script sorted the cards with this table; the table is the rule.
 |---|---|
 | `needs_you` with `asked` | A question for the user. Not stuck. |
 | `needs_you` with an approval reason: "Update card: read the summary, then reply to approve the merge.", "Fork-research-born task: the merge is held. …", or a proposal that ends with "Accept starts it. Edit task changes the prompt first. Cancel task declines it." (stored reasons from before 2026-11 end with "Accept to start it, edit the prompt first, or cancel to decline.") | A decision for the user. Not stuck. |
-| `needs_you` with a resume reason: "Please resume … after `<date>`" or "Re-run this card's … after `<date>`" | Waits by design: it resumes on the condition in its reason. Not stuck. |
+| `needs_you` with a resume reason: "Please resume … after `<date>`", "Please resume … when `<condition>`", or "Re-run this card's … after `<date>`" | Waits by design: it resumes on the condition in its reason. Not stuck. |
 | `needs_you` with any other reason | Stuck. Go to step 4. |
 | `running` or `preparing` | Stuck only when the log does not grow for 20 minutes, or when a check runs past its limit of 30 minutes (`maxTime` 1800 s). The board sweeps dead runs by itself, so wait one 60 s tick before you act. |
 | `queued` | Find the hold: a board drain (`drainUntil` is set), a full cap (`maxTotal` or the `maxParallel` of the project), a `dependsOn` card that is not done, a merge that runs in the same project, an open release or review (`mergeHold` in `src/scheduler.ts`), or no rules file for a todo card. Stuck only when no hold explains the wait, or when the hold itself is stuck. |
