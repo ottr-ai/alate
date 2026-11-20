@@ -1,18 +1,20 @@
 ---
 name: alate
-description: "Galley Proof: the agent-data repo as a newsprint proof sheet — ink on paper, red for corrections, blue for the reader's pencil."
+description: "Galley Proof: the agent-data repo as a proof sheet on Ottr's cool steel palette — amber for edits, red for deletions and errors, steel blue for the reader's pencil."
 colors:
-  primary: "#c2311f"
-  primary-wash: "#fbe8e4"
-  secondary: "#2f6fd0"
-  secondary-wash: "#e6eefa"
-  paper: "#f7f7f4"
-  sheet: "#ffffff"
-  ink: "#161616"
-  ink-soft: "#5b5b57"
-  rule: "#d8d8d2"
-  rule-soft: "#ebebe5"
-  line-number: "#a8a8a1"
+  primary: "#b3261e"
+  primary-wash: "#fbeae8"
+  edit: "#8f6200"
+  edit-wash: "#f9f0d8"
+  secondary: "#3c6a99"
+  secondary-wash: "#e7eef5"
+  paper: "#f1f2f4"
+  sheet: "#fbfcfd"
+  ink: "#1b1e22"
+  ink-soft: "#5d656e"
+  rule: "#c6ccd2"
+  rule-soft: "#d6dade"
+  line-number: "#8a929b"
 typography:
   display:
     fontFamily: "Source Serif 4, Georgia, serif"
@@ -91,43 +93,47 @@ components:
 
 **Creative North Star: "The Galley Proof"**
 
-Every edit to agent-data is a correction on a galley proof. The page sits on a newsprint ground (`--paper`); the working surface is a white galley sheet. Black ink carries all structure. Two inks do the talking: proof red marks what changed or broke, non-repro blue marks where the reader acts — selection, focus, links, the open place. Sections separate by ruled hairlines, the way a proof sheet does, never by cards or panels.
+Every edit to agent-data is a correction on a galley proof. The page sits on a cool grey field (`--paper`); the working surface is a light galley sheet. Ink carries all structure. Three inks do the talking: amber marks what changed, proof red marks what was deleted or broke, steel blue marks where the reader acts — selection, focus, links, the open place. Sections separate by ruled hairlines, the way a proof sheet does, never by cards or panels.
 
 The world refuses the code-editor default: no grey tree chrome, no tab strip, no blue action button. It also refuses the old dark catalog record. Density is print-like and confident: serif body text at comfortable measure (68–70ch max), mono reserved for paths, counts, versions, and the file text itself. Navigation is typographic — an underline or a 2px ink rule carries state, not a fill or a pill.
 
 **Key Characteristics:**
-- Newsprint paper ground with a single white sheet per view.
+- Cool grey paper ground with a single light sheet per view.
 - Hairline rules (1px) for list separation, 2px solid ink for structural edges.
-- Proof red (#c2311f) strictly for changes and errors; non-repro blue (#2f6fd0) strictly for interaction.
+- Amber (#8f6200) strictly for edits and pending work; proof red (#b3261e) strictly for deletions and errors; steel blue (#3c6a99) strictly for interaction.
 - Square corners everywhere; border-radius 0 on every element.
 - Source Serif 4 for reading and headings; JetBrains Mono for paths, counts, versions, and file text.
 - Depth comes from paper edges and washes, never from drop shadows.
 
 ## Colors
 
-The palette is print: warm paper, near-black ink, and two working inks with pale washes for fills. Coolness lives only in the two inks; everything structural is warm grey.
+The palette is Ottr's: cool steel neutrals and three working inks with pale washes for fills. Light values are listed; the dark theme uses Ottr's dark set (`--field` #2b2e32, `--panel` #303338, amber #f0b429, red #ffb4ae, steel #8fb0d0).
 
 ### Primary
-- **Proof Red** (#c2311f): changes, errors, dirty-file marks, "ready to update" states, the editor caret. It says *this differs* — never decoration, never links.
-- **Proof Red Wash** (#fbe8e4): changed-line background in the editor, danger-button hover.
+- **Proof Red** (#b3261e): deletions (deleted-line rules, delete margin marks), errors, the danger button. It says *this is gone or broken* — never decoration, never links.
+- **Proof Red Wash** (#fbeae8): danger-button hover.
+
+### Edit
+- **Edit Amber** (#8f6200): changed and added lines, change margin marks, dirty-file marks, the change list, pending counts, "ready to update" states, the editor caret. It says *this differs*.
+- **Edit Amber Wash** (#f9f0d8): changed-line background in the editor.
 
 ### Secondary
-- **Non-Repro Blue** (#2f6fd0): links, focus rings, selection, active nav tab, the current file in the index, the focused editor inset. It says *you are here / you can act*.
-- **Non-Repro Blue Wash** (#e6eefa): text selection background, current-file row background.
+- **Steel Blue** (#3c6a99): links, focus rings, selection, active nav tab, the current file in the index, the focused editor inset. It says *you are here / you can act*.
+- **Steel Blue Wash** (#e7eef5): text selection background, current-file row background.
 
 ### Neutral
-- **Newsprint** (#f7f7f4): page ground; masthead, press bar, and index chrome.
-- **Galley Sheet** (#ffffff): the white working sheet — overview content and editor surface.
-- **Ink** (#161616): body text, structural 2px rules, primary button fill, checked segment fill.
-- **Ink Soft** (#5b5b57): secondary text, labels, placeholders, hints.
-- **Rule** (#d8d8d2): 1px hairline list dividers, quiet borders.
-- **Rule Soft** (#ebebe5): hover row background on index entries.
-- **Line Number** (#a8a8a1): editor gutter numerals only.
+- **Field** (#f1f2f4): page ground; masthead, press bar, and index chrome.
+- **Galley Sheet** (#fbfcfd): the working sheet — overview content and editor surface.
+- **Ink** (#1b1e22): body text, structural 2px rules, primary button fill, checked segment fill.
+- **Ink Soft** (#5d656e): secondary text, labels, placeholders, hints.
+- **Rule** (#c6ccd2): 1px hairline list dividers, quiet borders.
+- **Rule Soft** (#d6dade): hover row background on index entries.
+- **Line Number** (#8a929b): editor gutter numerals only, in both themes.
 
 ### Named Rules
-**The Two-Ink Rule.** Proof red marks change and error; non-repro blue marks interaction. Never swap them: a link is never red, an error is never blue, and neither ink appears as ordinary decoration.
+**The Three-Ink Rule.** Amber marks an edit, proof red marks a deletion or an error, steel blue marks interaction. Never swap them: a link is never amber or red, an error is never blue, and no ink appears as ordinary decoration.
 
-**The Hairline Rule.** Separation is a rule, not a box. Lists, tables, key–value pairs, and margin marks divide with 1px `--rule`; only the sheet's top edge, the masthead, section heads, and the press bar earn 2px solid ink.
+**The Hairline Rule.** Separation is a rule or a gap, never a box. Tables, key–value pairs, and margin marks divide with 1px `--rule`. Lists (overview entries, bundle items, project rows) divide by space only, with no row lines. Only the sheet's top edge, the masthead, section heads, and the press bar earn 2px solid ink.
 
 ## Typography
 
@@ -145,7 +151,7 @@ The palette is print: warm paper, near-black ink, and two working inks with pale
 - **Code** (400, 0.8125rem, 1.75): file text in the editor and path fields; line-height 1.75 aligns the line-number gutter.
 
 ### Named Rules
-**The Weight Rule.** Hierarchy comes from serif weight and rule thickness. Text is never colored to gain importance; only the Two-Ink Rule grants color.
+**The Weight Rule.** Hierarchy comes from serif weight and rule thickness. Text is never colored to gain importance; only the Three-Ink Rule grants color.
 
 ## Layout
 
@@ -157,7 +163,7 @@ Responsive: at ≤900px the margin collapses to a stacked strip, the index becom
 
 ## Elevation & Depth
 
-Depth is paper on a desk, expressed by edges and washes — not by elevation. The sheet reads as a lighter, whiter paper than the ground; hairline 1px box-shadows built from `--rule` draw its side edges (an edge, not a glow). Focused editing adds an inset 1px blue-wash rim. Changed lines carry a red-wash band extended by matched box-shadows. Deleted-line boundaries are 2px red rules. There is no drop-shadow vocabulary.
+Depth is paper on a desk, expressed by edges and washes — not by elevation. The sheet reads as a lighter paper than the ground; hairline 1px box-shadows built from `--rule` draw its side edges (an edge, not a glow). Focused editing adds an inset 1px blue-wash rim. Changed lines carry an amber-wash band extended by matched box-shadows. Deleted-line boundaries are 2px red rules. There is no drop-shadow vocabulary.
 
 ### Named Rules
 **The No-Shadow Rule.** Shadows never imply elevation. Any box-shadow value must draw an edge (hairline in `--rule`) or extend a wash; a soft blurred shadow has no place in this world. The mobile index drawer separates from the sheet with a 2px ink rule, not a shadow.
@@ -183,35 +189,38 @@ Square, always: `border-radius: 0` on buttons, inputs, segments, tables, sheets.
 - **Error:** message text in red below the field; the field keeps its underline.
 
 ### Navigation
-Masthead tabs: 500-weight serif, full-height hit area, state carried by a 3px bottom border — transparent at rest, `--rule` on hover, blue on the current page (with blue text). Red mono counts sit beside a tab when work waits.
+Masthead tabs: 500-weight serif, full-height hit area, state carried by a 3px bottom border — transparent at rest, `--rule` on hover, blue on the current page (with blue text). Amber mono counts sit beside a tab when work waits.
 
 ### Segmented Control
 Inline row of cells divided by 1px ink borders. Checked cell: ink fill, paper text. Focus-visible: 2px blue outline on the cell. Labels are hidden for assistive tech; the visible cells are the control.
 
 ### Sheet (the galley)
-White `--sheet` surface, max-width 76rem, top edge 2px ink while editing with hairline side edges. Inside: headline, mono meta line, serif lede, then ruled sections. This is the only "card" the world has, and it spans the column.
+Light `--sheet` surface, max-width 76rem, top edge 2px ink while editing with hairline side edges. Inside: headline, mono meta line, serif lede, then ruled sections. The sheet is the main "card" the world has, and it spans the column. One exception: on Settings, each section is its own sheet panel (`--sheet` fill, 1px `--rule` sides, 2px ink top edge), so the sections read apart.
+
+### Inputs width
+Every text input stops at 30rem, so a field never reads as a full-width section rule.
 
 ### Proof Margin (signature component)
-A 15rem column beside the editor. Each mark: 2px red left border, 600-weight red serif text naming the change, then a mono quote of the old text prefixed `was: `. Marks align to changed lines via absolute `top`; they animate 150ms ease-out. This margin is the memorable moment — the user reads the push before making it.
+A 15rem column beside the editor. Each mark: 2px amber left border, 600-weight amber serif text naming the change, then a mono quote of the old text prefixed `was: `. A deletion mark (`.mark.del`) uses red instead. Marks align to changed lines via absolute `top`; they animate 150ms ease-out. This margin is the memorable moment — the user reads the push before making it.
 
 ### Editor (backdrop + textarea stack)
-Transparent textarea stacked over a backdrop that draws line numbers (`tabular-nums`, gutter 3.6em) and per-line change bands. Identical metrics keep the layers aligned: mono 0.8125rem / 1.75, tab-size 4, pre-wrap. Caret is red — the pen, not the error.
+Transparent textarea stacked over a backdrop that draws line numbers (`tabular-nums`, gutter 3.6em) and per-line change bands. Identical metrics keep the layers aligned: mono 0.8125rem / 1.75, tab-size 4, pre-wrap. Caret is amber — the pen, not the error.
 
 ### Updates Table
-Full-width, collapsed borders. Header: 600 serif 0.82rem on paper, sticky, over a 2px ink rule. Rows divided by 1px rules; names and versions in mono with tabular numerals; "ready" states in red 600; errors in red mono.
+Full-width, collapsed borders. Header: 600 serif 0.82rem on paper, sticky, over a 2px ink rule. Rows divided by 1px rules; names and versions in mono with tabular numerals; "ready" states in amber 600; errors in red mono.
 
 ## Do's and Don'ts
 
 ### Do:
 - **Do** use `tabular-nums` on every mono count, version, and line number.
-- **Do** separate with hairlines: 1px `--rule` between rows, 2px ink for structural edges only.
-- **Do** mark change with red and interaction with blue, per the Two-Ink Rule.
+- **Do** separate table and key–value rows with 1px `--rule` hairlines, and list rows with space. Use 2px ink for structural edges only.
+- **Do** mark edits with amber, deletions and errors with red, and interaction with blue, per the Three-Ink Rule.
 - **Do** keep corners square (`border-radius: 0`) on every new control.
 - **Do** keep focus visible: 2px blue outline with 2px offset, or the 2px blue underline on inputs.
 
 ### Don't:
-- **Don't** add drop shadows or elevated cards; the sheet's paper edge and washes are the whole depth model.
-- **Don't** use blue for errors or red for links, hover, or decoration.
+- **Don't** add drop shadows or elevated cards; the sheet's paper edge and washes are the whole depth model. The Settings section panels are flat sheets, not elevated cards.
+- **Don't** use blue for errors, or amber or red for links, hover, or decoration.
 - **Don't** round corners or add pill/chip fills; state lives in borders, rules, and washes.
 - **Don't** introduce a third typeface or color text for hierarchy; use serif weight and rules.
 - **Don't** replace text labels with color alone; category and state always name themselves in text.

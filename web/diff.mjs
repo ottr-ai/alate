@@ -1,4 +1,5 @@
-// Line diff for the editor's proof marks. Shared by web/app.js (browser) and server.test.mjs (node).
+// Editor text helpers: the line diff for the proof marks, and the name-list toggles for
+// bundle list files. Shared by web/app.js (browser) and server.test.mjs (node).
 
 // Hunks of b against a: { start (index in b), count (lines in b), old (lines from a) }.
 // count 0 is a pure deletion before line `start`; old [] is a pure addition.
@@ -24,4 +25,17 @@ export function diffLines(a, b) {
   }
   if (cur) hunks.push(cur);
   return hunks;
+}
+
+// A bundle name list (skills.txt, plugins.txt): one name per line; `#` starts a comment.
+const listEntry = (line) => line.replace(/#.*/, '').trim();
+export function listNames(text) {
+  return new Set(text.split('\n').map(listEntry).filter(Boolean));
+}
+// Adds the name as a new last line, or drops every line that names it. Other lines,
+// comments and blank lines stay as they are, so the proof marks show only this edit.
+export function setListName(text, name, on) {
+  if (listNames(text).has(name) === on) return text;
+  if (on) return (text === '' || text.endsWith('\n') ? text : text + '\n') + name + '\n';
+  return text.split('\n').filter((line) => listEntry(line) !== name).join('\n');
 }

@@ -147,7 +147,7 @@ An item named twice counts once, at its first name. The merge dedups each file t
 
 ### The shelf
 
-Items that no bundle names stay in the repo. alate scans them with the same gates as today. A rejected shelf item still fails the run with that item. The items install nowhere and load nowhere. The dashboard shows them on the shelf and offers an `Add to bundle` picker for each.
+Items that no bundle names stay in the repo. alate scans them with the same gates as today. A rejected shelf item still fails the run with that item. The items install nowhere and load nowhere. The dashboard lists them under "Not in any bundle" and offers an `Add to bundle` picker for each.
 
 ### Activation
 
@@ -170,9 +170,11 @@ This change ships the data side only. A turn does not read the per-project folde
 
 ### Dashboard
 
-The dashboard inventory scans `bundles/` and reports, per bundle, its list files and its items by kind. A name that the repo does not hold gets a warning on the dashboard. The install itself refuses that name. Each project row shows its `bundles` list, a picker for the bundles it does not carry, and the merged effective lists with the source of each item: `core`, the bundle name, or `workers/<p>`. Each skill and plugin row shows the bundles that name it, or an `on the shelf` marker. The counts row gains the bundle count.
+The dashboard inventory scans `bundles/` and reports, per bundle, its list files and its items by kind. A name that the repo does not hold gets a warning on the dashboard. The install itself refuses that name. The Overview is project first. Each project card shows its bundles as chips: `core` is marked "every project" and cannot be removed, each other bundle has a remove control, and an `Add bundle` picker adds a bundle. The card folds the merged effective lists, with the source of each item (`core`, the bundle name, or `workers/<p>`), into a closed section. The Bundles section lists each bundle with its item count, the projects that use it, and links to its list files. Each skill and plugin row shows the bundles that name it, or an `in no bundle` marker. The counts row gains the bundle count.
 
-The dashboard also edits. It creates a bundle, adds or removes a skill or plugin name in a bundle, moves a name between bundles or to the shelf, and assigns or unassigns a bundle for a project. The Shelf section lists the items that no bundle and no worker list names, each with an `Add to bundle` picker. Every action goes through `POST /api/bundle`, writes through the file editor's save path, and makes one commit per save. An unknown name gets the install's refusal. All six kinds take the add, remove, and move controls. The worker list rules mirror the install validators.
+The dashboard also edits. The `+` on the bundles folder in the file index creates a bundle. The Checklist tab of a bundle's `skills.txt` or `plugins.txt` adds and removes items with checkboxes; the four worker lists are edited in their files. The project chips assign and unassign bundles. Bundle actions go through `POST /api/bundle`, write through the file editor's save path, and make one commit per save. An unknown name gets the install's refusal. The worker list rules mirror the install validators.
+
+The file index also creates and deletes whole entries (specs/index-create-delete.md). The `+` on Rules, Skills and Projects opens the new main file as an unsaved draft. Its commit, through `POST /api/entry`, also writes the references: an `own` entry in `upstreams.json` for a new skill (and for a new rule that no pattern covers), the optional bundle line, or the `projects/projects.json` key. A file or folder view of a skill or project offers `Delete skill` or `Delete project`, which removes the folder and its references in one commit.
 
 ## Skills alate ships
 

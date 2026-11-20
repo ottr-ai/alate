@@ -11,7 +11,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { forAll, keepTemp } from './lib/data.mjs';
 
-import { diffLines } from './web/diff.mjs';
+import { diffLines, listNames, setListName } from './web/diff.mjs';
+import { originCovers, withoutOrigin, withOwnText } from './web/dashboard.mjs';
 import { mergeLineSources, mergeNamedSources } from './lib/bundles.mjs';
 import { checkUpdates, cmpVer, initUpdates, isValidUpdateRecord, loadUpdates, rowErrorText } from './lib/updates.mjs';
 import { SHIPPED_REPO, SHIPPED_PIN, shippedSkills } from './lib/shipped.mjs';
@@ -373,6 +374,59 @@ assert.deepEqual(diffLines(['a', 'b', 'c', 'd'], ['a', 'd']), [{ start: 1, count
 assert.deepEqual(diffLines(['x', 'a', 'y', 'b'], ['a', 'z', 'b', 'w']), [
   { start: 0, count: 0, old: ['x'] }, { start: 1, count: 1, old: ['y'] }, { start: 3, count: 1, old: [] }]);
 assert.deepEqual(diffLines(['a'], ['a']), []);
+
+// Bundle list toggles: a pinned file keeps its comment and blank line, and the property
+// checks that a toggle changes only the toggled name and is idempotent.
+assert.equal(setListName('# core\nalpha\n\nbeta\n', 'gamma', true), '# core\nalpha\n\nbeta\ngamma\n');
+assert.equal(setListName('# core\nalpha\n\nbeta\n', 'alpha', false), '# core\n\nbeta\n');
+assert.equal(setListName('alpha', 'beta', true), 'alpha\nbeta\n');
+assert.equal(setListName('alpha # pinned\n', 'alpha', false), '');
+forAll(rand => {
+  const pool = ['a', 'b', 'c', 'd'];
+  const pick = () => pool[Math.floor(rand() * pool.length)];
+  const lines = Array.from({ length: Math.floor(rand() * 6) }, () => [pick(), '# ' + pick(), '', ' ' + pick() + ' # x'][Math.floor(rand() * 4)]);
+  return [lines.join('\n') + (rand() < 0.5 ? '\n' : ''), pick(), rand() < 0.5];
+}, ([text, name, on]) => {
+  const before = listNames(text);
+  const after = setListName(text, name, on);
+  const expected = new Set(before);
+  if (on) expected.add(name); else expected.delete(name);
+  assert.deepEqual([...listNames(after)].sort(), [...expected].sort(), `toggle ${name} ${on} in ${JSON.stringify(text)}`);
+  assert.equal(setListName(after, name, on), after, 'a second toggle changes nothing');
+});
+
+// Index create and delete (specs/index-create-delete.md): the upstreams.json helpers.
+{
+  const oneLine = '{\n  "_doc": "x",\n  "own": ["*.md", "user/omp/agent/skills/a"],\n  "items": []\n}\n';
+  assert.equal(withOwnText(oneLine, ['*.md', 'user/omp/agent/skills/a', 'user/omp/agent/skills/b']),
+    '{\n  "_doc": "x",\n  "own": ["*.md", "user/omp/agent/skills/a", "user/omp/agent/skills/b"],\n  "items": []\n}\n', 'a one-line own array stays one line; nothing else moves');
+  const multi = '{\n  "own": [\n    "*.md"\n  ],\n  "items": []\n}\n';
+  assert.equal(withOwnText(multi, ['*.md', 'n.md']), '{\n  "own": [\n    "*.md",\n    "n.md"\n  ],\n  "items": []\n}\n', 'a multi-line own array keeps its indents');
+  assert.equal(withOwnText('{\n  "items": []\n}\n', ['x.md']), '{\n  "own": ["x.md"],\n  "items": []\n}\n', 'a file without own gets the key first');
+  assert.deepEqual(JSON.parse(withOwnText(null, ['x.md'])), { own: ['x.md'] }, 'no file: a new object');
+  assert.equal(originCovers({ own: ['*.md'] }, 'r.md'), true);
+  assert.equal(originCovers({ own: ['user/omp/agent/skills/a'] }, 'r.md'), false);
+  assert.equal(originCovers({ items: [{ paths: ['codeguard-*.md'] }] }, 'codeguard-a.md'), true, 'an item paths glob covers too');
+  assert.deepEqual(withoutOrigin({ own: ['*.md', 'user/omp/agent/skills/a'], items: [
+    { name: 'one', paths: ['user/omp/agent/skills/a'] }, { name: 'two', paths: ['user/omp/agent/skills/a', 'user/agents/skills/a'] }, { name: 'three', paths: ['x'] },
+  ] }, 'user/omp/agent/skills/a'), { own: ['*.md'], items: [{ name: 'two', paths: ['user/agents/skills/a'] }, { name: 'three', paths: ['x'] }] },
+  'the exact own entry and the item path go; an item without paths goes; globs stay');
+  // Property: the rewritten text parses to the same object with own replaced.
+  forAll(rand => {
+    const pool = ['*.md', 'user/omp/agent/skills/a', 'user/omp/agent/skills/b-c', 'codeguard-*.md'];
+    const pick = () => pool.filter(() => rand() < 0.5);
+    const before = pick();
+    const shape = Math.floor(rand() * 3);
+    const text = shape === 0 ? JSON.stringify({ _doc: 'd', own: before, items: [] }, null, 2) + '\n'
+      : shape === 1 ? `{\n  "_doc": "d",\n  "own": [${before.map(g => JSON.stringify(g)).join(', ')}],\n  "items": []\n}\n`
+        : '{\n  "_doc": "d",\n  "items": []\n}\n';
+    return [text, pick()];
+  }, ([text, own]) => {
+    const parsed = JSON.parse(withOwnText(text, own));
+    assert.deepEqual(parsed.own, own, `own replaced in ${JSON.stringify(text)}`);
+    assert.deepEqual({ ...parsed, own: undefined }, { ...JSON.parse(text), own: undefined }, 'other keys unchanged');
+  });
+}
 
 const repoRoot = dirname(fileURLToPath(import.meta.url)); // this test sits at the repo root
 const shipped = shippedSkills(repoRoot); // one entry per vendored skill folder, so a fifth folder needs no test edits
@@ -3807,6 +3861,58 @@ try {
   assert.equal((await r.json()).error, 'bundles: the data repo already holds bundles content');
   assert.equal(turnCommitCount(), turnCommitsAfter, 'the second click makes no commit');
   assert.equal(turnDisk('bundles/core/skills.txt'), '# skills of bundle core\n# one name per line; # comments and blank lines are ignored\nalpha\nzeta\n');
+
+  // Index create and delete through POST /api/entry (specs/index-create-delete.md): each
+  // save is one commit that carries the entry and its references, on the path source.
+  r = await postImport(JSON.stringify({ source: bundleDir }));
+  assert.equal(r.status, 200, JSON.stringify(await r.json()));
+  const postEntry = async b => fetch(new URL('/api/entry', base), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify(b) });
+  const ownOf = () => JSON.parse(bundleRemoteText('upstreams.json')).own;
+  // A rule that nothing covers: the repo has no upstreams.json yet, so the save creates it.
+  r = await postEntry({ action: 'create', kind: 'rule', name: 'rule-one', content: fm('rule one') });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.deepEqual(bundleStatFiles(body.commit), ['rule-one.md', 'upstreams.json'], 'one commit: the rule and its origin');
+  assert.deepEqual(ownOf(), ['rule-one.md']);
+  // A skill with a bundle: SKILL.md, the exact own path, and the bundle line in one commit.
+  r = await postEntry({ action: 'create', kind: 'skill', name: 'made-here', bundle: 'core', content: fm('made here') });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.equal(bundleSubject(), 'alate: add skill made-here');
+  assert.deepEqual(bundleStatFiles(body.commit), ['bundles/core/skills.txt', 'upstreams.json', 'user/omp/agent/skills/made-here/SKILL.md']);
+  assert.deepEqual(ownOf(), ['rule-one.md', 'user/omp/agent/skills/made-here']);
+  assert.ok(bundleRemoteText('bundles/core/skills.txt').split('\n').includes('made-here'), 'the bundle lists the new skill');
+  // An unknown bundle refuses before any write.
+  const entryCommits0 = bundleCommitCount();
+  r = await postEntry({ action: 'create', kind: 'skill', name: 'other', bundle: 'nope', content: fm('other') });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'bundles: unknown bundle "nope"');
+  assert.equal(bundleCommitCount(), entryCommits0, 'the refusal makes no commit');
+  // A project: AGENTS.md and the projects.json key in one commit; a second create refuses.
+  r = await postEntry({ action: 'create', kind: 'project', name: 'gamma', content: '# gamma\n' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.deepEqual(bundleStatFiles(body.commit), ['projects/gamma/AGENTS.md', 'projects/projects.json']);
+  assert.deepEqual(JSON.parse(bundleRemoteText('projects/projects.json')).projects.gamma, { extras: [], bundles: [] });
+  r = await postEntry({ action: 'create', kind: 'project', name: 'gamma', content: '# gamma\n' });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, 'project "gamma" already exists');
+  // Deleting the skill takes its files, its own entry, and its bundle line.
+  r = await postEntry({ action: 'delete', kind: 'skill', name: 'made-here' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.deepEqual(bundleStatFiles(body.commit), ['bundles/core/skills.txt', 'upstreams.json', 'user/omp/agent/skills/made-here/SKILL.md']);
+  assert.deepEqual(ownOf(), ['rule-one.md']);
+  assert.ok(!bundleRemoteText('bundles/core/skills.txt').split('\n').includes('made-here'), 'the bundle line is gone');
+  // Deleting the project takes its folder and its key.
+  r = await postEntry({ action: 'delete', kind: 'project', name: 'gamma' });
+  body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.deepEqual(bundleStatFiles(body.commit), ['projects/gamma/AGENTS.md', 'projects/projects.json']);
+  assert.ok(!Object.hasOwn(JSON.parse(bundleRemoteText('projects/projects.json')).projects, 'gamma'), 'the key is gone');
+  r = await postEntry({ action: 'delete', kind: 'skill', name: 'made-here' });
+  assert.equal(r.status, 404);
+  assert.equal((await r.json()).error, 'no skill "made-here"');
 
   assert.deepEqual(readdirSync(serverTmp).filter(name => /^alate-(?:dashboard|snapshot)-/.test(name)), [], 'the editor removed its temp clones');
 
@@ -7932,13 +8038,14 @@ try {
     }
   }
 
-  // 81. The bundles dashboard (specs/bundles.md "### Editing (ALAT-180)"): DOM-level checks
-  // over the three editing surfaces: the Bundles section, the per-project blocks, and the
-  // Shelf. Same headless boot as section 80, with two differences: the stub elements record
-  // their addEventListener listeners, so clicks, change events, and form submits actually
-  // fire, and the fetch stub records every POST /api/bundle body, so each action's exact
-  // payload is asserted. A second import boots app.js over a state without bundles, where
-  // the three surfaces render nothing and the Bundles part shows only the turn-on note,
+  // 81. The bundles dashboard (specs/bundles.md "Display (project first)"): DOM-level checks
+  // over the project blocks (bundle chips, the Add bundle picker, the effective list in a
+  // disclosure), the Bundles section (one line per bundle, no per-item controls), and the
+  // "Not in any bundle" section. Same headless boot as section 80, with two differences:
+  // the stub elements record their addEventListener listeners, so clicks and change events
+  // actually fire, and the fetch stub records every POST /api/bundle body, so each action's
+  // exact payload is asserted. A second import boots app.js over a state without bundles,
+  // where these surfaces render nothing and the Bundles part shows only the turn-on note,
   // the confirm step, and its button (specs/bundles.md "Turn on bundles", ALAT-192).
   {
     const ids180 = new Map();
@@ -8127,8 +8234,9 @@ try {
       const part180 = (label, nodes) => nodes.find((e) => e.attrs && e.attrs['aria-label'] === label);
       const block180 = (nodes, name) => nodes.filter((e) => e.attrs && e.attrs.class === 'project')
         .find((b) => b.children[0].children[0].textContent === name);
+      // The effective lists sit inside the block's closed disclosure, so search descendants.
       const kindRows180 = (block, label) => {
-        const kb = block.children.find((c) => c.attrs && c.attrs.class === 'kind-block' && c.children[0].textContent === label);
+        const kb = flat180(block).find((c) => c.attrs && c.attrs.class === 'kind-block' && c.children[0].textContent === label);
         return kb ? kb.children.find((c) => c.tag === 'ul').children.filter((c) => c.tag === 'li') : [];
       };
       const items180 = (block, label) => kindRows180(block, label).map((li) => li.children[0].textContent);
@@ -8153,128 +8261,88 @@ try {
         return posts180[n].body;
       };
 
-      // 1. The Bundles part: both blocks with their kind labels, items, and file links.
+      // 1. The Bundles part: one line per bundle with its count, its users, and its file
+      // links; no per-item controls and no create form on the Overview.
       const nodes1 = flat180(galley180.children[0]);
       const totals1 = nodes1.find((e) => e.attrs && e.attrs.class === 'totals');
       assert.ok(totals1 && totals1.textContent.includes('2 bundles'), 'the counts line shows the bundle count');
       const bundlesPart1 = part180('Bundles', nodes1);
       assert.ok(bundlesPart1, 'the Bundles part renders');
-      assert.equal(bundlesPart1.children.filter((c) => c.attrs && c.attrs.class === 'project').length, 2);
-      const core1 = block180(nodes1, 'core');
-      const gamedev1 = block180(nodes1, 'gamedev-2d');
-      assert.ok(core1 && gamedev1, 'both bundle blocks render');
-      assert.deepEqual(
-        gamedev1.children.filter((c) => c.attrs && c.attrs.class === 'kind-block').map((c) => c.children[0].textContent),
-        ['Skills', 'Plugins', 'Apt', 'Requirements']);
-      assert.deepEqual(items180(gamedev1, 'Skills'), ['bundled', 'shelfy']);
-      assert.deepEqual(items180(gamedev1, 'Plugins'), ['plug-two']);
-      assert.deepEqual(items180(gamedev1, 'Apt'), ['libsdl2']);
-      assert.deepEqual(items180(gamedev1, 'Requirements'), [pytest180]);
-      assert.deepEqual(items180(core1, 'Tools'), ['ripgrep']);
-      assert.deepEqual(items180(core1, 'Env'), ['LOG_LEVEL', 'plain TIMEOUT']);
+      const lines1 = flat180(bundlesPart1).find((e) => e.tag === 'ul' && e.attrs.class === 'kind-list bundle-list').children;
+      assert.deepEqual(lines1.map((li) => [li.children[0].textContent, li.children[1].textContent]),
+        [['core', '6 items · used by every project'], ['gamedev-2d', '5 items · used by alpha']], 'each bundle line names its count and its users');
       const fileLinks1 = flat180(bundlesPart1).filter((e) => e.tag === 'a' && String(e.attrs.href || '').startsWith('#/file/bundles/'));
-      assert.ok(fileLinks1.length >= 9, 'every list-file name links into the editor');
+      assert.equal(fileLinks1.length, 9, 'every list-file name links into the editor');
       assert.ok(fileLinks1.some((a) => a.attrs.href === '#/file/bundles/gamedev-2d/skills.txt'));
+      assert.ok(flat180(bundlesPart1).every((e) => e.tag !== 'button' && e.tag !== 'select' && e.tag !== 'form'), 'the Bundles part carries no per-item controls');
+      assert.ok(!nodes1.some((e) => e.textContent === 'New bundle name'), 'the Overview has no create-bundle form (the index + creates bundles)');
 
-      // Worker rows carry the same remove and move controls as the name rows.
-      const aptRow1 = kindRows180(gamedev1, 'Apt').find((r) => r.children[0].textContent === 'libsdl2');
-      const aptControls1 = aptRow1.children.find((c) => c.attrs && c.attrs.class === 'row-controls').children;
-      assert.ok(aptControls1.some((c) => c.tag === 'button' && c.attrs['aria-label'] === 'Remove libsdl2 from gamedev-2d'), 'the apt row carries its Remove button');
-      assert.deepEqual(aptControls1.filter((c) => c.tag === 'select').map((c) => c.attrs['aria-label']), ['Move libsdl2 to'], 'the apt row carries its move select');
-      // The add form offers exactly the six kinds and retitles the input per kind.
-      const addForm1 = flat180(gamedev1).find((e) => e.tag === 'form' && e.attrs && e.attrs.class === 'inline-form');
-      const kindSel1 = flat180(addForm1).find((e) => e.tag === 'select' && e.attrs['aria-label'] === 'Item kind');
-      assert.deepEqual(kindSel1.children.filter((c) => c.tag === 'option').map((c) => c.attrs.value),
-        ['skill', 'plugin', 'apt', 'env', 'requirements', 'tools'], 'the add form offers exactly the six kinds');
-      const addInput1 = flat180(addForm1).find((e) => e.tag === 'input');
-      assert.equal(addInput1.attrs.placeholder, 'skill-name', 'the input starts with the skill placeholder');
-      kindSel1.value = 'apt';
-      kindSel1.fire('change');
-      assert.equal(addInput1.attrs.placeholder, 'package-name', 'the placeholder follows the chosen kind');
-
-      // 2. The Shelf part: exactly the shelf-flagged skill and plugin, each with picker and button.
-      const shelfPart2 = part180('Shelf', nodes1);
-      assert.ok(shelfPart2, 'the Shelf part renders');
+      // 2. The "Not in any bundle" part: exactly the shelf-flagged skill and plugin, each
+      // with its picker and button.
+      const shelfPart2 = part180('Not in any bundle', nodes1);
+      assert.ok(shelfPart2, 'the Not in any bundle part renders');
       const shelfRows2 = shelfPart2.children.find((c) => c.tag === 'ul').children.filter((c) => c.tag === 'li');
       assert.deepEqual(shelfRows2.map((li) => li.children[0].textContent), ['mshelf', 'loneplug']);
       assert.deepEqual(shelfRows2.map((li) => li.children.find((c) => c.tag === 'select').attrs['aria-label']),
         ['Choose a bundle for mshelf', 'Choose a bundle for loneplug']);
       assert.ok(shelfRows2.every((li) => li.children.some((c) => c.tag === 'button' && c.textContent === 'Add to bundle')));
 
-      // 3. The alpha block: an unassign control, a picker of the bundles it lacks, effective rows.
+      // 3. The alpha block: core as a fixed chip, its own bundle as a removable chip, an
+      // Add bundle picker without core or carried bundles, and the effective rows in a
+      // disclosure that names the item count.
       const alpha3 = block180(nodes1, 'alpha');
       assert.ok(alpha3, 'the alpha project block renders');
-      assert.ok(flat180(alpha3).some((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Unassign gamedev-2d from alpha'));
-      const pick3 = flat180(alpha3).find((e) => e.tag === 'select' && e.attrs['aria-label'] === 'Choose a bundle for alpha');
+      const chips3 = flat180(alpha3).find((e) => e.tag === 'ul' && e.attrs['aria-label'] === 'Bundles of alpha');
+      assert.ok(chips3, 'the bundles render as a chip row');
+      const fixed3 = chips3.children.find((c) => c.attrs && c.attrs.class === 'chip fixed');
+      assert.ok(fixed3 && fixed3.textContent === 'coreevery project' && !flat180(fixed3).some((e) => e.tag === 'button'), 'core is a fixed chip without a remove control');
+      assert.ok(flat180(alpha3).some((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Remove gamedev-2d from alpha'), 'a carried bundle has a remove control');
+      const pick3 = flat180(alpha3).find((e) => e.tag === 'select' && e.attrs['aria-label'] === 'Add a bundle to alpha');
       const opts3 = pick3.children.filter((c) => c.tag === 'option');
-      assert.equal(opts3[0].textContent, 'Choose a bundle...');
-      const openNames3 = opts3.map((o) => o.attrs.value);
-      assert.ok(openNames3.includes('core'), 'core is still open for alpha');
-      assert.ok(!openNames3.includes('gamedev-2d'), 'a bundle the project carries is not offered again');
+      assert.equal(opts3[0].textContent, 'Add bundle…');
+      assert.deepEqual(opts3.map((o) => o.attrs.value), [''], 'neither core nor a carried bundle is offered');
+      const eff3 = flat180(alpha3).find((e) => e.tag === 'details' && e.attrs.class === 'effective');
+      assert.ok(eff3 && !eff3.open && eff3.children[0].textContent === '9 items from these bundles', 'the effective list folds into a closed disclosure with its count');
       assert.equal(aside180(alpha3, 'Skills', 'shared'), 'from core');
       assert.equal(aside180(alpha3, 'Skills', 'workeronly'), 'from workers/alpha');
       assert.equal(aside180(alpha3, 'Apt', 'libsdl2'), 'from gamedev-2d');
 
       // 4. Every control posts its exact body; each success re-renders and re-fetches the index.
-      // a. Move bundled from gamedev-2d to the shelf.
-      const gamedev4a = block180(flat180(galley180.children[0]), 'gamedev-2d');
-      const li4a = flat180(gamedev4a).find((e) => e.tag === 'li' && e.children.some((c) => c.attrs && c.attrs.class === 'item' && c.textContent === 'bundled'));
-      const controls4a = li4a.children.find((c) => c.attrs && c.attrs.class === 'row-controls').children;
-      controls4a.find((c) => c.tag === 'select').value = 'shelf';
-      assert.deepEqual(await doAction180(() => controls4a.find((c) => c.tag === 'button' && c.textContent === 'Move').fire('click')),
-        { action: 'move', kind: 'skill', name: 'bundled', from: 'gamedev-2d', to: 'shelf' });
-      // b. Add the shelf skill mshelf to core from its Shelf row.
-      const shelf4b = part180('Shelf', flat180(galley180.children[0]));
+      // a. Remove gamedev-2d from alpha with its chip control.
+      const unassign4a = flat180(block180(flat180(galley180.children[0]), 'alpha')).find((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Remove gamedev-2d from alpha');
+      assert.deepEqual(await doAction180(() => unassign4a.fire('click')),
+        { action: 'unassign', project: 'alpha', bundle: 'gamedev-2d' });
+      // b. Add the shelf skill mshelf to core from its row.
+      const shelf4b = part180('Not in any bundle', flat180(galley180.children[0]));
       const row4b = flat180(shelf4b).find((e) => e.tag === 'li' && e.children[0].textContent === 'mshelf');
       row4b.children.find((c) => c.tag === 'select').value = 'core';
       assert.deepEqual(await doAction180(() => row4b.children.find((c) => c.tag === 'button' && c.textContent === 'Add to bundle').fire('click')),
         { action: 'add', kind: 'skill', name: 'mshelf', bundle: 'core' });
-      // c. Create a bundle named web through the section's form.
-      const bundles4c = part180('Bundles', flat180(galley180.children[0]));
-      const form4c = bundles4c.children.find((c) => c.tag === 'form' && c.children.some((k) => k.attrs && k.attrs.id === 'new-bundle-name'));
-      form4c.children.find((k) => k.attrs && k.attrs.id === 'new-bundle-name').value = 'web';
-      assert.deepEqual(await doAction180(() => form4c.fire('submit')), { action: 'create', name: 'web' });
-      // d. Assign core to beta; choosing a bundle first enables the Assign button.
-      const beta4d = block180(flat180(galley180.children[0]), 'beta');
-      const pick4d = flat180(beta4d).find((e) => e.tag === 'select');
-      const assign4d = flat180(beta4d).find((e) => e.tag === 'button' && e.textContent === 'Assign');
-      pick4d.value = 'core';
-      pick4d.fire('change');
-      assert.equal(assign4d.disabled, false, 'choosing a bundle enables Assign');
-      assert.deepEqual(await doAction180(() => assign4d.fire('click')), { action: 'assign', project: 'beta', bundle: 'core' });
-      // e. Remove shelfy from gamedev-2d.
-      const gamedev4e = block180(flat180(galley180.children[0]), 'gamedev-2d');
-      const remove4e = flat180(gamedev4e).find((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Remove shelfy from gamedev-2d');
-      assert.deepEqual(await doAction180(() => remove4e.fire('click')),
-        { action: 'remove', bundle: 'gamedev-2d', kind: 'skill', name: 'shelfy' });
-      // f. Move the apt line libsdl2 to the shelf: the body sends the singular worker
-      // kind and the item field, like every worker-kind row's controls.
-      const gamedev4f = block180(flat180(galley180.children[0]), 'gamedev-2d');
-      const li4f = flat180(gamedev4f).find((e) => e.tag === 'li' && e.children.some((c) => c.attrs && c.attrs.class === 'item' && c.textContent === 'libsdl2'));
-      const controls4f = li4f.children.find((c) => c.attrs && c.attrs.class === 'row-controls').children;
-      controls4f.find((c) => c.tag === 'select').value = 'shelf';
-      assert.deepEqual(await doAction180(() => controls4f.find((c) => c.tag === 'button' && c.textContent === 'Move').fire('click')),
-        { action: 'move', kind: 'apt', item: 'libsdl2', from: 'gamedev-2d', to: 'shelf' });
-      // g. A tools row sends the bare entry name, the key remove and move key on.
-      const core4g = block180(flat180(galley180.children[0]), 'core');
-      const remove4g = flat180(core4g).find((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Remove ripgrep from core');
-      assert.deepEqual(await doAction180(() => remove4g.fire('click')),
-        { action: 'remove', bundle: 'core', kind: 'tools', item: 'ripgrep' });
+      // c. Add gamedev-2d to beta: choosing a bundle first enables the Add button.
+      const beta4c = block180(flat180(galley180.children[0]), 'beta');
+      const pick4c = flat180(beta4c).find((e) => e.tag === 'select' && e.attrs['aria-label'] === 'Add a bundle to beta');
+      assert.deepEqual(pick4c.children.filter((c) => c.tag === 'option').map((o) => o.attrs.value), ['', 'gamedev-2d']);
+      const add4c = flat180(beta4c).find((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Add the chosen bundle to beta');
+      pick4c.value = 'gamedev-2d';
+      pick4c.fire('change');
+      assert.equal(add4c.disabled, false, 'choosing a bundle enables Add');
+      assert.deepEqual(await doAction180(() => add4c.fire('click')), { action: 'assign', project: 'beta', bundle: 'gamedev-2d' });
 
-      // 5. A refused action: the section status carries the message, the button unlocks again.
+      // 5. A refused action: the Projects status carries the message, the button unlocks again.
       failAt180 = posts180.length + 1;
-      const gamedev5 = block180(flat180(galley180.children[0]), 'gamedev-2d');
-      const remove5 = flat180(gamedev5).find((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Remove bundled from gamedev-2d');
+      const beta5 = block180(flat180(galley180.children[0]), 'beta');
+      const pick5 = flat180(beta5).find((e) => e.tag === 'select' && e.attrs['aria-label'] === 'Add a bundle to beta');
+      const add5 = flat180(beta5).find((e) => e.tag === 'button' && e.attrs['aria-label'] === 'Add the chosen bundle to beta');
+      pick5.value = 'gamedev-2d';
+      pick5.fire('change');
       const n5 = posts180.length;
-      remove5.fire('click');
+      add5.fire('click');
       assert.ok(await settle180(() => posts180.length > n5), 'the refused action still POSTed');
-      assert.deepEqual(posts180[n5].body, { action: 'remove', bundle: 'gamedev-2d', kind: 'skill', name: 'bundled' });
-      assert.ok(await settle180(() => remove5.disabled === false), 'the pressed button is re-enabled');
-      assert.deepEqual(remove5.disabledFlips, [true, false]);
-      const bundles5 = part180('Bundles', flat180(galley180.children[0]));
-      const status5 = flat180(bundles5).find((e) => e.attrs && e.attrs.class === 'status error' && e.attrs.role === 'alert');
-      assert.ok(status5, 'the Bundles section status shows the refusal');
-      assert.equal(status5.className, 'status error');
+      assert.deepEqual(posts180[n5].body, { action: 'assign', project: 'beta', bundle: 'gamedev-2d' });
+      assert.ok(await settle180(() => add5.disabled === false && add5.disabledFlips.at(-2) === true), 'the pressed button is re-enabled');
+      const projects5 = part180('Projects', flat180(galley180.children[0]));
+      const status5 = flat180(projects5).find((e) => e.attrs && e.attrs.class === 'status error' && e.attrs.role === 'alert');
+      assert.ok(status5, 'the Projects section status shows the refusal');
       assert.equal(status5.textContent, 'bundles/web: unknown skill "ghost"');
 
       // 6. Without bundles in the state, the Bundles part shows the turn-on note,
@@ -8285,12 +8353,12 @@ try {
       await import('./web/app.js?alat180plain');
       assert.ok(await settle180(() => {
         const s = galley180.children[0];
-        return s && s !== beforePlain6 && part180('Projects', flat180(s)) && !part180('Shelf', flat180(s));
+        return s && s !== beforePlain6 && part180('Projects', flat180(s)) && !part180('Not in any bundle', flat180(s));
       }), 'the plain overview rendered');
       const plain6 = flat180(galley180.children[0]);
       const bundlesPart6 = part180('Bundles', plain6);
       assert.ok(bundlesPart6, 'the Bundles part renders without bundles');
-      assert.ok(!part180('Shelf', plain6), 'no Shelf part without bundles');
+      assert.ok(!part180('Not in any bundle', plain6), 'no Not in any bundle part without bundles');
       assert.ok(!plain6.some((e) => e.textContent === 'New bundle name'), 'no create-bundle field without bundles');
       assert.ok(plain6.every((e) => e.tag !== 'select'), 'no assign picker anywhere without bundles');
       assert.ok(plain6.some((e) => e.attrs && e.attrs.class === 'note' && e.textContent.includes('Bundles mode assigns')), 'the note explains what bundles mode does');
@@ -8332,7 +8400,7 @@ try {
       const afterTurn6 = flat180(galley180.children[0]);
       const board6 = part180('Bundles', afterTurn6);
       assert.ok(board6, 'the success answer shows the bundles board');
-      assert.ok(flat180(board6).some((e) => e.attrs && e.attrs.class === 'project' && e.children[0].children[0].textContent === 'core'), 'the board lists the core block from the answer state');
+      assert.ok(flat180(board6).some((e) => e.tag === 'li' && e.children[0] && e.children[0].attrs && e.children[0].attrs.class === 'item' && e.children[0].textContent === 'core'), 'the board lists the core bundle line from the answer state');
       assert.ok(!afterTurn6.some((e) => e.attrs && e.attrs.id === 'turn-on-bundles'), 'no turn-on button after bundles exist');
       // A refused turn-on (a stale page racing a second click): the refusal lands
       // in the section status, the button unlocks, and nothing re-renders.

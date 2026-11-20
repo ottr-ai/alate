@@ -11,7 +11,7 @@ import type { AddressInfo } from 'node:net'
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
 import { childEnv, DEFAULT_GITHUB_HOST, keepTemp, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
-import { runBundleAction, runCleanup, runEdit, runImport, runSnapshot } from './lib/server-worker.mjs'
+import { runBundleAction, runCleanup, runEdit, runEntryAction, runImport, runSnapshot } from './lib/server-worker.mjs'
 import { getTrustedPathSource, isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead, setTrustedPathSource } from './web/dashboard.mjs'
 import type { StateDef } from './web/dashboard.mjs'
 import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
@@ -26,7 +26,7 @@ const repoRoot = import.meta.dirname
 const CONFIG_FILE = flagValue('--config') ?? join(repoRoot, 'server-config.json')
 const CAP = 200000
 const SCRIPTS = ['sync.mjs', 'install-user.mjs', 'install-projects.mjs']
-const KNOWN_ROUTES = ['/health', '/config', '/provision', '/api/updates', '/api/updates/check', '/api/files', '/api/file', '/api/bundle']
+const KNOWN_ROUTES = ['/health', '/config', '/provision', '/api/updates', '/api/updates/check', '/api/files', '/api/file', '/api/bundle', '/api/entry']
 const testChildEnvCapture = process.env.ALATE_TEST_CHILD_ENV
 // Test hook: a server that ignores SIGTERM exercises the test suite's teardown escalation;
 // only the process-group SIGKILL fallback stops it.
@@ -471,11 +471,13 @@ let dashState = loadState(db)
 // Dev-only allowance so a live-reload dev server can load. Guarded by ALATE_LIVE;
 // production builds never set it, so the served CSP stays unchanged.
 const liveDev = process.env.ALATE_LIVE ? " http://localhost:8400" : ""
+// The live picker previews variants with inline <style> blocks and style attributes.
+const liveStyle = process.env.ALATE_LIVE ? " 'unsafe-inline'" : ""
 const DASH_HEADERS = {
   // frame-ancestors 'none' (plus X-Frame-Options for older engines) blocks clickjacking:
   // on a loopback bind the dashboard is key-free, so one click in a framed page can
   // import a source or store a key (validated in the ALAT-49 browser run).
-  'Content-Security-Policy': `default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'${liveDev}; font-src 'self'; connect-src 'self'${liveDev}; manifest-src 'self'; frame-ancestors 'none'`,
+  'Content-Security-Policy': `default-src 'none'; img-src 'self'; style-src 'self'${liveStyle}; script-src 'self'${liveDev}; font-src 'self'; connect-src 'self'${liveDev}; manifest-src 'self'; frame-ancestors 'none'`,
   'X-Content-Type-Options': 'nosniff',
   'Cache-Control': 'no-store',
   'X-Frame-Options': 'DENY',
@@ -851,6 +853,19 @@ app.post<{ Body: BundleActionBody | undefined }>('/api/bundle', { bodyLimit: 64 
     const res = await runBundleAction({ dbFile, state: dashState, body, token: dashToken(), trustedDir: getTrustedPathSource(), known })
     return writeResult(res)
   })
+})
+
+// Index create and delete (specs/index-create-delete.md): a rule, skill or project with
+// its references (upstreams.json own, bundle lines, projects.json key) in one save.
+app.post<{ Body: Record<string, unknown> | undefined }>('/api/entry', { bodyLimit: 2 * 1024 * 1024, preHandler: dashGuard }, async (req, reply) => {
+  const inventory = dashState.inventory
+  if (!dashState.source || !inventory) return reply.code(400).send({ error: 'no data source configured' })
+  const known = {
+    skills: new Set(inventory.user.skills.map(s => s.name)),
+    plugins: new Set(inventory.user.plugins.map(p => p.name)),
+  }
+  const body = req.body ?? {}
+  return queuedDashboardWrite(reply, async () => writeResult(await runEntryAction({ dbFile, state: dashState, body, token: dashToken(), trustedDir: getTrustedPathSource(), known })))
 })
 
 // Dashboard settings: stored GitHub key (write-only) and auto-update opt-in. Guarded like /api/import.

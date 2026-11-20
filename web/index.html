@@ -9,8 +9,8 @@
 <link rel="stylesheet" href="/style.css">
 <link rel="icon" href="/logo.png" type="image/png">
 <link rel="manifest" href="/manifest.webmanifest">
-<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f7f7f4">
-<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#191715">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f1f2f4">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#2b2e32">
 <link rel="apple-touch-icon" href="/icons/icon-192.png">
 <script src="/theme.js"></script>
 </head>
@@ -19,6 +19,7 @@
 <header class="masthead">
   <a class="brand" href="#/"><img src="/logo.png" alt="" width="26" height="26"><span>alate</span></a>
   <p class="source" id="source"></p>
+  <button type="button" class="linkish import-now" id="import-now" hidden>Import now</button>
   <nav class="views" id="views" aria-label="Views" hidden>
     <button type="button" class="files-toggle" id="files-toggle" aria-expanded="false" aria-controls="index">Files</button>
     <a href="#/" data-view="overview">Overview</a>
@@ -39,18 +40,21 @@
   <main class="galley" id="galley" tabindex="-1"></main>
 </div>
 <section class="login-view" id="login-view" hidden aria-labelledby="login-heading">
-  <h1 id="login-heading">Sign in</h1>
-  <p class="lede">This dashboard is served on the network. Enter the app key to continue.</p>
-  <form id="login-form" novalidate>
-    <div class="field">
-      <label for="login-key">App key</label>
-      <input type="password" id="login-key" autocomplete="current-password" spellcheck="false">
-    </div>
-    <p class="alert" id="login-error" role="alert" hidden></p>
-    <div class="form-actions">
-      <button type="submit" class="primary" id="login-btn">Sign in</button>
-    </div>
-  </form>
+  <div class="login-sheet">
+    <p class="login-brand"><img src="/logo.png" alt="" width="28" height="28"><span>alate</span></p>
+    <h1 id="login-heading">Sign in</h1>
+    <p class="lede">This dashboard is served on the network. Enter the app key to continue.</p>
+    <form id="login-form" novalidate>
+      <div class="field">
+        <label for="login-key">App key</label>
+        <input type="password" id="login-key" autocomplete="current-password" spellcheck="false" required>
+      </div>
+      <p class="alert" id="login-error" role="alert" hidden></p>
+      <div class="form-actions">
+        <button type="submit" class="btn" id="login-btn">Sign in</button>
+      </div>
+    </form>
+  </div>
 </section>
 <script type="module" src="/app.js"></script>
 </body>

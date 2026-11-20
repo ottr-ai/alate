@@ -2,7 +2,7 @@
 // Only relative imports: the repo gate bans bare specifiers, and server.ts serves this page same-origin.
 // All dynamic text goes through textContent/createTextNode, never innerHTML.
 
-import { diffLines } from './diff.mjs';
+import { diffLines, listNames, setListName } from './diff.mjs';
 
 // ---------- DOM helpers ----------
 
@@ -99,6 +99,9 @@ function parseRoute() {
   if (hash.startsWith('/file/')) {
     try { return { view: 'file', path: hash.slice(6).split('/').map(decodeURIComponent).join('/') }; } catch { return { view: 'overview' }; }
   }
+  if (hash.startsWith('/folder/')) {
+    try { return { view: 'folder', path: hash.slice(8).split('/').map(decodeURIComponent).join('/') }; } catch { return { view: 'overview' }; }
+  }
   if (hash === '/new') return { view: 'new' };
   if (hash === '/updates') return { view: 'updates' };
   if (hash === '/settings') return { view: 'settings' };
@@ -114,6 +117,7 @@ function renderShell() {
   $('index').hidden = !src;
   const line = $('source');
   line.textContent = '';
+  $('import-now').hidden = !src;
   if (src) {
     const spec = src.kind === 'repo' ? src.name + (src.ref ? '@' + src.ref : '') : src.spec;
     line.append(h('b', { text: spec }));
@@ -174,7 +178,13 @@ function treeList(node, depth, keyPrefix, current) {
       treeList(child, depth + 1, key, current));
     det.firstChild.style.setProperty('--depth', depth);
     det.addEventListener('toggle', () => { if (det.open) openFolders.add(key); else openFolders.delete(key); });
-    ul.append(h('li', null, det));
+    // A skill folder (it holds SKILL.md) or a project folder also opens its folder view.
+    const skillMain = child.files.find((f) => f.name === 'SKILL.md');
+    const folder = skillMain ? skillMain.path.slice(0, -'/SKILL.md'.length) : keyPrefix === 'projects' ? 'projects/' + name : null;
+    if (folder) det.firstChild.addEventListener('click', () => { location.hash = '#/folder/' + encodePath(folder); });
+    const li = h('li', null, det);
+    if (key === 'repo/bundles') li.append(newEntryButton(det, { what: 'bundle', submit: (n, status) => runBundleAction({ action: 'create', name: n }, null, status) }));
+    ul.append(li);
   }
   for (const f of node.files) {
     const d = drafts.get(f.path);
@@ -186,6 +196,117 @@ function treeList(node, depth, keyPrefix, current) {
     ul.append(h('li', null, a));
   }
   return ul;
+}
+
+// The "+" sits beside a group or folder row, not inside its summary, so it stays its own
+// button. It opens an inline name field as the first row; Enter submits, Escape cancels.
+// extra() may add one control (the bundle picker of a new skill) before the status line.
+function newEntryButton(det, { what, extra = null, submit }) {
+  const btn = h('button', { type: 'button', class: 'tree-add', 'aria-label': 'New ' + what, title: 'New ' + what, text: '+' });
+  btn.addEventListener('click', () => {
+    det.open = true;
+    const open = det.querySelector('.tree-new input');
+    if (open) return open.focus();
+    const input = h('input', { type: 'text', 'aria-label': 'New ' + what + ' name', placeholder: what + '-name', autocomplete: 'off', spellcheck: 'false', enterkeyhint: 'done' });
+    const more = extra ? extra() : null;
+    const status = h('p', { class: 'status', role: 'alert' });
+    const form = h('form', { class: 'tree-new' }, input, more, status);
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const name = input.value.trim();
+      status.className = 'status error';
+      if (!name) { status.textContent = 'Enter a ' + what + ' name.'; return; }
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) { status.textContent = 'Use a-z, 0-9 and "-", and start with a letter or digit.'; return; }
+      status.textContent = '';
+      submit(name, status, more);
+    });
+    input.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { form.remove(); btn.focus(); } });
+    det.firstChild.after(form);
+    input.focus();
+  });
+  return btn;
+}
+
+// Index create (specs/index-create-delete.md): + on Rules, Skills and Projects opens the
+// new main file as an unsaved draft with a template. Its commit goes through /api/entry,
+// which also writes the references (upstreams.json own, the bundle line, projects.json).
+const ENTRY_KINDS = {
+  rules: { kind: 'rule', path: (n) => n + '.md', template: (n) => '---\ndescription: \n---\n# ' + n + '\n' },
+  skills: { kind: 'skill', path: (n) => 'user/omp/agent/skills/' + n + '/SKILL.md', template: (n) => '---\nname: ' + n + '\ndescription: \n---\n# ' + n + '\n' },
+  projects: { kind: 'project', path: (n) => 'projects/' + n + '/AGENTS.md', template: (n) => '# ' + n + '\n' },
+};
+
+function entryButton(det, groupKey) {
+  const spec = ENTRY_KINDS[groupKey];
+  const inv = state.inventory || {};
+  const bundleNames = arrayOf(inv.bundles).map((b) => (b && b.name ? String(b.name) : '')).filter(Boolean);
+  const extra = spec.kind === 'skill' && bundleNames.length
+    ? () => h('select', { 'aria-label': 'Bundle of the new skill' },
+      h('option', { value: '', text: 'Not in any bundle' }), bundleNames.map((n) => h('option', { value: n, text: n })))
+    : null;
+  return newEntryButton(det, { what: spec.kind, extra, submit: (name, status, more) => {
+    const taken = spec.kind === 'skill' ? arrayOf(inv.user?.skills).some((s) => s.name === name)
+      : spec.kind === 'project' ? arrayOf(inv.projects?.named).some((p) => p.name === name) || files.some((f) => f.path.startsWith('projects/' + name + '/'))
+        : files.some((f) => f.path === spec.path(name));
+    if (taken) { status.className = 'status error'; status.textContent = 'A ' + spec.kind + ' named "' + name + '" already exists.'; return; }
+    const path = spec.path(name);
+    drafts.set(path, { base: null, original: '', text: spec.template(name), binary: false, bytes: 0, isNew: true,
+      entry: { kind: spec.kind, name, bundle: more ? more.value : '' } });
+    location.hash = fileHref(path);
+  } });
+}
+
+// The skill or project that a path sits in, or null: { kind, name, folder }.
+function entryOf(path) {
+  const inv = state.inventory || {};
+  const skill = arrayOf(inv.user?.skills).find((s) => path.startsWith(s.path.slice(0, s.path.lastIndexOf('/') + 1)));
+  if (skill) return { kind: 'skill', name: String(skill.name), folder: skill.path.slice(0, skill.path.lastIndexOf('/')) };
+  const m = /^projects\/([^/]+)\//.exec(path);
+  return m ? { kind: 'project', name: m[1], folder: 'projects/' + m[1] } : null;
+}
+
+// Delete a whole skill or project with its references, after a confirm that names them.
+async function deleteEntry(ent, btn, statusEl) {
+  const inside = files.map((f) => f.path).filter((p) => p.startsWith(ent.folder + '/'));
+  const skill = ent.kind === 'skill' ? arrayOf(state.inventory?.user?.skills).find((s) => s.name === ent.name) : null;
+  const refs = ent.kind === 'skill'
+    ? ['its origin entry in upstreams.json'].concat(arrayOf(skill?.bundles).length ? ['its line in bundles: ' + skill.bundles.join(', ')] : [])
+    : ['its key in projects/projects.json'];
+  const note = ent.kind === 'project' ? '\n\nThe project checkout in your workspace stays.' : '';
+  if (!confirm('Delete the ' + ent.kind + ' "' + ent.name + '"? alate removes these files:\n' + inside.join('\n') + '\n\nand ' + refs.join(' and ') + ', in one commit.' + note)) return;
+  btn.disabled = true;
+  setBusy(true);
+  try {
+    const res = await api('POST', '/api/entry', { action: 'delete', kind: ent.kind, name: ent.name });
+    await afterWrite(res);
+    for (const p of inside) drafts.delete(p);
+    flash = pushNote(res).replace('the change', 'the deletion');
+    location.hash = '#/';
+  } catch (e) {
+    statusEl.className = 'status error';
+    statusEl.textContent = e.message;
+    btn.disabled = false;
+  } finally {
+    setBusy(false);
+  }
+}
+
+// Folder view of a skill or project: its files and the delete of the whole folder.
+function folderView(folder) {
+  const ent = entryOf(folder + '/');
+  const inside = files.map((f) => f.path).filter((p) => p.startsWith(folder + '/'));
+  const status = h('p', { class: 'status', role: 'status' });
+  const sheet = h('article', { class: 'sheet' }, h('header', { class: 'sheet-head' },
+    h('h1', { text: folder.split('/').pop() }),
+    h('p', { class: 'meta', text: (ent ? (ent.kind === 'skill' ? 'Skill' : 'Project') : 'Folder') + ' · ' + folder + ' · ' + plural(inside.length, 'file') })));
+  sheet.append(inside.length ? h('ul', { class: 'kind-list' }, inside.map((p) => h('li', null, h('a', { href: fileHref(p), text: p.slice(folder.length + 1) }))))
+    : h('p', { class: 'note', text: 'This folder holds no files in the snapshot.' }));
+  if (ent && inside.length) {
+    const del = h('button', { type: 'button', class: 'btn danger', text: 'Delete ' + ent.kind });
+    del.addEventListener('click', () => deleteEntry(ent, del, status));
+    sheet.append(h('div', { class: 'row folder-actions' }, del), status);
+  }
+  return sheet;
 }
 
 function hasPath(node, path) {
@@ -209,7 +330,7 @@ function renderTree() {
       h('summary', null, h('span', { text: g.name }), h('span', { class: 'n', text: plural(paths.length, 'file') })),
       paths.length ? treeList(buildTree(paths, g.strip), 0, g.key, current) : h('p', { class: 'empty', text: 'No files.' }));
     det.addEventListener('toggle', () => { if (det.open) closedGroups.delete(g.key); else closedGroups.add(g.key); });
-    tree.append(det);
+    tree.append(ENTRY_KINDS[g.key] ? h('div', { class: 'group-wrap' }, det, entryButton(det, g.key)) : det);
   }
   if (q && !visible.length) tree.append(h('p', { class: 'empty', text: 'No file path contains "' + filterText + '".' }));
   tree.scrollTop = scroll;
@@ -228,6 +349,7 @@ function render() {
   const route = parseRoute();
   if (route.view === 'file') return void fileView(route.path);
   if (route.view === 'new') return void newFileView();
+  if (route.view === 'folder') return void galley.append(folderView(route.path));
   if (route.view === 'updates') galley.append(updatesView());
   else if (route.view === 'settings') galley.append(settingsView());
   else galley.append(overviewView());
@@ -295,76 +417,21 @@ async function runBundleAction(body, btn, status) {
   }
 }
 
-// One bundle block: title with the list-file count, the file names as links into
-// the editor, the items by kind, each with remove and move controls (move targets
-// are the other bundles and the shelf), and an add form over all six kinds. The
-// worker-kind rules mirror the install validators (specs/bundles.md, Editing).
-function bundleBlock(b, bundles, status) {
+// One bundle line: name, item count, the projects that use it, and its list files as
+// links into the editor. Items are edited on the Checklist tab of the list file, so the
+// Overview carries no per-item controls (specs/bundles.md, Display).
+function bundleLine(b, named) {
   const name = b && b.name ? String(b.name) : '';
-  const bfiles = arrayOf(b && b.files);
+  const bfiles = arrayOf(b && b.files).map(String);
   const items = b && b.items && typeof b.items === 'object' ? b.items : {};
-  const lists = {
-    skills: arrayOf(b && b.skills), plugins: arrayOf(b && b.plugins),
-    apt: arrayOf(items.apt), tools: arrayOf(items.tools),
-    env: arrayOf(items.env), requirements: arrayOf(items.requirements),
-  };
-  const others = bundles.map((o) => (o && o.name ? String(o.name) : '')).filter((n) => n && n !== name);
-  const kindBlock = (kind, label) => {
-    const names = lists[kind];
-    if (!names.length) return null;
-    const actionKind = kind === 'skills' ? 'skill' : kind === 'plugins' ? 'plugin' : kind;
-    const field = actionKind === 'skill' || actionKind === 'plugin' ? 'name' : 'item';
-    return h('div', { class: 'kind-block' },
-      h('h4', { class: 'kind-label', text: label }),
-      h('ul', { class: 'kind-list' }, names.map((raw) => {
-        const item = String(raw);
-        const li = h('li', null, h('span', { class: 'item', text: item }));
-        const move = h('select', { 'aria-label': 'Move ' + item + ' to' },
-          h('option', { value: 'shelf', text: 'shelf' }),
-          others.map((n) => h('option', { value: n, text: n })));
-        const moveBtn = h('button', { type: 'button', class: 'btn quiet', text: 'Move',
-          'aria-label': 'Move ' + item + ' from ' + name,
-          onclick: () => runBundleAction({ action: 'move', kind: actionKind, [field]: item, from: name, to: move.value }, moveBtn, status) });
-        const removeBtn = h('button', { type: 'button', class: 'btn danger', text: 'Remove',
-          'aria-label': 'Remove ' + item + ' from ' + name,
-          onclick: () => runBundleAction({ action: 'remove', bundle: name, kind: actionKind, [field]: item }, removeBtn, status) });
-        li.append(h('span', { class: 'row-controls' }, removeBtn, move, moveBtn));
-        return li;
-      })));
-  };
-  const addId = 'add-item-' + Math.random().toString(36).slice(2, 8);
-  // Placeholder per kind: the shape the kind's validator expects in the input.
-  const placeholders = {
-    skill: 'skill-name', plugin: '@scope/plugin-name', apt: 'package-name',
-    env: 'NAME or NAME plain', requirements: 'name==version --hash=sha256:...',
-    tools: '{"name":"tool","url":"https://...","sha256":"...","unpack":"zip","bin":"bin/tool"}',
-  };
-  const kindSel = h('select', { 'aria-label': 'Item kind' },
-    h('option', { value: 'skill', text: 'skill' }), h('option', { value: 'plugin', text: 'plugin' }),
-    h('option', { value: 'apt', text: 'apt' }), h('option', { value: 'env', text: 'env' }),
-    h('option', { value: 'requirements', text: 'requirements' }), h('option', { value: 'tools', text: 'tools' }));
-  const addItem = h('input', { type: 'text', id: addId, autocomplete: 'off', spellcheck: 'false', placeholder: placeholders.skill });
-  kindSel.addEventListener('change', () => {
-    addItem.setAttribute('placeholder', placeholders[kindSel.value] || placeholders.skill);
-  });
-  const addForm = h('form', { class: 'inline-form' },
-    h('label', { for: addId, text: 'Add item to ' + name }), kindSel, addItem,
-    h('button', { type: 'submit', class: 'btn quiet', text: 'Add' }));
-  addForm.addEventListener('submit', (ev) => {
-    ev.preventDefault();
-    const kind = String(kindSel.value);
-    const field = kind === 'skill' || kind === 'plugin' ? 'name' : 'item';
-    runBundleAction({ action: 'add', bundle: name, kind, [field]: addItem.value.trim() },
-      addForm.querySelector('button[type="submit"]'), status);
-  });
-  return h('div', { class: 'project' },
-    h('h3', null, h('span', { text: name }), h('span', { text: plural(bfiles.length, 'list file') })),
-    bfiles.length
-      ? h('p', { class: 'meta' }, 'Files: ',
-        ...bfiles.flatMap((f, i) => [i ? ', ' : '', h('a', { href: fileHref('bundles/' + name + '/' + String(f)), text: String(f) })]))
-      : h('p', { class: 'meta', text: 'No list files.' }),
-    KINDS.map(([kind, label]) => kindBlock(kind, label)),
-    addForm);
+  const count = arrayOf(b && b.skills).length + arrayOf(b && b.plugins).length
+    + ['apt', 'tools', 'env', 'requirements'].reduce((n, k) => n + arrayOf(items[k]).length, 0);
+  const users = name === 'core' ? 'every project'
+    : named.filter((p) => arrayOf(p.bundles).map(String).includes(name)).map((p) => String(p.name)).join(', ') || 'no project';
+  return h('li', null,
+    h('span', { class: 'item', text: name }),
+    h('span', { class: 'aside', text: plural(count, 'item') + ' · used by ' + users }),
+    h('span', { class: 'files' }, ...bfiles.flatMap((f, i) => [i ? ', ' : '', h('a', { href: fileHref('bundles/' + name + '/' + f), text: f })])));
 }
 
 function overviewView() {
@@ -424,7 +491,7 @@ function overviewView() {
   const namingAside = (origin, row) => {
     const bits = [];
     if (Array.isArray(row.bundles) && row.bundles.length) bits.push('bundles: ' + row.bundles.join(', '));
-    if (row.shelf) bits.push('on the shelf');
+    if (row.shelf) bits.push('in no bundle');
     return bits.length ? origin + ' · ' + bits.join(' · ') : origin;
   };
 
@@ -437,7 +504,7 @@ function overviewView() {
     ...provisionFailureView(prov),
     h('p', { class: 'totals' },
       plural(rules.length, 'rule'), ', ', plural(user.skills.length, 'skill'), ', ', plural(user.plugins.length, 'plugin'), ', ',
-      plural(bundles.length, 'bundle'), ', ', plural(projects.named.length, 'project'), ', and ', plural(files.length, 'file'), ' in total. Pick a file in the index to edit it, or ',
+      plural(bundles.length, 'bundle'), ', ', plural(projects.named.length, 'project'), ', and ', plural(files.length, 'file'), ' in total. Pick a file in the index to edit it. To add a rule, a skill, a project or a bundle, use the + beside it in the index. For any other path, ',
       h('a', { href: '#/new', text: 'add a new file' }), '.')));
 
   // Changes since the previous import, and scan warnings.
@@ -483,34 +550,78 @@ function overviewView() {
     user.plugins.length ? h('ul', { class: 'entries' }, user.plugins.map((p) => entry(link('user/omp/plugins/' + p.origin), p.name, p.version || '', namingAside('from ' + p.origin, p))))
       : h('p', { class: 'note', text: 'No plugins in this data repo.' })));
 
-  // Bundles: the editing surface for the bundles/<name>/ list files. Each block
-  // links its files into the editor and lists its items by kind, with remove and
-  // move controls on the two name lists. Without bundles content the section
-  // shows the turn-on note, the confirm step, and its button instead of the
-  // board (specs/bundles.md, "Turn on bundles").
-  if (bundles.length) {
-    const bundleStatus = h('p', { class: 'status', role: 'alert' });
-    const newInput = h('input', { type: 'text', id: 'new-bundle-name', autocomplete: 'off', spellcheck: 'false', placeholder: 'gamedev-2d' });
-    const createForm = h('form', { class: 'inline-form' },
-      h('label', { for: 'new-bundle-name', text: 'New bundle name' }), newInput,
-      h('button', { type: 'submit', class: 'btn', text: 'Create bundle' }), bundleStatus);
-    createForm.addEventListener('submit', (ev) => {
-      ev.preventDefault();
-      runBundleAction({ action: 'create', name: newInput.value.trim() },
-        createForm.querySelector('button[type="submit"]'), bundleStatus);
-    });
-    sheet.append(part('Bundles', String(bundles.length),
-      createForm, bundles.map((b) => bundleBlock(b, bundles, bundleStatus))));
 
-    // Shelf: every skill and plugin whose shelf flag is set, each with a picker
-    // that adds it to the chosen bundle. With no shelf items the section says so.
+  const projectsStatus = h('p', { class: 'status', role: 'alert' });
+  const projectBlocks = projects.named.map((p) => {
+    const entries = Array.isArray(p.entries) ? p.entries : [];
+    const drift = entries.filter((e) => DRIFT.has(e.status)).length;
+    const live = p.live === 'gone' ? 'project folder missing on this machine' : p.live === 'off' ? 'not compared with this machine' : drift ? plural(drift, 'file') + ' differ from this machine' : 'in sync with this machine';
+    const bundlesNote = Array.isArray(p.bundles) && p.bundles.length ? h('p', { class: 'meta', text: 'Bundles: ' + p.bundles.join(', ') }) : null;
+    // In bundles mode the block carries its bundles as chips (core fixed, the others
+    // removable), an "Add bundle" picker, and the effective item list per kind with each
+    // item's source in a closed disclosure (specs/bundles.md, Display).
+    const extras = [];
+    if (bundles.length) {
+      const project = String(p.name);
+      const carried = arrayOf(p.bundles).map((b) => String(b));
+      const hasCore = bundles.some((b) => b && b.name === 'core');
+      const pick = h('select', { 'aria-label': 'Add a bundle to ' + project },
+        h('option', { value: '', text: 'Add bundle…' }),
+        bundles.map((b) => (b && b.name ? String(b.name) : '')).filter((n) => n && n !== 'core' && !carried.includes(n)).map((n) => h('option', { value: n, text: n })));
+      const assignBtn = h('button', { type: 'button', class: 'btn quiet', text: 'Add', disabled: true,
+        'aria-label': 'Add the chosen bundle to ' + project,
+        onclick: () => runBundleAction({ action: 'assign', project, bundle: pick.value }, assignBtn, projectsStatus) });
+      pick.addEventListener('change', () => { assignBtn.disabled = !pick.value; });
+      // core applies to every project, so its chip has no remove control; a carried "core"
+      // entry in projects.json is redundant and shows only as that one chip.
+      extras.push(h('ul', { class: 'chips', 'aria-label': 'Bundles of ' + project },
+        hasCore ? h('li', { class: 'chip fixed' }, h('span', { text: 'core' }), h('span', { class: 'm', text: 'every project' })) : null,
+        carried.filter((bn) => bn !== 'core').map((bn) => {
+          const label = `Remove ${bn} from ${project}`;
+          const btn = h('button', { type: 'button', class: 'chip-x', text: '×', 'aria-label': label, title: label,
+            onclick: () => runBundleAction({ action: 'unassign', project, bundle: bn }, btn, projectsStatus) });
+          return h('li', { class: 'chip' }, h('span', { text: bn }), btn);
+        }),
+        h('li', { class: 'chip-add' }, pick, assignBtn)));
+      const eff = p.effective && typeof p.effective === 'object' ? p.effective : {};
+      const blocks = KINDS.map(([kind, label]) => [label, arrayOf(eff[kind])]).filter(([, list]) => list.length);
+      const total = blocks.reduce((n, [, list]) => n + list.length, 0);
+      if (total) extras.push(h('details', { class: 'effective' },
+        h('summary', { text: plural(total, 'item') + ' from these bundles' }),
+        blocks.map(([label, list]) => h('div', { class: 'kind-block' },
+          h('h4', { class: 'kind-label', text: label }),
+          h('ul', { class: 'kind-list' }, list.map((it) => h('li', null,
+            h('span', { class: 'item', text: it && it.item != null ? String(it.item) : '' }),
+            h('span', { class: 'aside', text: it && it.source ? `from ${it.source}` : '' }))))))));
+    }
+    return h('div', { class: 'project' },
+      h('h3', null, h('span', { text: p.name }), h('span', { class: drift || p.live === 'gone' ? 'alert' : '', text: live })),
+      ...(bundles.length ? extras : [bundlesNote]),
+      entries.length ? h('ul', { class: 'entries' }, entries.map((e) => entry(link('projects/' + p.name + '/' + e.path), e.path, STATUS_COPY[e.status] || e.status, bytes(e.bytes), DRIFT.has(e.status))))
+        : h('p', { class: 'note', text: 'No snapshot files.' }));
+  });
+  sheet.append(part('Projects', String(projects.named.length),
+    projects.contextFiles.length ? h('p', { class: 'note', text: 'Context files captured per project: ' + projects.contextFiles.join(', ') + '.' }) : null,
+    ...(projectBlocks.length ? projectBlocks : [h('p', { class: 'note', text: 'No projects in projects/projects.json.' })]),
+    ...(bundles.length ? [projectsStatus] : [])));
+
+  // Bundles: one line per bundle (count, users, list files). The + on the bundles folder in
+  // the index creates a bundle; items are edited on the Checklist tab of each list file.
+  // Without bundles content the section shows the turn-on note, the confirm step, and its
+  // button instead (specs/bundles.md, "Turn on bundles" and Display).
+  if (bundles.length) {
+    sheet.append(part('Bundles', String(bundles.length),
+      h('ul', { class: 'kind-list bundle-list' }, bundles.map((b) => bundleLine(b, projects.named)))));
+
+    // Not in any bundle (the shelf): every skill and plugin whose shelf flag is set, each
+    // with a picker that adds it to the chosen bundle. With none the section says so.
     const shelfStatus = h('p', { class: 'status', role: 'alert' });
     const names = bundles.map((b) => (b && b.name ? String(b.name) : '')).filter(Boolean);
     const shelfItems = [
       ...arrayOf(user.skills).filter((s) => s && s.shelf).map((s) => ({ name: String(s.name ?? ''), kind: 'skill' })),
       ...arrayOf(user.plugins).filter((s) => s && s.shelf).map((s) => ({ name: String(s.name ?? ''), kind: 'plugin' })),
     ];
-    sheet.append(part('Shelf', String(shelfItems.length),
+    sheet.append(part('Not in any bundle', String(shelfItems.length),
       shelfItems.length ? h('ul', { class: 'kind-list' }, shelfItems.map((it) => {
         const pick = h('select', { 'aria-label': 'Choose a bundle for ' + it.name },
           names.map((n) => h('option', { value: n, text: n })));
@@ -518,7 +629,7 @@ function overviewView() {
           onclick: () => runBundleAction({ action: 'add', bundle: pick.value, kind: it.kind, name: it.name }, addBtn, shelfStatus) });
         return h('li', null, h('span', { class: 'item', text: it.name }), h('span', { class: 'aside', text: it.kind }), pick, addBtn);
       }))
-      : h('p', { class: 'note', text: 'Nothing is on the shelf.' }),
+      : h('p', { class: 'note', text: 'Every skill and plugin is in a bundle.' }),
       shelfStatus));
   } else {
     // The migration action of specs/bundles.md "Turn on bundles": a repo with no
@@ -546,56 +657,6 @@ function overviewView() {
       h('p', { class: 'note', text: 'Bundles mode assigns skills, plugins, and worker lists per project. Without bundles, every item loads for every project.' }),
       turnBtn, turnConfirm, turnStatus));
   }
-
-  const projectsStatus = h('p', { class: 'status', role: 'alert' });
-  const projectBlocks = projects.named.map((p) => {
-    const entries = Array.isArray(p.entries) ? p.entries : [];
-    const drift = entries.filter((e) => DRIFT.has(e.status)).length;
-    const live = p.live === 'gone' ? 'project folder missing on this machine' : p.live === 'off' ? 'not compared with this machine' : drift ? plural(drift, 'file') + ' differ from this machine' : 'in sync with this machine';
-    const bundlesNote = Array.isArray(p.bundles) && p.bundles.length ? h('p', { class: 'meta', text: 'Bundles: ' + p.bundles.join(', ') }) : null;
-    // In bundles mode the block carries its bundles as unassignable rows, a picker
-    // of the bundles it does not carry yet, and the effective item list per kind
-    // with each item's source (specs/bundles.md, Dashboard section).
-    const extras = [];
-    if (bundles.length) {
-      const project = String(p.name);
-      const carried = arrayOf(p.bundles).map((b) => String(b));
-      const rows = carried.map((bn) => {
-        const btn = h('button', { type: 'button', class: 'btn danger', text: 'Unassign',
-          'aria-label': 'Unassign ' + bn + ' from ' + project,
-          onclick: () => runBundleAction({ action: 'unassign', project, bundle: bn }, btn, projectsStatus) });
-        return h('li', null, h('span', { class: 'item', text: bn }), btn);
-      });
-      const open = bundles.map((b) => (b && b.name ? String(b.name) : '')).filter((n) => n && !carried.includes(n));
-      const pick = h('select', { 'aria-label': 'Choose a bundle for ' + project },
-        h('option', { value: '', text: 'Choose a bundle...' }),
-        open.map((n) => h('option', { value: n, text: n })));
-      const assignBtn = h('button', { type: 'button', class: 'btn quiet', text: 'Assign', disabled: true,
-        onclick: () => runBundleAction({ action: 'assign', project, bundle: pick.value }, assignBtn, projectsStatus) });
-      pick.addEventListener('change', () => { assignBtn.disabled = !pick.value; });
-      rows.push(h('li', null, pick, assignBtn));
-      extras.push(h('ul', { class: 'kind-list' }, rows));
-      const eff = p.effective && typeof p.effective === 'object' ? p.effective : {};
-      for (const [kind, label] of KINDS) {
-        const list = arrayOf(eff[kind]);
-        if (!list.length) continue;
-        extras.push(h('div', { class: 'kind-block' },
-          h('h4', { class: 'kind-label', text: label }),
-          h('ul', { class: 'kind-list' }, list.map((it) => h('li', null,
-            h('span', { class: 'item', text: it && it.item != null ? String(it.item) : '' }),
-            h('span', { class: 'aside', text: it && it.source ? `from ${it.source}` : '' }))))));
-      }
-    }
-    return h('div', { class: 'project' },
-      h('h3', null, h('span', { text: p.name }), h('span', { class: drift || p.live === 'gone' ? 'alert' : '', text: live })),
-      ...(bundles.length ? extras : [bundlesNote]),
-      entries.length ? h('ul', { class: 'entries' }, entries.map((e) => entry(link('projects/' + p.name + '/' + e.path), e.path, STATUS_COPY[e.status] || e.status, bytes(e.bytes), DRIFT.has(e.status))))
-        : h('p', { class: 'note', text: 'No snapshot files.' }));
-  });
-  sheet.append(part('Projects', String(projects.named.length),
-    projects.contextFiles.length ? h('p', { class: 'note', text: 'Context files captured per project: ' + projects.contextFiles.join(', ') + '.' }) : null,
-    ...(projectBlocks.length ? projectBlocks : [h('p', { class: 'note', text: 'No projects in projects/projects.json.' })]),
-    ...(bundles.length ? [projectsStatus] : [])));
 
   // Every key that matched no row above (a worker list, the plugins item, or a
   // per-server key with no mcp.json row) is listed here with its status, failed ones
@@ -654,7 +715,7 @@ function updatesView() {
       h('td', { class: 'name' }, u.name, h('span', { class: 'kind', text: u.kind })),
       h('td', { class: 'state' + (st.ready ? ' ready' : ''), text: st.text }),
       v(u.current), v(u.target), v(u.latest),
-      h('td', null, u.origin ? safeLink(u.origin, u.origin.replace(/^https?:\/\/(www\.)?/, '')) : ''),
+      h('td', { class: 'origin' }, u.origin ? safeLink(u.origin, u.origin.replace(/^https?:\/\/(www\.)?/, '')) : ''),
       h('td', null, u.notesUrl ? safeLink(u.notesUrl, 'notes') : ''),
       h('td', { class: 'err', text: u.error || '' }));
   });
@@ -744,7 +805,7 @@ function onboardingView() {
 
 function settingsView() {
   const src = state.source;
-  const sheet = h('article', { class: 'sheet' }, h('header', { class: 'sheet-head' }, h('h1', { text: 'Settings' })));
+  const sheet = h('article', { class: 'sheet settings' }, h('header', { class: 'sheet-head' }, h('h1', { text: 'Settings' })));
 
   const sourceBody = h('div');
   const showSource = () => {
@@ -850,6 +911,9 @@ function quoteOf(hk) {
 // ---------- file view ----------
 
 let editor = null; // { path, draft, textarea, backdrop, margin, stack, status, commit, discard }
+// Bundle name lists get a checklist tab; the chosen tab carries over between list files.
+const LIST_FILE_RE = /^bundles\/[^/]+\/(skills|plugins)\.txt$/;
+let listMode = false;
 
 async function fileView(path) {
   const galley = $('galley');
@@ -890,17 +954,21 @@ function mountEditor(path, d) {
   const group = groupOf(path);
 
   const deleteBtn = d.isNew ? null : h('button', { type: 'button', class: 'btn danger', text: 'Delete file' });
+  // A file inside a skill or project folder also offers the delete of the whole folder.
+  const ent = d.isNew ? null : entryOf(path);
+  const deleteEntryBtn = ent ? h('button', { type: 'button', class: 'btn danger', text: 'Delete ' + ent.kind }) : null;
   const head = h('header', { class: 'file-head' },
     h('div', { class: 'title sheet-head' },
       h('h1', { text: name }),
       h('p', { class: 'meta', text: [group.name, dir, d.isNew ? 'new file' : bytes(d.bytes)].join(' · ') }),
       describe(path) ? h('p', { class: 'lede clamp', text: describe(path) }) : null),
-    h('div', { class: 'actions' }, deleteBtn));
+    h('div', { class: 'actions' }, deleteEntryBtn, deleteBtn));
 
   if (d.binary) {
     galley.append(head, h('div', { class: 'binary' },
       h('p', { text: 'This is a binary file (' + bytes(d.bytes) + '). alate can delete it, but it cannot edit it as text.' })));
     if (deleteBtn) deleteBtn.addEventListener('click', () => deleteFile(path, d, deleteBtn, galley.querySelector('.binary')));
+    if (deleteEntryBtn) deleteEntryBtn.addEventListener('click', () => deleteEntry(ent, deleteEntryBtn, galley.querySelector('.binary')));
     return;
   }
 
@@ -919,7 +987,43 @@ function mountEditor(path, d) {
     h('div', { class: 'msg' }, h('label', { for: 'commit-msg', text: 'Commit message' }), msgInput),
     discard, commit, status);
 
-  galley.append(head, scroller, press);
+  // Checklist tab for a bundle's skills.txt or plugins.txt: one checkbox per snapshot item.
+  // A toggle edits the same draft text as the Text tab, so proof marks and the commit bar
+  // work unchanged.
+  const listKind = LIST_FILE_RE.exec(path)?.[1];
+  let tabs = null, checklist = null, refreshList = null;
+  if (listKind) {
+    const count = h('p', { class: 'note', role: 'status' });
+    const list = h('ul', { class: 'checklist' });
+    checklist = h('div', { class: 'paper-scroll checklist-pane' }, count, list);
+    refreshList = () => {
+      const names = listNames(d.text);
+      const known = arrayOf(state.inventory?.user?.[listKind]).map((s) => ({ name: String(s.name ?? ''), desc: s.description || s.version || '' })).filter((s) => s.name);
+      const extra = [...names].filter((n) => !known.some((k) => k.name === n)).map((n) => ({ name: n, desc: 'Not in this snapshot.' }));
+      const setCount = () => { count.textContent = listNames(d.text).size + ' of ' + known.length + ' ' + listKind + ' in this bundle. Each change shows as a proof mark on the Text tab. Commit below.'; };
+      list.textContent = '';
+      for (const it of [...known, ...extra].sort((a, b) => a.name.localeCompare(b.name))) {
+        const cb = h('input', { type: 'checkbox', checked: names.has(it.name) });
+        cb.addEventListener('change', () => { d.text = setListName(d.text, it.name, cb.checked); textarea.value = d.text; setCount(); });
+        list.append(h('li', null, h('label', null, cb, h('span', { class: 'name', text: it.name }), it.desc ? h('span', { class: 'desc', text: it.desc }) : null)));
+      }
+      setCount();
+    };
+    const tText = h('button', { type: 'button', text: 'Text' });
+    const tList = h('button', { type: 'button', text: 'Checklist' });
+    const setMode = (on) => {
+      listMode = on;
+      scroller.hidden = on; checklist.hidden = !on;
+      tText.setAttribute('aria-pressed', String(!on)); tList.setAttribute('aria-pressed', String(on));
+      if (on) refreshList(); else paint();
+    };
+    tText.addEventListener('click', () => setMode(false));
+    tList.addEventListener('click', () => setMode(true));
+    tabs = h('div', { class: 'view-tabs', role: 'group', 'aria-label': 'View' }, tText, tList);
+    setMode(listMode);
+  }
+
+  galley.append(...[head, tabs, scroller, checklist, press].filter(Boolean));
   if (flash) { status.className = 'status ok'; status.textContent = flash; flash = null; }
   editor = { path, d, textarea, backdrop, margin, stack, status, commit, discard, msgInput };
 
@@ -931,9 +1035,10 @@ function mountEditor(path, d) {
   discard.addEventListener('click', () => {
     if (!confirm('Discard your changes to ' + path + '?')) return;
     if (d.isNew) { drafts.delete(path); location.hash = '#/'; return; }
-    d.text = d.original; textarea.value = d.text; status.textContent = ''; paint();
+    d.text = d.original; textarea.value = d.text; status.textContent = ''; paint(); if (listMode && refreshList) refreshList();
   });
   if (deleteBtn) deleteBtn.addEventListener('click', () => deleteFile(path, d, deleteBtn, status));
+  if (deleteEntryBtn) deleteEntryBtn.addEventListener('click', () => deleteEntry(ent, deleteEntryBtn, status));
   paint();
 }
 
@@ -969,7 +1074,7 @@ function paint() {
   } else {
     const marks = hunks.map((hk) => {
       const row = rows[Math.min(hk.start, rows.length - 1)];
-      const mk = h('div', { class: 'mark' }, markText(hk), quoteOf(hk) ? h('q', { text: quoteOf(hk) }) : null);
+      const mk = h('div', { class: hk.count ? 'mark' : 'mark del' }, markText(hk), quoteOf(hk) ? h('q', { text: quoteOf(hk) }) : null);
       mk.dataset.top = String(stack.offsetTop + row.offsetTop);
       margin.append(mk);
       return mk;
@@ -1011,7 +1116,10 @@ async function saveFile(path, d) {
   status.textContent = 'Committing and pushing ' + path + '…';
   try {
     const content = d.eol === '\r\n' ? d.text.replaceAll('\n', '\r\n') : d.text;
-    const res = await api('PUT', '/api/file', { path, content, base: d.isNew ? null : d.base, message: msgInput.value.trim() || undefined });
+    // A draft from the index + carries its entry: the server writes the references too.
+    const res = d.entry && d.isNew
+      ? await api('POST', '/api/entry', { action: 'create', kind: d.entry.kind, name: d.entry.name, bundle: d.entry.bundle || undefined, content, message: msgInput.value.trim() || undefined })
+      : await api('PUT', '/api/file', { path, content, base: d.isNew ? null : d.base, message: msgInput.value.trim() || undefined });
     await afterWrite(res);
     // Remount from the new snapshot; the press bar shows the result.
     drafts.delete(path);
@@ -1148,6 +1256,19 @@ window.addEventListener('beforeunload', (ev) => {
 });
 window.addEventListener('resize', schedulePaint);
 
+$('import-now').addEventListener('click', async (ev) => {
+  const btn = ev.currentTarget;
+  btn.disabled = true; btn.textContent = 'Importing…';
+  try {
+    await doImport(state.source.spec, state.source.kind);
+    btn.textContent = 'Import now';
+  } catch (e) {
+    btn.textContent = 'Import now';
+    alertLine($('galley').querySelector('.sheet-head') ?? $('galley'), 'Import failed: ' + e.message + ' The current snapshot stays in use.');
+  } finally {
+    btn.disabled = false;
+  }
+});
 $('filter').addEventListener('input', (ev) => { filterText = ev.target.value.trim(); renderTree(); });
 $('files-toggle').addEventListener('click', () => {
   const open = !document.body.classList.contains('index-open');
@@ -1157,7 +1278,7 @@ $('files-toggle').addEventListener('click', () => {
 
 // Poll so server-side imports and update checks show up. Never repaint a view with input in it.
 setInterval(async () => {
-  if (busy || document.hidden || !state || !state.source) return;
+  if (busy || document.hidden || !state || !state.source || $('tree').querySelector('.tree-new')) return;
   try {
     await refresh();
     renderShell();
@@ -1212,7 +1333,7 @@ $('login-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const key = $('login-key').value;
   $('login-error').hidden = true;
-  if (!key) return;
+  if (!key) { $('login-error').textContent = 'Enter the app key.'; $('login-error').hidden = false; $('login-key').focus(); return; }
   $('login-btn').disabled = true;
   try {
     const res = await fetch('/api/login', {
@@ -1222,7 +1343,7 @@ $('login-form').addEventListener('submit', async (ev) => {
     });
     if (!res.ok) {
       const err = $('login-error');
-      err.textContent = res.status === 401 ? 'Wrong key.' : 'Sign-in failed (' + res.status + ').';
+      err.textContent = res.status === 401 ? 'Wrong key. Use the key that the server printed at startup, or the one in server-config.json.' : 'Sign-in failed (' + res.status + '). Try again.';
       err.hidden = false;
       return;
     }

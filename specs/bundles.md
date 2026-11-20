@@ -261,8 +261,8 @@ the first write, the scan gate, and any layer creation:
   and the names in `skills.txt`/`plugins.txt`, with a warning per unknown name
   (the dashboard warns, the install refuses).
 - Each project row shows its `bundles` list. Each skill and plugin row shows
-  the bundles that name it, or an "on the shelf" marker. The counts row gains
-  the bundle count.
+  the bundles that name it, or an "in no bundle" marker (the shelf). The counts
+  row gains the bundle count.
 
 ### Editing (ALAT-180)
 
@@ -355,20 +355,28 @@ notes and the refresh behave as for a file edit.
   content refuses with 409 and writes nothing, so a second click does nothing.
   The commit subject is `alate: turn on bundles with core`; the confirm text
   quotes it.
-- Display: each bundle block lists its items by kind (skills, plugins, apt
-  lines, tool names, env lines, requirement pins), and every item carries
-  remove and move controls; each list-file name links to the file editor. Each project
-  block shows its bundles as removable rows plus a picker of the bundles it
-  does not carry yet, and its effective item list per kind with the source of
-  each item: `core`, the bundle name, or `workers/<p>`. The merge follows the
-  merge-order section (first name wins, env later wins per name, the first pin
-  wins, the first tool wins); core items show too, because the effective list
-  is the merge order made visible. The Shelf section lists the skills and
-  plugins that no bundle and no worker list names, each with an "Add to
-  bundle" picker. Without `bundles/` in the data repo the three editing
-  surfaces render nothing; the Bundles section then shows only the turn-on
-  note, the confirm step, and its button (above), and today's read-only
-  overview stays for every other section.
+- Display (project first): the Projects section comes before the Bundles
+  section, because assigning a bundle to a project is the main action. Each
+  project block shows its bundles as a row of chips: `core` first, marked
+  "every project" and not removable, then each carried bundle with a remove
+  control (unassign), then an "Add bundle" picker with its button for the
+  bundles the project does not carry yet. The block's effective item list
+  per kind, with the source of each item (`core`, the bundle name, or
+  `workers/<p>`), sits in a closed disclosure that names the item count. The
+  merge follows the merge-order section (first name wins, env later wins per
+  name, the first pin wins, the first tool wins); core items show too, because
+  the effective list is the merge order made visible. The Bundles section
+  holds the create form and one line per bundle: its name, its item count,
+  the projects that use it ("every project" for `core`), and its list files
+  as links into the file editor. The Overview has no per-item controls:
+  skills and plugins of a bundle are edited on the Checklist tab of its
+  `skills.txt` or `plugins.txt`, and the four worker lists in their files.
+  The `add`, `remove` and `move` actions stay in the API. The section "Not in
+  any bundle" lists the shelf skills and plugins, each with an "Add to
+  bundle" picker. Without `bundles/` in the data repo these surfaces render
+  nothing; the Bundles section then shows only the turn-on note, the confirm
+  step, and its button (above), and today's read-only overview stays for
+  every other section.
 - Accessibility stays at the dashboard's level: a visible label per control,
   keyboard operation, visible focus, state in text rather than color alone.
   At 900 px and below the new blocks stack per the design's responsive rules.

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { assertSourceInside, checkDestination, cloneCommand, dataHost, descriptionText, gitAuthEnv, githubHost, parseDataSpec, redactSecrets, serverGitEnv, SNAP_AGENTS_DIR } from '../lib/data.mjs';
+import { assertSourceInside, checkDestination, cloneCommand, dataHost, descriptionText, gitAuthEnv, githubHost, originGlob, parseDataSpec, redactSecrets, serverGitEnv, SNAP_AGENTS_DIR } from '../lib/data.mjs';
 import { isBundlesMode, mergeLineSources, mergeNamedSources, mergeToolsSources, parseNameList, readBundleFolder } from '../lib/bundles.mjs';
 import { composeWorkerAdd, parseWorkerItems, validateWorkerBytes, workerItemKey } from '../lib/worker-lists.mjs';
 
@@ -1348,6 +1348,176 @@ function applyBundleAction(state, db, body, token, known) {
   return dispatchSave(state, db, ops, token);
 }
 
+// ---- Index create and delete (specs/index-create-delete.md): a rule, a skill or a
+// ---- project with its references, as one save through the editor's dispatch. ----
+
+/** @type {RegExp} */
+const entryName = /^[a-z0-9][a-z0-9-]*$/;
+const SKILL_ROOT = 'user/omp/agent/skills';
+
+// True when an `own` pattern or an item `paths` pattern of upstreams.json covers rel:
+// the origin gate's own test (lib/data.mjs originGate), on the parsed object.
+/** @param {{ own?: unknown, items?: unknown }} up @param {string} rel @returns {boolean} */
+function originCovers(up, rel) {
+  const own = Array.isArray(up.own) ? up.own.filter(g => typeof g === 'string') : [];
+  const items = Array.isArray(up.items) ? up.items : [];
+  return own.some(g => originGlob(g).test(rel))
+    || items.some(it => (Array.isArray(it?.paths) ? it.paths : []).some(/** @param {unknown} g */ g => typeof g === 'string' && originGlob(g).test(rel)));
+}
+
+// upstreams.json after dropping one skill folder: its exact `own` entry and its path in
+// each item's `paths`; an item that loses its last path goes. Patterns stay untouched.
+/** @param {{ own?: unknown, items?: unknown }} up @param {string} folder @returns {{ own?: unknown, items?: unknown }} */
+function withoutOrigin(up, folder) {
+  const next = { ...up };
+  if (Array.isArray(up.own)) next.own = up.own.filter(g => g !== folder);
+  if (Array.isArray(up.items)) {
+    next.items = up.items.flatMap(it => {
+      if (!Array.isArray(it?.paths) || !it.paths.includes(folder)) return [it];
+      const paths = it.paths.filter(/** @param {unknown} p */ p => p !== folder);
+      return paths.length ? [{ ...it, paths }] : [];
+    });
+  }
+  return next;
+}
+
+// upstreams.json text with its `own` array replaced by own, every other byte kept: a
+// one-line array stays one line, a multi-line array keeps its indents, and a file without
+// `own` gets the key as its first member. null text means no file: a new two-key object.
+// shortcut: assumes no "]" inside own strings (true for paths and globs) and one "own" key.
+/** @param {string | null} text @param {string[]} own @returns {string} */
+function withOwnText(text, own) {
+  if (text === null) return `${JSON.stringify({ own }, null, 2)}\n`;
+  const m = /("own"\s*:\s*)\[[^\]]*\]/.exec(text);
+  if (!m) return text.replace(/^\s*\{/, (open) => `${open}\n  "own": [${own.map(g => JSON.stringify(g)).join(', ')}],`);
+  let arr = `[${own.map(g => JSON.stringify(g)).join(', ')}]`;
+  if (m[0].includes('\n')) {
+    const ind = /\n([ \t]*)"/.exec(m[0])?.[1] ?? '    ';
+    const close = /\n([ \t]*)\]$/.exec(m[0])?.[1] ?? '  ';
+    arr = own.length ? `[\n${own.map(g => ind + JSON.stringify(g)).join(',\n')}\n${close}]` : '[]';
+  }
+  return text.slice(0, m.index) + m[1] + arr + text.slice(m.index + m[0].length);
+}
+
+/**
+ * @param {StateDef} state
+ * @param {DashDb} db
+ * @param {{ action?: unknown, kind?: unknown, name?: unknown, content?: unknown, bundle?: unknown, message?: unknown }} body
+ * @param {string | undefined} token
+ * @param {{ skills: Set<string>, plugins: Set<string> }} known
+ * @returns {EditResult}
+ */
+function applyEntryAction(state, db, body, token, known) {
+  if (!state.source) fail(400, 'no data source configured');
+  const kind = body.kind;
+  if (kind !== 'rule' && kind !== 'skill' && kind !== 'project') fail(400, 'kind must be one of: rule, skill, project');
+  const name = typeof body.name === 'string' ? body.name : '';
+  if (!entryName.test(name)) fail(400, `"${name}" is not a valid ${kind} name (use a-z, 0-9 and -)`);
+  /** @type {EditOp[]} */
+  const ops = [];
+  let message = '';
+  /** @param {string} rel @param {string | null} base @param {Buffer | null} bytes */
+  const stage = (rel, base, bytes) => ops.push({ rel, base, bytes, message });
+  const json = (/** @type {unknown} */ v) => Buffer.from(`${JSON.stringify(v, null, 2)}\n`, 'utf8');
+  const upBytes = storedBytes(db, 'upstreams.json');
+  const readUp = () => {
+    if (upBytes === null) return {};
+    /** @type {unknown} */
+    let up;
+    try { up = JSON.parse(upBytes.toString('utf8')); } catch { fail(400, 'upstreams.json: unparseable JSON'); }
+    if (up === null || typeof up !== 'object' || Array.isArray(up)) fail(400, 'upstreams.json: the top level must be an object');
+    return /** @type {{ own?: unknown, items?: unknown }} */ (up);
+  };
+  const stageUp = (/** @type {object} */ up) => stage('upstreams.json', upBytes === null ? null : sha256(upBytes), json(up));
+  // A change to `own` alone edits that array in place, so the commit diff is one line.
+  const stageOwn = (/** @type {string[]} */ own) => stage('upstreams.json', upBytes === null ? null : sha256(upBytes),
+    Buffer.from(withOwnText(upBytes === null ? null : upBytes.toString('utf8'), own), 'utf8'));
+  const manifestRel = 'projects/projects.json';
+  const readManifest = () => {
+    const bytes = storedBytes(db, manifestRel);
+    if (bytes === null) fail(400, 'projects/projects.json not found; capture the projects first (sync-projects.mjs --first)');
+    /** @type {any} */
+    let manifest;
+    try { manifest = JSON.parse(bytes.toString('utf8')); } catch { fail(400, 'projects/projects.json: unparseable JSON'); }
+    const table = manifest !== null && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest.projects : null;
+    if (table === null || typeof table !== 'object' || Array.isArray(table)) fail(400, 'projects.json: projects must be an object');
+    return { bytes, manifest, table };
+  };
+  const filesUnder = (/** @type {string} */ folder) => listStoredFiles(db).map(f => f.path).filter(p => p.startsWith(`${folder}/`));
+
+  if (body.action === 'create') {
+    if (typeof body.content !== 'string') fail(400, 'content must be a string');
+    const content = Buffer.from(body.content, 'utf8');
+    message = editMessage(body.message, `${kind} ${name}`, true, false);
+    if (kind === 'rule') {
+      const rel = `${name}.md`;
+      if (storedBytes(db, rel) !== null) fail(409, `${rel} already exists`);
+      stage(rel, null, content);
+      const up = readUp();
+      if (!originCovers(up, rel)) stageOwn([...(Array.isArray(up.own) ? up.own : []), rel]);
+    } else if (kind === 'skill') {
+      const folder = `${SKILL_ROOT}/${name}`;
+      if (known.skills.has(name) || filesUnder(folder).length) fail(409, `skill "${name}" already exists`);
+      const bundle = typeof body.bundle === 'string' ? body.bundle : '';
+      // The bundle refusal fires before any op is staged, so an unknown bundle writes nothing.
+      if (bundle && (!bundleFolderName.test(bundle) || storedBundleFiles(db, bundle).length === 0)) fail(400, `bundles: unknown bundle "${bundle}"`);
+      stage(`${folder}/SKILL.md`, null, content);
+      const up = readUp();
+      const own = Array.isArray(up.own) ? up.own : [];
+      if (!own.includes(folder)) stageOwn([...own, folder]);
+      if (bundle) {
+        const rel = `bundles/${bundle}/skills.txt`;
+        const bytes = storedBytes(db, rel);
+        stage(rel, bytes === null ? null : sha256(bytes), Buffer.from(bytes === null
+          ? `${bundleListHeader('skill', bundle)}${name}\n`
+          : appendBundleName(bytes.toString('utf8'), name), 'utf8'));
+      }
+    } else {
+      const folder = `projects/${name}`;
+      const { bytes, manifest, table } = readManifest();
+      if (Object.hasOwn(table, name) || filesUnder(folder).length) fail(409, `project "${name}" already exists`);
+      table[name] = { extras: [], bundles: [] };
+      stage(manifestRel, sha256(bytes), json(manifest));
+      stage(`${folder}/AGENTS.md`, null, content);
+    }
+  } else if (body.action === 'delete') {
+    message = `alate: delete ${kind} ${name}`;
+    if (kind === 'skill') {
+      // The inventory names the skill's folder in whichever root holds it.
+      const skill = (state.inventory?.user?.skills ?? []).find(s => s.name === name);
+      if (!skill) fail(404, `no skill "${name}"`);
+      const folder = skill.path.slice(0, skill.path.lastIndexOf('/'));
+      for (const rel of filesUnder(folder)) stage(rel, sha256(/** @type {Buffer} */ (storedBytes(db, rel))), null);
+      if (upBytes !== null) {
+        const up = readUp();
+        const next = withoutOrigin(up, folder);
+        // Only `own` changed: edit it in place. An item path changed too: rewrite the file.
+        if (JSON.stringify(next.items) !== JSON.stringify(up.items)) stageUp(next);
+        else if (JSON.stringify(next.own) !== JSON.stringify(up.own)) stageOwn(/** @type {string[]} */ (next.own));
+      }
+      for (const rel of listStoredFiles(db).map(f => f.path).filter(p => /^bundles\/[^/]+\/skills\.txt$/.test(p))) {
+        const bytes = /** @type {Buffer} */ (storedBytes(db, rel));
+        if (bytes.toString('utf8').split('\n').some(line => line.replace(/\r$/, '').trim() === name)) stage(rel, sha256(bytes), Buffer.from(dropBundleName(bytes, name), 'utf8'));
+      }
+    } else if (kind === 'project') {
+      const folder = `projects/${name}`;
+      const { bytes, manifest, table } = readManifest();
+      const files = filesUnder(folder);
+      if (!Object.hasOwn(table, name) && !files.length) fail(404, `no project "${name}"`);
+      if (Object.hasOwn(table, name)) {
+        delete table[name];
+        stage(manifestRel, sha256(bytes), json(manifest));
+      }
+      for (const rel of files) stage(rel, sha256(/** @type {Buffer} */ (storedBytes(db, rel))), null);
+    } else {
+      fail(400, 'a rule is one file: delete it in the file view');
+    }
+  } else {
+    fail(400, 'unknown entry action');
+  }
+  return dispatchSave(state, db, ops, token);
+}
+
 // First sha of `git ls-remote` for a dashboard repo source; '' when the check fails (client-safe).
 /**
  * @param {string} name
@@ -1366,4 +1536,4 @@ function remoteHead(name, ref, token, host = '') {
   return git.status === 0 && git.stdout ? git.stdout.split('\n')[0].trim().split(/\s+/)[0] : '';
 }
 
-export { scanInventory, importSource, isGitWorkTree, isWritableDir, loadState, remoteHead, snapshotData, readStoredFile, listStoredFiles, applyFileEdit, applyBundleAction, setTrustedPathSource, getTrustedPathSource };
+export { scanInventory, importSource, isGitWorkTree, isWritableDir, loadState, remoteHead, snapshotData, readStoredFile, listStoredFiles, applyFileEdit, applyBundleAction, applyEntryAction, originCovers, withoutOrigin, withOwnText, setTrustedPathSource, getTrustedPathSource };
