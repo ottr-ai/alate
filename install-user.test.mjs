@@ -2597,6 +2597,109 @@ exit 0
     assert.equal(truncCallsGrown.length, 1, `only the truncated skill is rescanned: ${truncCallsGrown.join('\n')}`);
     assert.ok(truncCallsGrown[0].includes(join(truncData, 'user/omp/agent/skills/flood')), truncCallsGrown[0]);
 
+    // (j2) The two output_limit classes and the runtime_limit re-run
+    // (specs/scan-budget-and-ae1-determinism.md). An output_limit ledger entry with phase
+    // `static` means the dependency lookups stopped at their query budget: the finding lists
+    // are complete, so the skill rejects with rule `incomplete dependency coverage` at the
+    // entry's path instead of `scan error`, and the negative verdict is never cached. A report
+    // that also carries a phase `finding_output` entry stays the strict scan error — the
+    // truncation class wins. A runtime_limit ledger makes the scan degraded: no verdict in the
+    // concurrent pass, one sequential re-scan adopts the stable verdict, and only the post-
+    // re-run verdict can record a pass.
+    const lookupLimitedEntry = { outcome: 'partial', phase: 'static', reason_code: 'output_limit', message: 'Inspection reached its configured output limit.', path: 'requirements.txt', start_line: null, end_line: null, fatal: false, analyzers: ['static_patterns_supply_chain_dependencies_output_limit'] };
+    // Fixture 1: lookup-limited rejection (fails before the fix: the same report rejects as
+    // `scan error`), while the benign static_parse_limit/reference_missing combo still passes.
+    const budgetData = join(tmp, 'budget-data');
+    const budgetHome = join(tmp, 'budget-home');
+    fixtureRepo(budgetData, ['lookup', 'serene']);
+    stubReport('lookup', scanReport([], [], { analysis_completeness: { is_complete: false, ledger_exceptions: [lookupLimitedEntry] } }));
+    stubReport('serene', scanReport([], [], { analysis_completeness: { is_complete: false, ledger_exceptions: [{ reason_code: 'static_parse_limit', path: 'docs/big.md', outcome: 'partial' }, { reason_code: 'reference_missing', path: 'x.md', outcome: 'skipped' }] } }));
+    const budgetCallsBefore = callsNow().length;
+    r = run(['--data', budgetData, '--skip-plugins'], budgetHome);
+    assert.equal(r.status, 1, `a lookup-limited skill fails its run: ${r.stderr}`);
+    assert.ok(r.stdout.includes(`${skillItem('lookup')} — rejected: incomplete dependency coverage at requirements.txt`), r.stdout);
+    assert.ok(r.stdout.includes('advisory coverage is incomplete'), r.stdout);
+    assert.equal(readFileSync(join(budgetHome, '.omp/agent/skills/serene/SKILL.md'), 'utf8'), skillText('serene'), 'the benign skill installs byte-exact');
+    r = run(['--data', budgetData, '--skip-plugins'], budgetHome);
+    assert.equal(r.status, 1, 'the coverage rejection repeats on the next run: a negative verdict is never cached');
+    const budgetCallsGrown = callsNow().slice(budgetCallsBefore + 2 + shippedCount);
+    assert.equal(budgetCallsGrown.length, 1, `only the lookup-limited skill is rescanned: ${budgetCallsGrown.join('\n')}`);
+    assert.ok(budgetCallsGrown[0].includes(join(budgetData, 'user/omp/agent/skills/lookup')), budgetCallsGrown[0]);
+
+    // Fixture 2 (pinning: passes before and after the fix): a report that carries BOTH the
+    // static-phase entry and a finding_output entry keeps the strict class — the findings-cap
+    // entry wins, and the message stays the truncation one.
+    const mixedData = join(tmp, 'mixed-budget-data');
+    const mixedHome = join(tmp, 'mixed-budget-home');
+    fixtureRepo(mixedData, ['both']);
+    stubReport('both', scanReport([], [], { analysis_completeness: { is_complete: false, ledger_exceptions: [lookupLimitedEntry, { outcome: 'partial', phase: 'finding_output', reason_code: 'output_limit', message: 'Inspection reached its configured output limit.', path: 'a/requirements.txt', start_line: null, end_line: null, fatal: false }] } }));
+    r = run(['--data', mixedData, '--skip-plugins'], mixedHome);
+    assert.equal(r.status, 1, `a mixed output_limit report stays a scan error: ${r.stderr}`);
+    assert.ok(r.stdout.includes(`${skillItem('both')} — rejected: scan error`), r.stdout);
+    assert.ok(r.stdout.includes('the scanner reached its finding output limit'), r.stdout);
+
+    // Fixture 3: a runtime_limit ledger makes the scan degraded. The counting stub serves each
+    // skill's first report on scan 1 and its .second.json report from scan 2 on, and logs
+    // start/end lines with nanosecond stamps so the test proves the re-run is sequential.
+    // Same-name scans never run concurrently in either pass (one worker per dir; the re-run is
+    // sequential), so the plain counter read/increment/write is race-free. Red-before: today
+    // the first-pass AE1 finding rejects as `unreviewed baseline acceptance` after 1 scan.
+    const budgetCalls = join(stubDir, 'budget-calls.log');
+    const writeCountingStub = () => {
+      writeFileSync(join(stubDir, 'skillspector'), [
+        '#!/bin/sh',
+        `if [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi`,
+        `name=$(basename "$2")`,
+        `printf 'start %s %s\\n' "$name" "$(date +%s%N)" >> '${budgetCalls}'`,
+        `cnt=0; [ -f '${reportsDir}/'"$name.count" ] && cnt=$(cat '${reportsDir}/'"$name.count"); cnt=$((cnt+1)); echo "$cnt" > '${reportsDir}/'"$name.count"`,
+        `if [ "$cnt" -ge 2 ] && [ -f '${reportsDir}/'"$name.second.json" ]; then`,
+        `  cat '${reportsDir}/'"$name.second.json"`,
+        `elif [ -f '${reportsDir}/'"$name.json" ]; then`,
+        `  cat '${reportsDir}/'"$name.json"`,
+        'else',
+        `  ${shPrint(CLEAN_REPORT)}`,
+        'fi',
+        `printf 'end %s %s\\n' "$name" "$(date +%s%N)" >> '${budgetCalls}'`,
+        'exit 0',
+        '',
+      ].join('\n'));
+      chmodSync(join(stubDir, 'skillspector'), 0o755);
+    };
+    const degradedReport = scanReport([], [fixtureFinding('AE1', 'HIGH', 'SKILL.md', 34)], { analysis_completeness: { is_complete: false, ledger_exceptions: [{ outcome: 'partial', phase: 'static', reason_code: 'runtime_limit', message: 'Inspection reached its configured runtime limit.', path: 'requirements.txt', start_line: null, end_line: null, fatal: false }] } });
+    const flakyData = join(tmp, 'flaky-data');
+    const flakyHome = join(tmp, 'flaky-home');
+    fixtureRepo(flakyData, ['flaky', 'solid']);
+    stubReport('flaky', degradedReport);
+    stubReport('flaky.second', CLEAN_REPORT);
+    writeCountingStub();
+    rmSync(budgetCalls, { force: true });
+    r = run(['--data', flakyData, '--skip-plugins'], flakyHome);
+    assert.equal(r.status, 0, `the degraded skill re-scans to a stable verdict: ${r.stdout}`);
+    assert.equal(readFileSync(join(flakyHome, '.omp/agent/skills/flaky/SKILL.md'), 'utf8'), skillText('flaky'), 'flaky installs byte-exact after the re-run');
+    assert.equal(readFileSync(join(flakyHome, '.omp/agent/skills/solid/SKILL.md'), 'utf8'), skillText('solid'), 'solid installs byte-exact');
+    const flakySpans = readFileSync(budgetCalls, 'utf8').trim().split('\n').filter(l => l.startsWith('start flaky ') || l.startsWith('end flaky '));
+    assert.equal(flakySpans.filter(l => l.startsWith('start flaky ')).length, 2, `flaky scans exactly twice: ${flakySpans.join('\n')}`);
+    assert.ok(flakySpans[1].startsWith('end flaky ') && flakySpans[2].startsWith('start flaky '), `the re-scan starts after the first scan ends: ${flakySpans.join('\n')}`);
+    r = run(['--data', flakyData, '--skip-plugins'], flakyHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`Scanning 0 of ${2 + shippedCount} skill snapshot\\(s\\) \\(${2 + shippedCount} cached\\)`));
+
+    // Fixture 4 (bounded re-run): a re-scan that is still runtime-limit-limited adopts the
+    // re-run verdict and never runs a third scan. Red-before on the count: today 1 scan
+    // rejects; after the fix exactly 2 scans reject with the same rule.
+    const flaky2Data = join(tmp, 'flaky2-data');
+    const flaky2Home = join(tmp, 'flaky2-home');
+    fixtureRepo(flaky2Data, ['flaky2']);
+    stubReport('flaky2', degradedReport);
+    stubReport('flaky2.second', degradedReport);
+    rmSync(budgetCalls, { force: true });
+    r = run(['--data', flaky2Data, '--skip-plugins'], flaky2Home);
+    assert.equal(r.status, 1, 'a still-degraded re-scan keeps its verdict and the unreviewed finding rejects');
+    assert.ok(r.stdout.includes(`${skillItem('flaky2')} — rejected: unreviewed baseline acceptance`), r.stdout);
+    const flaky2Starts = readFileSync(budgetCalls, 'utf8').trim().split('\n').filter(l => l.startsWith('start flaky2 ')).length;
+    assert.equal(flaky2Starts, 2, `the bounded re-run scans exactly twice, never a third time: ${flaky2Starts}`);
+    writeStub(0);
+
     // (g) A report the gate cannot judge — stdout that is not JSON, a suppressed_count that
     // disagrees with the list, a JSON array, or a missing issues list — is a scan error for
     // that skill alone, also at exit 0 or 1.

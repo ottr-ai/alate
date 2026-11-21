@@ -121,16 +121,28 @@ the reviews stay valid: compute the new key of each reviewed finding on the same
   whose elements are objects, and a `suppressed_count` equal to the `suppressed` length: the
   gate judges the report. Any other result (another exit code, a signal, stdout that is not such
   an object) is a `scan error` rejection of that skill, as before.
-- A judged report whose `analysis_completeness.ledger_exceptions` holds an entry with
-  `reason_code` `output_limit` is also a `scan error` rejection, and the gate never caches it.
-  The pinned build stops one analyzer at 10,000 findings and skips the files after that point.
-  Proof (2026-11-15, v2.13.0): a skill with 12,000 bare package names in `a/requirements.txt`
-  (SC1, LOW) and `curl … | sh` in `scripts/setup.sh` gets a report with 9,998 SC1 findings and
-  no SC2 finding (HIGH). A baseline that accepts the LOW flood needs no review, so without this
-  rule the HIGH finding passes unseen. Other partial-coverage reasons (`static_parse_limit`,
-  `reference_missing`) occur in 64 of the 85 skills of agent-data and drop no finding, so they do
-  not reject. On 2026-11-15 no skill of agent-data or of `shipped/` had an `output_limit`
-  exception.
+- A judged report whose `analysis_completeness.ledger_exceptions` holds an `output_limit`
+  entry with `phase: "finding_output"` is a `scan error` rejection, and the gate never
+  caches it. The pinned build stops the findings output at `MAX_FINDING_OUTPUT_RECORDS`
+  (10,000 records) and drops later findings from both lists. Proof (2026-11-15, v2.13.0):
+  a skill with 12,000 bare package names in `a/requirements.txt` (SC1, LOW) and
+  `curl … | sh` in `scripts/setup.sh` gets a report with 9,998 SC1 findings and no SC2
+  finding (HIGH); the ledger entry for `a/requirements.txt` carries
+  `phase: "finding_output"`. A baseline that accepts the LOW flood needs no review, so
+  without this rule the HIGH finding passes unseen.
+- An `output_limit` entry in any other phase (v2.13.0: `phase: "static"`, the bounded OSV
+  dependency lookups and manifest parses; proof 2026-11-21, agent-data `shorts`) rejects
+  the skill with rule `incomplete dependency coverage` at that entry's `path`, never
+  cached: the finding lists are complete, but advisory coverage for the named files is
+  missing. It applies only when no finding and no unreviewed acceptance already rejects.
+  Decision and risks: `specs/scan-budget-and-ae1-determinism.md`.
+- A judged report with `runtime_limit` ledger entries is a degraded scan (a wall-clock
+  budget busted under concurrent load; the AE1 finding set varies with it). The gate
+  re-scans such skills one at a time after the concurrent pass and adopts the re-run
+  verdict; only the post-re-run verdict can record a pass.
+- Other partial-coverage reasons (`static_parse_limit`, `reference_missing`) occur in 64
+  of the 85 skills of agent-data and drop no finding, so they do not reject. On
+  2026-11-15 no skill of agent-data or of `shipped/` had an `output_limit` exception.
 - Verdict for one skill:
   - One or more `issues`: rejected. The status line carries the first issue's rule and
     `file:line`.

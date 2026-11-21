@@ -300,7 +300,10 @@ const scanCachePath = join(home, '.alate', 'skillspector-pass.json');
 // (readFileSync follows the link), rendered like every file — the exact bytes the install
 // writes — never the link text. The format token prefixed to every key makes entries an
 // older alate wrote miss once and rescan instead of surviving a framing change.
-const SCAN_CACHE_FORMAT = 'skill-pass-fmt-3';
+// fmt-4: a pass an older alate recorded may come from a load-degraded scan (runtime_limit
+// ledger entries that a sequential re-scan would not produce), so every entry misses once
+// and rescans under the new degraded-then-re-run semantics.
+const SCAN_CACHE_FORMAT = 'skill-pass-fmt-4';
 /** @param {string} dir @returns {string} */
 const hashSkillDir = dir => {
   const hash = createHash('sha256');
@@ -503,13 +506,19 @@ const findingAt = f => `${oneLine(f.location?.file)}:${oneLine(f.location?.start
 const findingLines = f => [`${oneLine(f.severity)}: ${oneLine(f.id)} - ${oneLine(f.pattern ?? f.category)}`, `    Location: ${findingAt(f)}`];
 
 // A judged report is a JSON object whose issues and suppressed lists hold objects, with a
-// suppressed_count that agrees; anything else proves nothing and is a scan error. `truncated`
-// is true when the scanner's completeness ledger records an `output_limit` exception: the
-// pinned build stops one analyzer at 10,000 findings and skips the files after that point, so
-// a skill can flood an early file with LOW findings its own baseline accepts and push a HIGH
-// finding out of both lists. Other partial-coverage reasons (static_parse_limit,
-// reference_missing) are common in benign skills and drop no finding from the lists.
-/** @param {string} stdout @returns {{ issues: ScanFinding[], suppressed: ScanFinding[], truncated: boolean } | null} */
+// suppressed_count that agrees; anything else proves nothing and is a scan error. An
+// `output_limit` ledger exception splits into two classes by its `phase` (which the pinned
+// build sets truthfully): `phase: "finding_output"` means the per-scan findings cap fired and
+// findings past the cap are missing from both lists (`truncated`, the strict scan-error
+// class — a skill can flood an early file with LOW findings its own baseline accepts and push
+// a HIGH finding out of both lists), while the bounded dependency lookups and manifest parses
+// (`phase: "static"`) leave the lists complete with only advisory coverage missing
+// (`lookupLimited`, the softer per-item class; an unknown future phase keeps the strict
+// class, fail-closed). `degraded` marks `runtime_limit` ledger entries: the scan's verdict
+// then depends on machine load, not on the skill bytes, and the caller re-scans sequentially.
+// Other partial-coverage reasons (static_parse_limit, reference_missing) are common in benign
+// skills and drop no finding from the lists.
+/** @param {string} stdout @returns {{ issues: ScanFinding[], suppressed: ScanFinding[], truncated: boolean, lookupLimited: boolean, lookupPaths: string[], degraded: boolean } | null} */
 const parseScanReport = stdout => {
   /** @type {unknown} */
   let doc;
@@ -521,21 +530,46 @@ const parseScanReport = stdout => {
   const isFinding = f => f !== null && typeof f === 'object' && !Array.isArray(f);
   if (!issues.every(isFinding) || !suppressed.every(isFinding)) return null;
   const exceptions = isFinding(completeness) ? /** @type {Record<string, unknown>} */ (completeness).ledger_exceptions : undefined;
-  const truncated = Array.isArray(exceptions) && exceptions.some(e => isFinding(e) && /** @type {Record<string, unknown>} */ (e).reason_code === 'output_limit');
-  return { issues, suppressed, truncated };
+  // One pass over the ledger classifies every entry; non-object entries prove nothing and
+  // are skipped. Only the exact phase `static` gets the softer class: an output_limit entry
+  // with an unknown phase string keeps the strict truncated class (fail-closed), and a
+  // report carrying both classes sets both flags — the finding_output entry wins at the
+  // rejection site.
+  let truncated = false;
+  let lookupLimited = false;
+  let degraded = false;
+  /** @type {string[]} */
+  const lookupPaths = [];
+  if (Array.isArray(exceptions)) {
+    for (const e of exceptions) {
+      if (!isFinding(e)) continue;
+      const entry = /** @type {Record<string, unknown>} */ (e);
+      if (entry.reason_code === 'output_limit') {
+        if (entry.phase === 'finding_output') truncated = true;
+        else if (entry.phase === 'static') {
+          lookupLimited = true;
+          if (typeof entry.path === 'string' && entry.path !== '') lookupPaths.push(entry.path);
+        } else truncated = true;
+      } else if (entry.reason_code === 'runtime_limit') degraded = true;
+    }
+  }
+  return { issues, suppressed, truncated, lookupLimited, lookupPaths, degraded };
 };
 
 // The pinned build's verdict for these exact bytes, printed as one text block so a tail of the
 // output always shows a whole report. A judged report (exit 0 or 1) resolves with its issues and
 // the suppressed findings above MEDIUM that no entry for `skill` covers; any other result
 // resolves as a scan error — a per-skill rejection carrying the failure line and the scanner
-// output. Only a spawn error rejects: the scanner cannot run at all, which the caller turns into
+// output. A judged report also carries the ledger verdict: `degraded` when runtime_limit
+// entries say the verdict varies with machine load, and `lookupPaths` (only when the scan
+// was lookup-limited) naming the files whose advisory coverage is missing. Only a spawn error
+// rejects: the scanner cannot run at all, which the caller turns into
 // a whole-run refusal. `display` names the folder in every message: a staged scan copy reports
 // under the snapshot folder's name, so a deploy log's tail still names the skill.
 /**
  * @param {string} scanner @param {string} dir @param {number} total @param {string} display
  * @param {string} skill @param {ReviewEntry[]} entries
- * @returns {Promise<{ issues: ScanFinding[], unreviewed: ScanFinding[], report: string } | { scanError: string, report: string }>}
+ * @returns {Promise<{ issues: ScanFinding[], unreviewed: ScanFinding[], report: string, degraded: boolean, lookupPaths: string[] } | { scanError: string, report: string }>}
  */
 const scanOne = (scanner, dir, total, display, skill, entries) => new Promise((resolve, reject) => {
   const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: scannerEnv() });
@@ -582,7 +616,7 @@ const scanOne = (scanner, dir, total, display, skill, entries) => new Promise((r
     if (stderr) lines.push(stderr);
     const report = lines.join('\n');
     console.log(`--- SkillSpector report: ${display}${report ? `\n${report}` : ''}`);
-    if (parsed && !parsed.truncated && (code === 0 || code === 1)) resolve({ issues: parsed.issues, unreviewed, report });
+    if (parsed && !parsed.truncated && (code === 0 || code === 1)) resolve({ issues: parsed.issues, unreviewed, report, degraded: parsed.degraded === true, lookupPaths: parsed.lookupLimited === true ? parsed.lookupPaths : [] });
     else {
       const why = parsed?.truncated
         ? 'the scanner reached its finding output limit, so findings past the limit are missing from the report'
@@ -693,11 +727,18 @@ const runScan = async (skillDirs, keyOf, reviews) => {
   if (!pending.length) return { rejected };
   // Findings and unreviewed baseline acceptances reject their own skill only; so does any other
   // scan failure (another exit, a signal kill, a report that does not parse): the skill is left
-  // out with rule `scan error` and the scan continues. Only a spawn error — the scanner cannot
+  // out with rule `scan error` and the scan continues. Lookup-limited scans (output_limit with
+  // phase `static`) reject with rule `incomplete dependency coverage` naming the starved files:
+  // the finding lists are complete, but the advisory coverage the scan vouches for is missing.
+  // A scan with runtime_limit ledger entries records no verdict at all in the first pass: its
+  // verdict varies with machine load, so it re-scans sequentially below and only that verdict
+  // can record a pass. Only a spawn error — the scanner cannot
   // run at all, so no verdict is possible — stops scheduling, lets the in-flight scans finish,
   // and refuses the whole run.
   let fatal = /** @type {Error | null} */ (null);
   let next = 0;
+  /** @type {string[]} */
+  const degradedDirs = [];
   // Staged scan copies: every scanned skill scans a staged copy of its rendered bytes with
   // clean modes (specs/canonical-form.md); created lazily, so a warm cache never pays for
   // one, and removed before this function returns, whatever the scans decided.
@@ -710,6 +751,34 @@ const runScan = async (skillDirs, keyOf, reviews) => {
     return stageScanCopy(dir, stageRoot, staged++);
   };
   try {
+    // The verdict and the entries belong to the snapshot dir, never to a staged copy, so both
+    // the concurrent workers and the sequential re-runs adopt a verdict through this one path.
+    /**
+     * @param {string} dir
+     * @param {Awaited<ReturnType<typeof scanOne>>} res
+     * @returns {void}
+     */
+    const applyVerdict = (dir, res) => {
+      if ('scanError' in res) {
+        rejected.set(dir, { rule: 'scan error', report: `${res.scanError}${res.report ? `\n${res.report}` : ''}` });
+        // Stdout too: the deploy log's tail must name the rejected skill folder.
+        console.log(`${res.scanError} The skill is left out of this install.`);
+      } else if (res.issues.length) {
+        rejected.set(dir, { rule: oneLine(res.issues[0].id), at: findingAt(res.issues[0]), report: res.report });
+        // Stdout too: the deploy log's tail must name the rejected skill folder.
+        console.log(`SkillSpector rejected ${dir} (${res.issues.length} finding(s)); the skill is left out of this install.`);
+      } else if (res.unreviewed.length) {
+        rejected.set(dir, { rule: 'unreviewed baseline acceptance', at: findingAt(res.unreviewed[0]), report: res.report });
+        console.log(`SkillSpector rejected ${dir}: its shipped baseline accepts ${res.unreviewed.length} finding(s) above MEDIUM that no review entry covers; the skill is left out of this install.`);
+      } else if (res.lookupPaths.length) {
+        const why = `the scanner's dependency lookups stopped at their query budget, so advisory coverage is incomplete for ${res.lookupPaths.join(', ')}`;
+        rejected.set(dir, { rule: 'incomplete dependency coverage', at: res.lookupPaths[0], report: `SkillSpector scan of ${dir} is incomplete: ${why}.\n${res.report}` });
+        console.log(`SkillSpector rejected ${dir}: ${why}; the skill is left out of this install.`);
+      } else {
+        passes[/** @type {string} */ (keys.get(dir))] = true;
+        recordPass(passes);
+      }
+    };
     /** @returns {Promise<void>} */
     const worker = async () => {
       while (fatal === null && next < pending.length) {
@@ -724,30 +793,37 @@ const runScan = async (skillDirs, keyOf, reviews) => {
           continue;
         }
         try {
-          // The verdict and the entries belong to the snapshot dir, never to a staged copy.
           const skill = keyOf(dir);
           const res = await scanOne(/** @type {string} */ (scanner), scanTarget, skillDirs.length, dir, skill, reviews.get(skill) ?? []);
-          if ('scanError' in res) {
-            rejected.set(dir, { rule: 'scan error', report: `${res.scanError}${res.report ? `\n${res.report}` : ''}` });
-            // Stdout too: the deploy log's tail must name the rejected skill folder.
-            console.log(`${res.scanError} The skill is left out of this install.`);
-          } else if (res.issues.length) {
-            rejected.set(dir, { rule: oneLine(res.issues[0].id), at: findingAt(res.issues[0]), report: res.report });
-            // Stdout too: the deploy log's tail must name the rejected skill folder.
-            console.log(`SkillSpector rejected ${dir} (${res.issues.length} finding(s)); the skill is left out of this install.`);
-          } else if (res.unreviewed.length) {
-            rejected.set(dir, { rule: 'unreviewed baseline acceptance', at: findingAt(res.unreviewed[0]), report: res.report });
-            console.log(`SkillSpector rejected ${dir}: its shipped baseline accepts ${res.unreviewed.length} finding(s) above MEDIUM that no review entry covers; the skill is left out of this install.`);
-          } else {
-            passes[/** @type {string} */ (keys.get(dir))] = true;
-            recordPass(passes);
-          }
+          // A degraded scan gets no verdict here: it re-scans sequentially after the pool, so
+          // the verdict never depends on concurrent load.
+          if (!('scanError' in res) && res.degraded === true) { degradedDirs.push(dir); continue; }
+          applyVerdict(dir, res);
         } catch (err) {
           fatal = /** @type {Error} */ (err);
         }
       }
     };
     await Promise.all(Array.from({ length: Math.min(8, availableParallelism(), pending.length) }, worker));
+    // The re-run scans one degraded skill at a time on a fresh staged copy per call (basename
+    // survives, so per-skill report stubs keep working): sequential conditions are the
+    // deterministic reference, and the re-run verdict replaces the first-pass verdict through
+    // the same path. A re-run that is still degraded keeps its verdict; it never runs a third
+    // scan, so the cost is bounded to one extra scan per skill per install.
+    if (degradedDirs.length > 0) {
+      console.log(`${degradedDirs.length} scan(s) hit the scanner's runtime limit under concurrent load; re-scanning them one at a time for a stable verdict...`);
+      for (const dir of degradedDirs) {
+        if (fatal !== null) break;
+        try {
+          const skill = keyOf(dir);
+          const res = await scanOne(/** @type {string} */ (scanner), scanTargetFor(dir), skillDirs.length, dir, skill, reviews.get(skill) ?? []);
+          if (!('scanError' in res) && res.degraded === true) console.log(`the re-scan of ${dir} is still runtime-limit-limited; keeping its verdict`);
+          applyVerdict(dir, res);
+        } catch (err) {
+          fatal = /** @type {Error} */ (err);
+        }
+      }
+    }
     if (fatal !== null) {
       // Stdout too: the deploy log's tail must end on the line naming the broken scan.
       console.log(fatal.message);
