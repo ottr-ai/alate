@@ -561,15 +561,16 @@ const parseScanReport = stdout => {
 // the suppressed findings above MEDIUM that no entry for `skill` covers; any other result
 // resolves as a scan error — a per-skill rejection carrying the failure line and the scanner
 // output. A judged report also carries the ledger verdict: `degraded` when runtime_limit
-// entries say the verdict varies with machine load, and `lookupPaths` (only when the scan
-// was lookup-limited) naming the files whose advisory coverage is missing. Only a spawn error
+// entries say the verdict varies with machine load, and `lookupLimited` with `lookupPaths`
+// when bounded dependency lookups left advisory coverage incomplete (the paths are
+// diagnostics; the flag alone rejects). Only a spawn error
 // rejects: the scanner cannot run at all, which the caller turns into
 // a whole-run refusal. `display` names the folder in every message: a staged scan copy reports
 // under the snapshot folder's name, so a deploy log's tail still names the skill.
 /**
  * @param {string} scanner @param {string} dir @param {number} total @param {string} display
  * @param {string} skill @param {ReviewEntry[]} entries
- * @returns {Promise<{ issues: ScanFinding[], unreviewed: ScanFinding[], report: string, degraded: boolean, lookupPaths: string[] } | { scanError: string, report: string }>}
+ * @returns {Promise<{ issues: ScanFinding[], unreviewed: ScanFinding[], report: string, degraded: boolean, lookupLimited: boolean, lookupPaths: string[] } | { scanError: string, report: string }>}
  */
 const scanOne = (scanner, dir, total, display, skill, entries) => new Promise((resolve, reject) => {
   const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: scannerEnv() });
@@ -616,7 +617,7 @@ const scanOne = (scanner, dir, total, display, skill, entries) => new Promise((r
     if (stderr) lines.push(stderr);
     const report = lines.join('\n');
     console.log(`--- SkillSpector report: ${display}${report ? `\n${report}` : ''}`);
-    if (parsed && !parsed.truncated && (code === 0 || code === 1)) resolve({ issues: parsed.issues, unreviewed, report, degraded: parsed.degraded === true, lookupPaths: parsed.lookupLimited === true ? parsed.lookupPaths : [] });
+    if (parsed && !parsed.truncated && (code === 0 || code === 1)) resolve({ issues: parsed.issues, unreviewed, report, degraded: parsed.degraded === true, lookupLimited: parsed.lookupLimited === true, lookupPaths: parsed.lookupLimited === true ? parsed.lookupPaths : [] });
     else {
       const why = parsed?.truncated
         ? 'the scanner reached its finding output limit, so findings past the limit are missing from the report'
@@ -770,9 +771,13 @@ const runScan = async (skillDirs, keyOf, reviews) => {
       } else if (res.unreviewed.length) {
         rejected.set(dir, { rule: 'unreviewed baseline acceptance', at: findingAt(res.unreviewed[0]), report: res.report });
         console.log(`SkillSpector rejected ${dir}: its shipped baseline accepts ${res.unreviewed.length} finding(s) above MEDIUM that no review entry covers; the skill is left out of this install.`);
-      } else if (res.lookupPaths.length) {
-        const why = `the scanner's dependency lookups stopped at their query budget, so advisory coverage is incomplete for ${res.lookupPaths.join(', ')}`;
-        rejected.set(dir, { rule: 'incomplete dependency coverage', at: res.lookupPaths[0], report: `SkillSpector scan of ${dir} is incomplete: ${why}.\n${res.report}` });
+      } else if (res.lookupLimited === true) {
+        // The flag rejects, never the presence of a diagnostic path: a static output_limit
+        // entry whose path is missing or unreadable proves the same incompleteness and must
+        // not fall through to a cached pass.
+        const files = res.lookupPaths.length > 0 ? res.lookupPaths.join(', ') : 'unnamed files';
+        const why = `the scanner's dependency lookups stopped at their query budget, so advisory coverage is incomplete for ${files}`;
+        rejected.set(dir, { rule: 'incomplete dependency coverage', at: res.lookupPaths.length > 0 ? res.lookupPaths[0] : undefined, report: `SkillSpector scan of ${dir} is incomplete: ${why}.\n${res.report}` });
         console.log(`SkillSpector rejected ${dir}: ${why}; the skill is left out of this install.`);
       } else {
         passes[/** @type {string} */ (keys.get(dir))] = true;
@@ -806,19 +811,40 @@ const runScan = async (skillDirs, keyOf, reviews) => {
     };
     await Promise.all(Array.from({ length: Math.min(8, availableParallelism(), pending.length) }, worker));
     // The re-run scans one degraded skill at a time on a fresh staged copy per call (basename
-    // survives, so per-skill report stubs keep working): sequential conditions are the
-    // deterministic reference, and the re-run verdict replaces the first-pass verdict through
-    // the same path. A re-run that is still degraded keeps its verdict; it never runs a third
-    // scan, so the cost is bounded to one extra scan per skill per install.
+    // survives, so per-skill report stubs keep working): it gives the verdict one chance to
+    // land under the scanner's budgets without the pool's load. A re-run that is still
+    // runtime-limit-limited rejects as `scan error` and is never cached: a degraded scan can
+    // never produce a pass, so the cache only ever holds verdicts whose sequential scans fit
+    // the budgets. Residual variance stays fail-closed: external OSV latency can still flip a
+    // borderline skill between a rejection and a pass across installs, and a rejection costs
+    // one rescan on the next cold-cache install. Staging errors keep the worker's policy: one
+    // per-skill `unreadable skill files` rejection, never a whole-run refusal. It never runs a
+    // third scan, so the cost is bounded to one extra scan per skill per install.
     if (degradedDirs.length > 0) {
       console.log(`${degradedDirs.length} scan(s) hit the scanner's runtime limit under concurrent load; re-scanning them one at a time for a stable verdict...`);
       for (const dir of degradedDirs) {
         if (fatal !== null) break;
+        let scanTarget;
+        try {
+          scanTarget = scanTargetFor(dir);
+        } catch (err) {
+          // Same policy as the worker's staging catch: a mid-run race rejects the one skill.
+          rejected.set(dir, { rule: 'unreadable skill files', report: `${dir}: ${/** @type {Error} */ (err).message}` });
+          continue;
+        }
         try {
           const skill = keyOf(dir);
-          const res = await scanOne(/** @type {string} */ (scanner), scanTargetFor(dir), skillDirs.length, dir, skill, reviews.get(skill) ?? []);
-          if (!('scanError' in res) && res.degraded === true) console.log(`the re-scan of ${dir} is still runtime-limit-limited; keeping its verdict`);
-          applyVerdict(dir, res);
+          const res = await scanOne(/** @type {string} */ (scanner), scanTarget, skillDirs.length, dir, skill, reviews.get(skill) ?? []);
+          if (!('scanError' in res) && res.degraded === true) {
+            // The sequential re-run hit the wall-clock budget again: the verdict is still
+            // load-dependent, so it is unprovable and must not pass or enter the cache.
+            const why = 'the scan hit the scanner\'s runtime limit again when re-scanned one at a time, so its verdict stays load-dependent';
+            rejected.set(dir, { rule: 'scan error', report: `SkillSpector scan of ${dir} failed (${why}).\n${res.report}` });
+            // Stdout too: the deploy log's tail must name the rejected skill folder.
+            console.log(`SkillSpector scan of ${dir} failed (${why}). The skill is left out of this install.`);
+          } else {
+            applyVerdict(dir, res);
+          }
         } catch (err) {
           fatal = /** @type {Error} */ (err);
         }

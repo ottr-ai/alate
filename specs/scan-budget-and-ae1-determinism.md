@@ -52,8 +52,10 @@ build sets truthfully:
   `scan error` rejection, uncached, with the existing message.
 - Any other `output_limit` entry (today: `phase: "static"`, the bounded dependency lookups
   and manifest parses) becomes a per-item rejection with rule
-  `incomplete dependency coverage`, `at` set to the first such entry's `path`, never
-  cached, with a report head naming the starved lookups. The skill still never installs.
+  `incomplete dependency coverage`, `at` set to the first such entry's `path`, or no
+  position when an entry names none: the flag rejects, and a missing path never promotes
+  the report to a pass. Never cached, with a report head naming the starved lookups. The
+  skill still never installs.
   Precedence is unchanged: real findings reject first (`issues`, then unreviewed baseline
   acceptances), and the coverage rule applies when nothing else rejects.
 - An unknown future `phase` keeps the strict class (fail-closed): only the exact phase
@@ -98,14 +100,23 @@ verdict:
 - The first pass runs the pool as today. A scan that resolves judged with runtime_limit
   entries records no verdict; `runScan` logs the count.
 - After the concurrent pass, the degraded skills re-scan one at a time (fresh staged copy
-  each, same arguments, bounded to one re-run per skill per install). The re-run verdict
-  replaces the first-pass verdict through the same path (findings, unreviewed acceptances,
-  pass, scan error). If the re-run is itself runtime-limit-limited, its verdict still
-  stands; sequential conditions are the deterministic reference (evidence: sequential runs
-  are stable, no runtime_limit entries).
-- Only the post-re-run verdict can record a pass. Two installs of the same bytes now
-  produce the same verdicts regardless of load: concurrent scans without runtime_limit
-  entries already agree with the sequential verdict, and degraded ones re-run to it.
+  each, same arguments, bounded to one re-run per skill per install). A clean re-scan
+  adopts its verdict through the same path (findings, unreviewed acceptances, pass, scan
+  error). A re-run that is still runtime-limit-limited rejects with rule `scan error`
+  (never cached): a sequential retry does not remove OSV latency from the wall-clock
+  budget, so the verdict is still load-dependent and unprovable. A degraded scan can never
+  produce a pass, and the cache only ever holds verdicts whose sequential scans fit the
+  scanner's budgets.
+- Residual variance stays fail-closed: external OSV latency can still flip a borderline
+  skill between a rejection (this install) and a pass (a later cold-cache install, when
+  the sequential scan fits the budget). A rejection costs one rescan on the next install;
+  no degraded verdict is ever hidden in the cache. Staging a re-run copy keeps the
+  worker's policy: a staging failure rejects that one skill as `unreadable skill files`,
+  never the whole run.
+- Effect: the cache never holds a degraded verdict. For bytes whose sequential scans fit
+  the scanner's budgets, two installs produce the same verdicts regardless of pool load;
+  extra AE1 instances that only exist under pool load can no longer reject a skill, and a
+  skill that busts the budgets even sequentially rejects every cold-cache install.
 
 `SCAN_CACHE_FORMAT` bumps `skill-pass-fmt-3` → `skill-pass-fmt-4`: a pass an older alate
 recorded may come from a load-degraded scan, so every cached verdict misses once and
@@ -161,8 +172,14 @@ rescans under the new semantics.
 - A first-pass report with a `runtime_limit` entry and an extra unreviewed HIGH finding,
   followed by a clean re-scan, installs the skill, scans it exactly twice, and the re-scan
   starts after the first scan ends (test fails before the fix: today the skill rejects).
-- A re-scan that is still runtime-limit-limited adopts the re-run verdict and never runs a
-  third scan.
+- A re-scan that is still runtime-limit-limited rejects as `scan error` with the
+  unresolved-degradation message, never runs a third scan, never caches, and the same
+  holds for a clean-but-still-degraded re-scan (the shape that must never fall through to
+  a cached pass).
+- A static `output_limit` entry with no `path` rejects with rule `incomplete dependency
+  coverage` and no position: the flag rejects, not the presence of a diagnostic path.
+- A retry whose staged copy cannot be created rejects that skill as `unreadable skill
+  files` and the remaining skills install — never a whole-run refusal.
 - A cache recorded before this change misses once and rescans (`skill-pass-fmt-4`).
 - Real-scanner acceptance (reported, not unit-tested): `install-user.mjs` against the
   agent-data snapshot rejects shorts with `incomplete dependency coverage` naming

@@ -172,8 +172,9 @@ failure; `provisionedSha` still moves only on `ok`.
    ledger entry outside `phase: "finding_output"` makes that skill `rejected` with
    rule `incomplete dependency coverage` at the entry's path (findings complete,
    advisory coverage missing; `specs/scan-budget-and-ae1-determinism.md`), and a
-   judged report with `runtime_limit` entries re-scans sequentially and adopts the
-   re-run verdict; excluded skills are dropped from the plan, the manifest, and the
+   judged report with `runtime_limit` entries re-scans sequentially and adopts a clean
+   re-scan verdict, while a still runtime-limit-limited re-scan rejects with rule
+   `scan error`; excluded skills are dropped from the plan, the manifest, and the
    conflicts before any write, except that every
    record-matching file of a scan-rejected skill keeps its record entry and stays
    untouched with the warning note from the per-item result above — including a
