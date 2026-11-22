@@ -724,8 +724,9 @@ const fail = (status, message) => { throw Object.assign(new Error(message), { st
 function safeRelPath(path) {
   const shown = typeof path === 'string' ? path.slice(0, 100) : '';
   if (typeof path !== 'string' || path === '' || /[\\:\0]/.test(path) || path.startsWith('/')) fail(400, `unsafe file path: ${shown}`);
-  if (path.split('/').some(s => !s || s === '.' || s === '..' || /^\.git$/i.test(s))) fail(400, `unsafe file path: ${shown}`);
-  return path;
+  const rel = /** @type {string} */ (path);
+  if (rel.split('/').some(s => !s || s === '.' || s === '..' || /^\.git$/i.test(s))) fail(400, `unsafe file path: ${shown}`);
+  return rel;
 }
 
 // One stored snapshot file for the editor: null when absent. binary when the bytes are not
@@ -756,7 +757,7 @@ function editMessage(raw, rel, adding, del) {
   const fallback = `alate: ${del ? 'delete' : adding ? 'add' : 'edit'} ${rel}`;
   if (raw === undefined || raw === null || raw === '') return fallback;
   if (typeof raw !== 'string') fail(400, 'invalid message');
-  const line = raw.replaceAll(/\r\n?|\n/g, ' ').trim() || fallback;
+  const line = /** @type {string} */ (raw).replaceAll(/\r\n?|\n/g, ' ').trim() || fallback;
   if (line.length > 500) fail(400, 'message must be 500 characters or fewer');
   return line;
 }
@@ -774,7 +775,7 @@ function applyToTree(dir, rel, base, bytes) {
   const current = existsSync(file) && statSync(file).isFile() ? readFileSync(file) : null;
   if (bytes === null) {
     if (current === null) fail(404, `${rel} not found`);
-    if (sha256(current) !== base) fail(409, `${rel} changed since it was loaded; reload it and retry`);
+    if (sha256(/** @type {Buffer} */ (current)) !== base) fail(409, `${rel} changed since it was loaded; reload it and retry`);
     try { assertSourceInside(dir, file); checkDestination(dir, file); } catch (err) { fail(400, /** @type {Error} */ (err).message); }
     rmSync(file, { force: true });
     // git tracks no folders: drop the ones the delete emptied, so the inventory loses the skill dir too.
@@ -977,7 +978,7 @@ function applyFileEdit(state, db, edit, token) {
   if (edit.base !== null && typeof edit.base !== 'string') fail(400, 'base must be the loaded hash or null');
   const op = {
     rel,
-    base: edit.base,
+    base: /** @type {string | null} */ (edit.base),
     bytes: edit.delete ? null : Buffer.from(/** @type {string} */ (edit.content), 'utf8'),
     message: editMessage(edit.message, rel, !edit.delete && edit.base === null, edit.delete),
   };
@@ -1077,7 +1078,7 @@ function workerItems(kind, bytes, rel) {
   try {
     return parseWorkerItems(kind, bytes ?? Buffer.alloc(0), rel);
   } catch (err) {
-    fail(400, /** @type {Error} */ (err).message);
+    return fail(400, /** @type {Error} */ (err).message);
   }
 }
 
@@ -1256,7 +1257,7 @@ function applyBundleAction(state, db, body, token, known) {
         if (toBytes === null && storedBundleFiles(db, to).length === 0) fail(404, `bundles: bundle "${to}" has no folder under bundles/`);
         if (toBytes !== null && workerItems(workerKind, toBytes, toRel).some(it => it.key === key)) fail(409, `${toRel}: already lists ${workerInfo.noun} "${key}"`);
         message = `alate: move ${kind} ${label} from ${from} to ${to}`;
-        const composed = composeWorkerAdd(workerKind, toBytes, fromHit.text, toBytes === null ? workerInfo.header(to) : null);
+        const composed = composeWorkerAdd(workerKind, toBytes, /** @type {{ key: string, text: string }} */ (fromHit).text, toBytes === null ? workerInfo.header(to) : null);
         try { validateWorkerBytes(workerKind, composed, toRel); } catch (err) { fail(400, /** @type {Error} */ (err).message); }
         stage(fromRel, sha256(/** @type {Buffer} */ (fromBytes)), dropWorkerItem(workerKind, /** @type {Buffer} */ (fromBytes), key));
         stage(toRel, toBytes === null ? null : sha256(toBytes), composed);
@@ -1300,7 +1301,7 @@ function applyBundleAction(state, db, body, token, known) {
     const manifestBytes = storedBytes(db, manifestRel);
     if (manifestBytes === null) fail(404, 'projects/projects.json not found');
     let manifest;
-    try { manifest = JSON.parse(manifestBytes.toString('utf8')); } catch { fail(400, 'projects/projects.json: unparseable JSON'); }
+    try { manifest = JSON.parse(/** @type {Buffer} */ (manifestBytes).toString('utf8')); } catch { fail(400, 'projects/projects.json: unparseable JSON'); }
     const table = manifest !== null && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest.projects : null;
     if (table === null || typeof table !== 'object' || Array.isArray(table)) fail(400, 'projects.json: projects must be an object');
     if (!Object.hasOwn(table, project)) fail(404, `projects.json: no project "${project}"`);
@@ -1321,7 +1322,7 @@ function applyBundleAction(state, db, body, token, known) {
       message = `alate: unassign bundle ${bundle} from project ${project}`;
     }
     table[project] = entry;
-    stage(manifestRel, sha256(manifestBytes), Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'));
+    stage(manifestRel, sha256(/** @type {Buffer} */ (manifestBytes)), Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'));
   } else if (action === 'turn-on') {
     // The migration action of specs/bundles.md "Turn on bundles" (ALAT-192): on a
     // repo with no bundles content it creates bundles/core/ holding every skill
@@ -1438,16 +1439,16 @@ function applyEntryAction(state, db, body, token, known) {
     if (bytes === null) fail(400, 'projects/projects.json not found; capture the projects first (sync-projects.mjs --first)');
     /** @type {any} */
     let manifest;
-    try { manifest = JSON.parse(bytes.toString('utf8')); } catch { fail(400, 'projects/projects.json: unparseable JSON'); }
+    try { manifest = JSON.parse(/** @type {Buffer} */ (bytes).toString('utf8')); } catch { fail(400, 'projects/projects.json: unparseable JSON'); }
     const table = manifest !== null && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest.projects : null;
     if (table === null || typeof table !== 'object' || Array.isArray(table)) fail(400, 'projects.json: projects must be an object');
-    return { bytes, manifest, table };
+    return { bytes: /** @type {Buffer} */ (bytes), manifest, table };
   };
   const filesUnder = (/** @type {string} */ folder) => listStoredFiles(db).map(f => f.path).filter(p => p.startsWith(`${folder}/`));
 
   if (body.action === 'create') {
     if (typeof body.content !== 'string') fail(400, 'content must be a string');
-    const content = Buffer.from(body.content, 'utf8');
+    const content = Buffer.from(/** @type {string} */ (body.content), 'utf8');
     message = editMessage(body.message, `${kind} ${name}`, true, false);
     if (kind === 'rule') {
       const rel = `${name}.md`;
@@ -1486,7 +1487,8 @@ function applyEntryAction(state, db, body, token, known) {
       // The inventory names the skill's folder in whichever root holds it.
       const skill = (state.inventory?.user?.skills ?? []).find(s => s.name === name);
       if (!skill) fail(404, `no skill "${name}"`);
-      const folder = skill.path.slice(0, skill.path.lastIndexOf('/'));
+      const found = /** @type {{ path: string }} */ (skill);
+      const folder = found.path.slice(0, found.path.lastIndexOf('/'));
       for (const rel of filesUnder(folder)) stage(rel, sha256(/** @type {Buffer} */ (storedBytes(db, rel))), null);
       if (upBytes !== null) {
         const up = readUp();

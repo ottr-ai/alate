@@ -19,7 +19,7 @@ const data = resolveDataDir(args, { allowClone: false });
 const root = resolve(args.values['--root'] ?? dirname(data.dir));
 
 /** @param {string} message @returns {never} */
-const bad = message => { throw new Error(`projects.json: ${message}`); };
+function bad(message) { throw new Error(`projects.json: ${message}`); }
 const manifest = /** @type {ProjectsManifest} */ (JSON.parse(readFileSync(join(data.dir, 'projects', 'projects.json'), 'utf8')));
 if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) bad('manifest must be an object');
 if (!Array.isArray(manifest.contextFiles) || manifest.contextFiles.some(f => typeof f !== 'string')) bad('contextFiles must be an array of strings');
