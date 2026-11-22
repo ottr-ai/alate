@@ -112,6 +112,7 @@ release.
 - A chain-green claim in a ready report cites one run of the verified-chain command copied verbatim from Commands. A reassembled command that drops any chain entry makes the claim false.
 - When a change adds or moves a check that more than one code path performs, put the card's rule before any mode branch. Give each entry path a fail-before test in the first commit.
 - A ready report states the exact observed result of each red-before check: the command, and each new test's fail or pass. It names any new test that passes before the fix, with the reason the test still pins the behavior.
+- When a change classifies scanner, model, or ledger reports for a gate, list in the ready report every report shape that must still reject — a flag without its diagnostic line, an unknown phase or reason code, a report that carries both verdict classes, a degraded re-scan — and name each shape's fail-before test.
 
 ## Merging changes
 
