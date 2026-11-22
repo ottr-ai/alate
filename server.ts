@@ -12,7 +12,7 @@ import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
 import { childEnv, DEFAULT_GITHUB_HOST, keepTemp, parseDataSpec, PROVISION_ENV, redactSecrets } from './lib/data.mjs'
 import { runBundleAction, runCleanup, runEdit, runEntryAction, runImport, runSnapshot } from './lib/server-worker.mjs'
-import { getTrustedPathSource, isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteHead, setTrustedPathSource } from './web/dashboard.mjs'
+import { getTrustedPathSource, isGitWorkTree, isWritableDir, listStoredFiles, loadState, readStoredFile, remoteAhead, remoteHead, setTrustedPathSource } from './web/dashboard.mjs'
 import type { StateDef } from './web/dashboard.mjs'
 import { checkUpdates, initUpdates, isValidUpdateRecord, loadUpdates } from './lib/updates.mjs'
 import { ensureEnvProxy } from './lib/env-proxy.mjs'
@@ -582,7 +582,7 @@ async function selectSource(spec: string, kind?: string, token = dashToken()): P
   const run = importChain.then(async () => {
     importing = true
     try {
-      const next = await runImport({ dbFile, state: dashState, spec, kind, token })
+      const next = await runImport({ dbFile, state: dashState, spec, kind, token, tokenHost: config.tokenHost })
       const changed = dashState.source?.spec !== next.source.spec || dashState.source?.kind !== next.source.kind
       const newCommit = next.source.kind === 'repo' && !!next.source.importedSha && next.source.importedSha !== dashState.source?.importedSha
       dashState = next
@@ -594,7 +594,7 @@ async function selectSource(spec: string, kind?: string, token = dashToken()): P
         remoteSha: next.source.importedSha ?? '',
         provisionedSha: changed ? '' : config.update.provisionedSha,
       }
-      dashState.update = isRepo ? { checkedAt: next.source.importedAt, remoteSha: next.source.importedSha, available: false } : null
+      dashState.update = isRepo ? { checkedAt: next.source.importedAt, remoteSha: next.source.importedSha, available: false, ahead: null } : null
       persistDash()
       saveConfig(config)
       // A fresh snapshot invalidates the stored update rows at once, not at the next timer tick.
@@ -615,15 +615,19 @@ async function selectSource(spec: string, kind?: string, token = dashToken()): P
 // Periodic remote check for a repo source: refresh update state, optionally auto re-import.
 async function dashCheck(): Promise<void> {
   if (running || importing || editing || snapshotting || dashState.source?.kind !== 'repo') return
-  const sha = remoteHead(dashState.source.name, dashState.source.ref, dashToken(), dashState.source.host ?? '')
-  dashState.update = { checkedAt: new Date().toISOString(), remoteSha: sha, available: sha !== '' && sha !== dashState.source.importedSha }
+  const src = dashState.source
+  const sha = remoteHead(src.name, src.ref, dashToken(), src.host ?? '')
+  const behind = sha !== '' && sha !== src.importedSha
+    ? await remoteAhead(src.name, src.importedSha, sha, dashToken(), src.host, config.tokenHost)
+    : null
+  dashState.update = { checkedAt: new Date().toISOString(), remoteSha: sha, available: sha !== '' && sha !== src.importedSha, ahead: behind }
   if (sha) config.update.remoteSha = sha
   config.update.lastChecked = dashState.update.checkedAt
   saveConfig(config)
   persistDash()
   if (config.autoUpdate && dashState.update.available) {
     try {
-      await selectSource(dashState.source.spec, 'repo')
+      await selectSource(src.spec, 'repo')
     } catch (err) {
       console.error(`snapshot refresh failed: ${redactSecrets((err as Error).message, dashToken())}`)
     }
@@ -809,7 +813,7 @@ async function queuedDashboardWrite(reply: FastifyReply, work: () => Promise<{ [
 function writeResult(res: { state: StateDef; commit: string; pushed: boolean; warning?: string }): { [key: string]: unknown } {
   dashState = res.state
   dashState.update = dashState.source.kind === 'repo'
-    ? { checkedAt: new Date().toISOString(), remoteSha: dashState.source.importedSha, available: false }
+    ? { checkedAt: new Date().toISOString(), remoteSha: dashState.source.importedSha, available: false, ahead: null }
     : null
   persistDash()
   // Every committed edit changed the stored snapshot, path edits included; the
@@ -827,7 +831,7 @@ function writeResult(res: { state: StateDef; commit: string; pushed: boolean; wa
 async function fileEdit(req: FastifyRequest, reply: FastifyReply, del: boolean) {
   const body = (req.body ?? {}) as FileEditBody
   return queuedDashboardWrite(reply, async () => {
-    const res = await runEdit({ dbFile, state: dashState, edit: { ...body, delete: del }, token: dashToken(), trustedDir: getTrustedPathSource() })
+    const res = await runEdit({ dbFile, state: dashState, edit: { ...body, delete: del }, token: dashToken(), tokenHost: config.tokenHost, trustedDir: getTrustedPathSource() })
     return writeResult(res)
   })
 }
@@ -850,7 +854,7 @@ app.post<{ Body: BundleActionBody | undefined }>('/api/bundle', { bodyLimit: 64 
   }
   const body = (req.body ?? {}) as BundleActionBody
   return queuedDashboardWrite(reply, async () => {
-    const res = await runBundleAction({ dbFile, state: dashState, body, token: dashToken(), trustedDir: getTrustedPathSource(), known })
+    const res = await runBundleAction({ dbFile, state: dashState, body, token: dashToken(), tokenHost: config.tokenHost, trustedDir: getTrustedPathSource(), known })
     return writeResult(res)
   })
 })
@@ -865,7 +869,7 @@ app.post<{ Body: Record<string, unknown> | undefined }>('/api/entry', { bodyLimi
     plugins: new Set(inventory.user.plugins.map(p => p.name)),
   }
   const body = req.body ?? {}
-  return queuedDashboardWrite(reply, async () => writeResult(await runEntryAction({ dbFile, state: dashState, body, token: dashToken(), trustedDir: getTrustedPathSource(), known })))
+  return queuedDashboardWrite(reply, async () => writeResult(await runEntryAction({ dbFile, state: dashState, body, token: dashToken(), tokenHost: config.tokenHost, trustedDir: getTrustedPathSource(), known })))
 })
 
 // Dashboard settings: stored GitHub key (write-only) and auto-update opt-in. Guarded like /api/import.

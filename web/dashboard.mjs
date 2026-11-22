@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { assertSourceInside, checkDestination, cloneCommand, dataHost, descriptionText, gitAuthEnv, githubHost, originGlob, parseDataSpec, redactSecrets, serverGitEnv, SNAP_AGENTS_DIR } from '../lib/data.mjs';
+import { assertSourceInside, checkDestination, cloneCommand, dataHost, descriptionText, gitAuthEnv, githubHost, originGlob, parseDataSpec, parseGithubHost, redactSecrets, serverGitEnv, SNAP_AGENTS_DIR } from '../lib/data.mjs';
 import { isBundlesMode, mergeLineSources, mergeNamedSources, mergeToolsSources, parseNameList, readBundleFolder } from '../lib/bundles.mjs';
 import { composeWorkerAdd, parseWorkerItems, validateWorkerBytes, workerItemKey } from '../lib/worker-lists.mjs';
 
@@ -25,10 +25,10 @@ import { composeWorkerAdd, parseWorkerItems, validateWorkerBytes, workerItemKey 
 /** @typedef {{ rules: RuleInfo[], user: { configFiles: FileInfo[], others: FileInfo[], skills: SkillInfo[], extensions: string[], plugins: PluginInfo[] }, projects: ProjectsInventory, bundles: BundleInfo[], counts: { rules: number, skills: number, plugins: number, extensions: number, projects: number, bundles: number, userFiles: number }, warnings: string[] }} Inventory */
 /** @typedef {{ added: string[], removed: string[], updated: string[] }} SectionChanges */
 /** @typedef {Record<string, SectionChanges>} Changes */
-/** @typedef {{ kind: string, spec: string, name: string, host: string, ref: string, importedSha: string }} SourceMeta */
+/** @typedef {{ kind: string, spec: string, name: string, host: string, ref: string, importedSha: string, describe: string }} SourceMeta */
 /** @typedef {SourceMeta & { importedAt: string }} SourceInfo */
 /** @typedef {{ dir: string, temp: boolean, source: SourceMeta }} ResolvedSource */
-/** @typedef {{ checkedAt: string, remoteSha: string, available: boolean }} UpdateInfo */
+/** @typedef {{ checkedAt: string, remoteSha: string, available: boolean, ahead: number | null }} UpdateInfo */
 /** @typedef {{ source: SourceInfo, inventory: Inventory | null, previous: Inventory | null, changes: Changes | null, update?: UpdateInfo | null, provision?: unknown }} StateDef */
 /** @typedef {{ name: string, extras?: number, files?: number, live?: string, entries?: InventoryEntry[] }} ProjectListItem */
 /** @typedef {{ rel: string, base: string | null, bytes: Buffer | null, message: string }} EditOp */
@@ -590,7 +590,7 @@ function resolveSource(spec, kind, token) {
   if (kind !== 'repo' && (asGiven || existsSync(resolve(repoRoot, spec)))) {
     const dir = resolve(asGiven ? spec : resolve(repoRoot, spec));
     // a path-kind source stores no host; the cast documents the repo-source shape
-    return { dir, temp: false, source: /** @type {SourceMeta} */ ({ kind: 'path', spec, name: dir, ref: '', importedSha: '' }) };
+    return { dir, temp: false, source: /** @type {SourceMeta} */ ({ kind: 'path', spec, name: dir, ref: '', importedSha: '', describe: '' }) };
   }
   if (kind === 'path') {
     throw Object.assign(new Error(`no local data repo at ${spec}`), { status: 400 });
@@ -637,7 +637,135 @@ function cloneRepo(spec, parsed, token) {
     throw new Error(`cannot read cloned HEAD for ${parsed.name}`);
   }
   const importedSha = head.stdout.trim();
-  return { dir, temp: true, source: { kind: 'repo', spec, name: parsed.name, host, ref: parsed.ref, importedSha } };
+  return { dir, temp: true, source: { kind: 'repo', spec, name: parsed.name, host, ref: parsed.ref, importedSha, describe: '' } };
+}
+
+// ---- Imported-commit describe (specs/imported-commit-describe.md) ----
+
+// The source host's REST base. The test override fakes the network for every GitHub
+// client (lib/updates.mjs reads the same variable). An unparseable host yields '' so no
+// request is built and the describe falls back to the short sha.
+/** @param {string} host @returns {string} */
+function describeBase(host) {
+  if (process.env.ALATE_TEST_GITHUB_API_BASE) return process.env.ALATE_TEST_GITHUB_API_BASE;
+  try {
+    const parsed = parseGithubHost(host);
+    return 'apiBase' in parsed ? parsed.apiBase : '';
+  } catch {
+    return '';
+  }
+}
+
+// The stored key rides only to the host it belongs to: the host a foreign-host import
+// recorded (tokenHost, see noteTokenHost in server.ts), else the ambient
+// ALATE_GITHUB_HOST. Same fail-closed rule as the update checker's github.com gating,
+// generalized to the source host: a token for one host never reaches another host's API,
+// and an invalid ambient host sends nothing.
+/** @type {string | null} */
+let describeTokenHost = null;
+/** @param {string | null | undefined} host @returns {void} */
+function setDescribeTokenHost(host) {
+  describeTokenHost = typeof host === 'string' && host !== '' ? host : null;
+}
+/** @param {string | undefined} token @param {string} host @param {string | null} [recorded=null] @returns {string | undefined} */
+function describeTokenFor(token, host, recorded = null) {
+  if (!token) return undefined;
+  let ambient;
+  try {
+    ambient = githubHost().host;
+  } catch {
+    return undefined;
+  }
+  return (recorded ?? ambient) === host ? token : undefined;
+}
+/** @param {string | undefined} token @param {string} host @returns {string | undefined} */
+const describeToken = (token, host) => describeTokenFor(token, host, describeTokenHost);
+
+// Every upstream GET carries an AbortSignal.timeout cap, mirroring lib/updates.mjs: the
+// default 15 s keeps a stalled API from holding the import op for minutes, and tests
+// shorten the cap through the same variable.
+/** @param {string} url @param {string | undefined} token @returns {Promise<any>} */
+async function describeJson(url, token) {
+  /** @type {{ signal: AbortSignal, headers?: Record<string, string> }} */
+  const opts = { signal: AbortSignal.timeout(Number(process.env.ALATE_TEST_FETCH_TIMEOUT_MS) > 0 ? Number(process.env.ALATE_TEST_FETCH_TIMEOUT_MS) : 15000) };
+  if (token) opts.headers = { Authorization: `Bearer ${token}` };
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error(`GET ${url} failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+/** @param {string} sha @returns {string} */
+const shortSha = sha => (/^[0-9a-f]{40}$/.test(sha) ? sha.slice(0, 7) : '');
+
+// Describe string for a repo source: the nearest tag reachable from the commit as
+// `<tag>-<n>-g<hash>`, exactly `<tag>` on the tagged commit, the short hash alone when
+// no tag is reachable. Tags and ahead counts come from the source host's REST API (the
+// clone is shallow, so git describe cannot run there). Any lookup failure stores the
+// short hash and only logs: the import itself never fails on describe. At most the
+// first per_page=100 tags are compared; equal smallest ahead counts take the first tag
+// in the API's response order.
+/**
+ * @param {{ name: string, host: string, importedSha: string }} src
+ * @param {string | undefined} token
+ * @returns {Promise<string>}
+ */
+async function repoDescribe(src, token) {
+  const short = shortSha(src.importedSha);
+  if (!short) return '';
+  const base = describeBase(src.host);
+  const tok = describeToken(token, src.host);
+  if (!base) return short;
+  try {
+    const tags = await describeJson(`${base}/repos/${src.name}/tags?per_page=100`, tok);
+    const candidates = Array.isArray(tags)
+      ? tags.filter(t => t && typeof t.name === 'string' && t.commit && typeof t.commit.sha === 'string')
+      : [];
+    if (candidates.length === 0) return short;
+    const onHead = candidates.find(t => t.commit.sha === src.importedSha);
+    if (onHead) return onHead.name;
+    const counts = await Promise.all(candidates.map(async t => {
+      const c = await describeJson(`${base}/repos/${src.name}/compare/${encodeURIComponent(t.name)}...${src.importedSha}`, tok);
+      return { name: t.name, ahead: c && c.status === 'ahead' && Number.isInteger(c.ahead_by) ? c.ahead_by : null };
+    }));
+    let best = null;
+    for (const c of counts) if (c.ahead !== null && (best === null || c.ahead < best.ahead)) best = c;
+    return best ? `${best.name}-${best.ahead}-g${short}` : short;
+  } catch (err) {
+    console.error(`describe lookup failed: ${String(/** @type {Error} */ (err).message ?? err)}`);
+    return short;
+  }
+}
+
+// Describe string for a path source: git describe --tags --always in the checkout, ''
+// when the folder is not a git work tree or has no commits.
+/** @param {string} dir @returns {string} */
+function pathDescribe(dir) {
+  const git = spawnSync('git', ['describe', '--tags', '--always'], { cwd: dir, env: serverGitEnv(), stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+  return git.status === 0 ? git.stdout.trim() : '';
+}
+
+// Commits the remote is ahead of the imported commit: the compare endpoint's ahead_by
+// of `<base>...<head>`, null when either sha is missing or the lookup fails (client-safe).
+/**
+ * @param {string} name
+ * @param {string} base
+ * @param {string} head
+ * @param {string | undefined} token
+ * @param {string} host
+ * @param {string | null} [tokenHost=null]
+ * @returns {Promise<number | null>}
+ */
+export async function remoteAhead(name, base, head, token, host, tokenHost = null) {
+  const tok = describeTokenFor(token, host, tokenHost);
+  const api = describeBase(host);
+  if (!shortSha(base) || !shortSha(head) || base === head || !api) return null;
+  try {
+    const c = await describeJson(`${api}/repos/${name}/compare/${base}...${head}`, tok);
+    return c && Number.isInteger(c.ahead_by) ? c.ahead_by : null;
+  } catch (err) {
+    console.error(`behind lookup failed: ${String(/** @type {Error} */ (err).message ?? err)}`);
+    return null;
+  }
 }
 
 // resolvedIn: an already-resolved { dir, temp, source } to import directly (the editor's
@@ -649,10 +777,15 @@ function cloneRepo(spec, parsed, token) {
  * @param {string | undefined} token
  * @param {DashDb} db
  * @param {ResolvedSource | null} [resolvedIn=null]
- * @returns {StateDef}
+ * @returns {Promise<StateDef>}
  */
-function importSource(state, spec, kind, token, db, resolvedIn = null) {
+async function importSource(state, spec, kind, token, db, resolvedIn = null) {
   const resolved = resolvedIn ?? resolveSource(spec, kind, token);
+  // A repo clone is shallow, so its describe reads the source host's API; a path source
+  // describes its own checkout. Both store the display string next to importedSha.
+  resolved.source.describe = resolved.source.kind === 'repo'
+    ? await repoDescribe(resolved.source, token)
+    : pathDescribe(resolved.dir);
   try {
     const inventory = scanInventory(resolved.dir, resolved.temp ? null : dirname(resolved.dir));
     const previous = state.inventory;
@@ -887,9 +1020,9 @@ function commitEdit(dir, rels, message, env, token) {
  * @param {SourceInfo} src
  * @param {EditOp[]} ops
  * @param {string | undefined} token
- * @returns {EditResult}
+ * @returns {Promise<EditResult>}
  */
-function editRepoSource(state, db, src, ops, token) {
+async function editRepoSource(state, db, src, ops, token) {
   const resolved = cloneRepo(src.spec, { name: src.name, ref: src.ref, host: src.host }, token);
   try {
     for (const op of ops) applyToTree(resolved.dir, op.rel, op.base, op.bytes);
@@ -899,7 +1032,7 @@ function editRepoSource(state, db, src, ops, token) {
     const push = runGit(resolved.dir, ['push', 'origin', `HEAD:${branch}`], env);
     if (push.status !== 0) fail(502, `git push failed: ${redactSecrets(push.stderr.trim(), token)}`);
     resolved.source.importedSha = commit;
-    const next = importSource(state, src.spec, src.kind, token, db, resolved);
+    const next = await importSource(state, src.spec, src.kind, token, db, resolved);
     return { commit, pushed: true, warning: undefined, state: next };
   } finally {
     if (existsSync(resolved.dir)) rmSync(resolved.dir, { recursive: true, force: true }); // importSource already removed it on success
@@ -918,9 +1051,9 @@ function editRepoSource(state, db, src, ops, token) {
  * @param {SourceInfo} src
  * @param {EditOp[]} ops
  * @param {string | undefined} token
- * @returns {EditResult}
+ * @returns {Promise<EditResult>}
  */
-function editPathSource(state, db, src, ops, token) {
+async function editPathSource(state, db, src, ops, token) {
   const dir = src.name;
   if (!existsSync(dir)) fail(400, `no local data repo at ${src.spec}`);
   let applied = 0;
@@ -930,7 +1063,7 @@ function editPathSource(state, db, src, ops, token) {
     if (applied > 0) {
       // A later op refused after an earlier one already wrote: the disk changed while
       // the save fails, so the stored snapshot follows the disk before the throw.
-      importSource(state, src.spec, src.kind, token, db);
+      await importSource(state, src.spec, src.kind, token, db);
     }
     throw err;
   }
@@ -949,7 +1082,7 @@ function editPathSource(state, db, src, ops, token) {
       }
     } catch (err) { failure = /** @type {StatusedError} */ (err); }
   }
-  const next = importSource(state, src.spec, src.kind, token, db);
+  const next = await importSource(state, src.spec, src.kind, token, db);
   if (failure) {
     // The disk write and the snapshot re-import both happened, so the stored
     // snapshot changed even though the edit fails: fileEdit re-runs the update
@@ -968,9 +1101,9 @@ function editPathSource(state, db, src, ops, token) {
  * @param {DashDb} db
  * @param {{ path?: unknown, base?: unknown, content?: unknown, message?: unknown, delete: boolean }} edit
  * @param {string | undefined} token
- * @returns {EditResult}
+ * @returns {Promise<EditResult>}
  */
-function applyFileEdit(state, db, edit, token) {
+async function applyFileEdit(state, db, edit, token) {
   const rel = safeRelPath(edit.path);
   if (!state.source) fail(400, 'no data source configured');
   if (edit.delete && edit.content !== undefined) fail(400, 'delete takes no content');
@@ -994,9 +1127,9 @@ function applyFileEdit(state, db, edit, token) {
  * @param {DashDb} db
  * @param {EditOp[]} ops
  * @param {string | undefined} token
- * @returns {EditResult}
+ * @returns {Promise<EditResult>}
  */
-function dispatchSave(state, db, ops, token) {
+async function dispatchSave(state, db, ops, token) {
   return state.source.kind === 'repo'
     ? editRepoSource(state, db, state.source, ops, token)
     : editPathSource(state, db, state.source, ops, token);
@@ -1141,9 +1274,9 @@ function dropBundleName(bytes, name) {
  * @param {{ action?: unknown, name?: unknown, bundle?: unknown, kind?: unknown, item?: unknown, from?: unknown, to?: unknown, project?: unknown }} body
  * @param {string | undefined} token
  * @param {{ skills: Set<string>, plugins: Set<string> }} known
- * @returns {EditResult}
+ * @returns {Promise<EditResult>}
  */
-function applyBundleAction(state, db, body, token, known) {
+async function applyBundleAction(state, db, body, token, known) {
   if (!state.source) fail(400, 'no data source configured');
   /** @type {EditOp[]} */
   const ops = [];
@@ -1406,9 +1539,9 @@ function withOwnText(text, own) {
  * @param {{ action?: unknown, kind?: unknown, name?: unknown, content?: unknown, bundle?: unknown, message?: unknown }} body
  * @param {string | undefined} token
  * @param {{ skills: Set<string>, plugins: Set<string> }} known
- * @returns {EditResult}
+ * @returns {Promise<EditResult>}
  */
-function applyEntryAction(state, db, body, token, known) {
+async function applyEntryAction(state, db, body, token, known) {
   if (!state.source) fail(400, 'no data source configured');
   const kind = body.kind;
   if (kind !== 'rule' && kind !== 'skill' && kind !== 'project') fail(400, 'kind must be one of: rule, skill, project');
@@ -1538,4 +1671,4 @@ function remoteHead(name, ref, token, host = '') {
   return git.status === 0 && git.stdout ? git.stdout.split('\n')[0].trim().split(/\s+/)[0] : '';
 }
 
-export { scanInventory, importSource, isGitWorkTree, isWritableDir, loadState, remoteHead, snapshotData, readStoredFile, listStoredFiles, applyFileEdit, applyBundleAction, applyEntryAction, originCovers, withoutOrigin, withOwnText, setTrustedPathSource, getTrustedPathSource };
+export { scanInventory, importSource, isGitWorkTree, isWritableDir, loadState, remoteHead, setDescribeTokenHost, snapshotData, readStoredFile, listStoredFiles, applyFileEdit, applyBundleAction, applyEntryAction, originCovers, withoutOrigin, withOwnText, setTrustedPathSource, getTrustedPathSource };

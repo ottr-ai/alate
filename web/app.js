@@ -120,10 +120,13 @@ function renderShell() {
   $('import-now').hidden = !src;
   if (src) {
     const spec = src.kind === 'repo' ? src.name + (src.ref ? '@' + src.ref : '') : src.spec;
+    const shown = src.describe || (src.importedSha ? src.importedSha.slice(0, 7) : '');
+    const up = state && state.update;
     line.append(h('b', { text: spec }));
-    if (src.importedSha) line.append(' at ' + src.importedSha.slice(0, 7));
+    if (shown) line.append(' at ' + shown);
+    if (src.kind === 'repo' && up && up.available && Number.isInteger(up.ahead) && up.ahead > 0) line.append(' · ' + up.ahead + ' behind');
     line.append(' · imported ' + relTime(src.importedAt));
-    line.title = src.kind === 'repo' ? 'GitHub repo ' + spec : 'Local path ' + src.name;
+    line.title = (src.kind === 'repo' ? 'GitHub repo ' + spec : 'Local path ' + src.name) + (src.importedSha ? ' · ' + src.importedSha : '');
   }
   const route = parseRoute();
   for (const a of $('views').querySelectorAll('a')) {
@@ -145,8 +148,11 @@ function renderBanner() {
   document.body.classList.toggle('has-banner', show);
   b.textContent = '';
   if (!show) return;
+  const n = Number.isInteger(up.ahead) && up.ahead > 0 ? up.ahead : null;
   b.append(
-    h('span', { text: 'agent-data has newer commits on GitHub (checked ' + relTime(up.checkedAt) + ').' }),
+    h('span', { text: n !== null
+      ? 'agent-data is ' + plural(n, 'commit') + ' behind GitHub (checked ' + relTime(up.checkedAt) + ').'
+      : 'agent-data has newer commits on GitHub (checked ' + relTime(up.checkedAt) + ').' }),
     h('button', { type: 'button', class: 'linkish', onclick: () => doImport(state.source.spec, 'repo'), text: 'Import them now' }),
   );
 }
@@ -815,7 +821,7 @@ function settingsView() {
       h('dl', { class: 'kv' },
         h('dt', { text: 'Type' }), h('dd', { text: src.kind === 'repo' ? 'GitHub repo' : 'Local path' }),
         h('dt', { text: 'Source' }), h('dd', { text: src.kind === 'repo' ? src.spec : src.name }),
-        h('dt', { text: 'Commit' }), h('dd', { text: src.importedSha || 'not recorded' }),
+        h('dt', { text: 'Commit' }), h('dd', { text: src.describe ? (src.importedSha && src.importedSha !== src.describe ? src.describe + ' (' + src.importedSha + ')' : src.describe) : (src.importedSha || 'not recorded') }),
         h('dt', { text: 'Imported' }), h('dd', { text: new Date(src.importedAt).toLocaleString() + ' (' + relTime(src.importedAt) + ')' })),
       h('div', { class: 'row' },
         h('button', { type: 'button', class: 'btn', onclick: async (ev) => {

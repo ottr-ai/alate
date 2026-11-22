@@ -678,7 +678,7 @@ const scannerStubDir = join(tmp, 'scanner-stub');
 mkdirSync(scannerStubDir, { recursive: true });
 writeFileSync(join(scannerStubDir, 'skillspector'), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'SkillSpector v${SKILLSPECTOR_REF.slice(1)}'; exit 0; fi\necho '{"issues":[],"suppressed":[],"suppressed_count":0}'\nexit 0\n`, { mode: 0o755 });
 
-const serverEnv = { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, TMPDIR: serverTmp, TEMP: serverTmp, TMP: serverTmp, PATH: `${scannerStubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-scanner-venv'), ALATE_KEEP_TEMP: '', ALATE_TEST_PROVISION_GATE: provisionGate, ALATE_TEST_SCRIPT_GATE: scriptGate, ALATE_TEST_NO_RESULTS_FILE: join(tmp, 'no-results-gate'), ALATE_TEST_GH_BASE: pathToFileURL(join(tmp, 'gh')).href, GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_GLOBAL: 'nul', GIT_CONFIG_SYSTEM: 'nul' };
+const serverEnv = { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, TMPDIR: serverTmp, TEMP: serverTmp, TMP: serverTmp, PATH: `${scannerStubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-scanner-venv'), ALATE_KEEP_TEMP: '', ALATE_TEST_PROVISION_GATE: provisionGate, ALATE_TEST_SCRIPT_GATE: scriptGate, ALATE_TEST_NO_RESULTS_FILE: join(tmp, 'no-results-gate'), ALATE_TEST_GH_BASE: pathToFileURL(join(tmp, 'gh')).href, ALATE_TEST_GITHUB_API_BASE: 'http://127.0.0.1:1', GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_GLOBAL: 'nul', GIT_CONFIG_SYSTEM: 'nul' };
 // sync.mjs prefers PI_CODING_AGENT_DIR over HOME: an inherited value would install fixture rules into a real agent dir.
 delete serverEnv.PI_CODING_AGENT_DIR;
 // ALATE_API_KEY would seed the first-start key of every fresh-config server this suite boots.
@@ -2108,6 +2108,7 @@ try {
   body = await r.json();
   assert.equal(body.state.source.kind, 'repo');
   assert.equal(body.state.source.importedSha, sha1);
+  assert.equal(body.state.source.describe, sha1.slice(0, 7), 'a repo source with no reachable tag stores the short hash');
   assert.equal((await (await get('/config')).json()).repo, 'https://github.com/demo/data');
   await waitFor(async () => {
     const s = await (await get('/api/state')).json();
@@ -6491,6 +6492,8 @@ try {
     process.env.ALATE_TEST_GH_BASE = pathToFileURL(join(tmp, 'gh10')).href;
     process.env.GIT_CONFIG_GLOBAL = 'nul';
     process.env.GIT_CONFIG_SYSTEM = 'nul';
+    // Describe lookups fail fast against a dead local port unless a section fakes the API.
+    process.env.ALATE_TEST_GITHUB_API_BASE = 'http://127.0.0.1:1';
     const dash = await import('./web/dashboard.mjs?alat10');
     const w10 = join(tmp, 'alat10');
     const gh10 = join(tmp, 'gh10');
@@ -6503,17 +6506,17 @@ try {
     // when the call throws. The call's tmpdir() is a fresh root inside this run's own tmp,
     // so the watcher sees only dirs this run created, never a concurrent run's dirs in the
     // machine-shared temp root.
-    const leak10 = fn => {
+    const leak10 = async fn => {
       const root = mkdtempSync(join(tmp, 'leak10-'));
       const saved = ['TMPDIR', 'TMP', 'TEMP'].map(k => [k, process.env[k]]);
       for (const [k] of saved) process.env[k] = root;
-      try { return fn(); }
+      try { return await fn(); }
       finally {
         for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
         assert.deepEqual(readdirSync(root), [], 'dashboard temp dirs must not leak');
       }
     };
-    const err10 = fn => { try { fn(); } catch (e) { return e; } throw new Error('expected a throw'); };
+    const err10 = async fn => { try { await fn(); } catch (e) { return e; } throw new Error('expected a throw'); };
 
     // -- Write-flag probes (specs/source-write-flags.md): both read-only, no writes.
     // Build paths first: recursive mkdirSync returns the first created dir, not the leaf.
@@ -6781,7 +6784,7 @@ try {
     const dbI = mkDb10('alat10-i.db');
     const st0 = dash.loadState(dbI);
     assert.deepEqual(st0, { source: null, inventory: null, previous: null, changes: null });
-    const st1 = dash.importSource(st0, join(w10, 'if10'), undefined, null, dbI);
+    const st1 = await dash.importSource(st0, join(w10, 'if10'), undefined, null, dbI);
     assert.deepEqual([st1.source.kind, st1.source.ref, st1.source.importedSha], ['path', '', '']);
     assert.deepEqual(dash.listStoredFiles(dbI).map(r => ({ ...r })), [{ path: 'sub/note.md', bytes: 5 }, { path: 'top.md', bytes: 4 }]);
     assert.deepEqual(dash.loadState(dbI), st1);
@@ -6789,20 +6792,20 @@ try {
     // -- colon paths and non-regular files are refused with a 400.
     dig('ifc/a:b.md', 'x\n');
     const dbC = mkDb10('alat10-c.db');
-    let e = err10(() => dash.importSource(dash.loadState(dbC), join(w10, 'ifc'), undefined, null, dbC));
+    let e = await err10(() => dash.importSource(dash.loadState(dbC), join(w10, 'ifc'), undefined, null, dbC));
     assert.deepEqual([e.status, e.message], [400, 'unsafe snapshot path: a:b.md']);
     dig('iff/top.md', 'x\n');
     assert.equal(spawnSync('mkfifo', [join(w10, 'iff/pipe10')]).status, 0);
     const dbF = mkDb10('alat10-f.db');
-    e = err10(() => dash.importSource(dash.loadState(dbF), join(w10, 'iff'), undefined, null, dbF));
+    e = await err10(() => dash.importSource(dash.loadState(dbF), join(w10, 'iff'), undefined, null, dbF));
     assert.deepEqual([e.status, e.message], [400, 'snapshot path is not a regular file: pipe10']);
 
     // -- resolveSource refusals are 400s with the documented messages.
-    e = err10(() => dash.importSource(dash.loadState(dbI), join(w10, 'gone10'), 'path', null, dbI));
+    e = await err10(() => dash.importSource(dash.loadState(dbI), join(w10, 'gone10'), 'path', null, dbI));
     assert.equal(e.status, 400);
     assert.match(e.message, /^no local data repo at /);
     for (const bad of ['./.x/y', '.x/y', 'C:/own/data']) {
-      e = err10(() => dash.importSource(dash.loadState(dbI), bad, 'repo', null, dbI));
+      e = await err10(() => dash.importSource(dash.loadState(dbI), bad, 'repo', null, dbI));
       assert.equal(e.status, 400, bad);
       assert.equal(e.message, `no data repo at ${bad}; pass a local path or owner/name[@ref]`, bad);
     }
@@ -6844,8 +6847,8 @@ try {
     buildAB();
     const dbAB = mkDb10('alat10-ab.db');
     const ab0 = dash.loadState(dbAB);
-    const ab1 = dash.importSource(ab0, join(w10, 'ifa'), undefined, null, dbAB);
-    const ab2 = dash.importSource(ab1, join(w10, 'ifb'), undefined, null, dbAB);
+    const ab1 = await dash.importSource(ab0, join(w10, 'ifa'), undefined, null, dbAB);
+    const ab2 = await dash.importSource(ab1, join(w10, 'ifb'), undefined, null, dbAB);
     assert.deepEqual(ab2.changes, {
       rules: { added: ['add.md'], removed: ['del.md'], updated: ['mod.md'] },
       skills: { added: [], removed: [], updated: ['sk'] },
@@ -6861,7 +6864,7 @@ try {
     dbP.prepare('INSERT INTO state (id, value) VALUES (1, ?)').run(JSON.stringify({
       source: null, inventory: {}, previous: null, changes: null,
     }));
-    const pc = dash.importSource(dash.loadState(dbP), join(w10, 'ifa'), undefined, null, dbP).changes;
+    const pc = (await dash.importSource(dash.loadState(dbP), join(w10, 'ifa'), undefined, null, dbP)).changes;
     assert.deepEqual(pc, {
       rules: { added: ['del.md', 'keep.md', 'mod.md'], removed: [], updated: [] },
       skills: { added: ['sk'], removed: [], updated: [] },
@@ -7000,7 +7003,7 @@ try {
       },
       previous: null, changes: null,
     }));
-    const bc = dash.importSource(dash.loadState(dbB), join(w10, 'bnd10'), undefined, null, dbB).changes;
+    const bc = (await dash.importSource(dash.loadState(dbB), join(w10, 'bnd10'), undefined, null, dbB)).changes;
     assert.deepEqual(bc, {
       rules: { added: [], removed: [], updated: [] },
       skills: { added: ['bundled', 'shelfy', 'workeronly', 'mshelf'], removed: [], updated: ['shared'] },
@@ -7033,6 +7036,204 @@ try {
     assert.equal(dash.remoteHead('absent/repo'), '');
     assert.equal(dash.remoteHead('own/data', 'no-such-ref'), '', 'a successful ls-remote without the ref yields an empty sha');
 
+    // -- imported-commit describe (specs/imported-commit-describe.md): forms, URLs, token gating.
+    // A local REST fixture records every request; scenarios swap the canned responses.
+    const describeRequests = [];
+    let fixtureTags = [];
+    /** @type {(tag: string) => any} */
+    let fixtureCompare = () => ({ status: 'behind', ahead_by: 0 });
+    const describeFixture = createServer((req, res) => {
+      describeRequests.push({ url: req.url ?? '', authorization: req.headers.authorization });
+      res.setHeader('content-type', 'application/json');
+      if (/^\/repos\/own\/data\/tags/.test(req.url ?? '')) {
+        res.end(JSON.stringify(fixtureTags));
+        return;
+      }
+      const cm = /^\/repos\/own\/data\/compare\/([^.]*)\.\.\.[0-9a-f]{40}$/.exec(req.url ?? '');
+      res.end(JSON.stringify(cm ? fixtureCompare(decodeURIComponent(cm[1])) : {}));
+    });
+    await new Promise(resolve => describeFixture.listen(0, '127.0.0.1', resolve));
+    const describePort = /** @type {{ port: number }} */ (describeFixture.address()).port;
+    const savedApiBase10 = process.env.ALATE_TEST_GITHUB_API_BASE;
+    const savedTokenHost10 = process.env.ALATE_GITHUB_HOST;
+    delete process.env.ALATE_GITHUB_HOST;
+    process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${describePort}`;
+    // Every git call below asserts on a captured result, so a failure carries stderr.
+    /** @param {string[]} args @param {import('node:child_process').SpawnSyncOptionsWithStringEncoding} [opts] */
+    const git10c = (args, opts = {}) => {
+      const r = git10(args, opts);
+      assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+      return r;
+    };
+    const commit10 = (repo, msg) => {
+      writeFileSync(join(w10, repo, `f-${msg.replace(/\s+/g, '-')}.md`), `${msg}\n`);
+      git10c(['-C', repo, 'add', '-A']);
+      git10c(['-C', repo, '-c', 'user.email=t@x', '-c', 'user.name=t', 'commit', '-qm', msg]);
+    };
+    try {
+      // -- path source: tag v1 plus three later commits yields v1-3-g<hash>; no API request.
+      const descA = join(w10, 'descA');
+      mkdirSync(descA, { recursive: true });
+      git10c(['init', '-q', 'descA']);
+      git10c(['-C', 'descA', 'symbolic-ref', 'HEAD', 'refs/heads/main']);
+      commit10('descA', 'base');
+      git10c(['-C', 'descA', 'tag', 'v1']);
+      commit10('descA', 'one');
+      commit10('descA', 'two');
+      commit10('descA', 'three');
+      const dbDA = mkDb10('alat10-da.db');
+      const stDA = await dash.importSource(dash.loadState(dbDA), descA, undefined, null, dbDA);
+      const expA = git10c(['-C', 'descA', 'describe', '--tags', '--always']).stdout.trim();
+      assert.match(stDA.source.describe, /^v1-3-g[0-9a-f]{7,}$/);
+      assert.equal(stDA.source.describe, expA, 'a path source stores git describe --tags --always verbatim');
+      assert.deepEqual(describeRequests, [], 'a path source never calls the describe API');
+
+      // -- tagged commit yields the bare tag.
+      const descB = join(w10, 'descB');
+      mkdirSync(descB, { recursive: true });
+      git10c(['init', '-q', 'descB']);
+      git10c(['-C', 'descB', 'symbolic-ref', 'HEAD', 'refs/heads/main']);
+      commit10('descB', 'only');
+      // An annotated tag carries a tagger, so it needs the identity like a commit does.
+      git10c(['-C', 'descB', '-c', 'user.email=t@x', '-c', 'user.name=t', 'tag', '-a', 'v2', '-m', 'two']);
+      const dbDB = mkDb10('alat10-db.db');
+      const stDB = await dash.importSource(dash.loadState(dbDB), descB, undefined, null, dbDB);
+      assert.equal(stDB.source.describe, 'v2', 'an annotated tag on the imported commit yields the bare tag');
+
+      // -- no tags yields the short hash; a folder outside git stores ''.
+      const descC = join(w10, 'descC');
+      mkdirSync(descC, { recursive: true });
+      git10c(['init', '-q', 'descC']);
+      git10c(['-C', 'descC', 'symbolic-ref', 'HEAD', 'refs/heads/main']);
+      commit10('descC', 'untagged');
+      const dbDC = mkDb10('alat10-dc.db');
+      const stDC = await dash.importSource(dash.loadState(dbDC), descC, undefined, null, dbDC);
+      assert.equal(stDC.source.describe, git10c(['-C', 'descC', 'describe', '--tags', '--always']).stdout.trim());
+      assert.match(stDC.source.describe, /^[0-9a-f]{7,}$/, 'a repo without tags yields the short hash');
+      const descD = join(w10, 'descD');
+      mkdirSync(descD, { recursive: true });
+      writeFileSync(join(descD, 'plain.md'), 'plain\n');
+      const dbDD = mkDb10('alat10-dd.db');
+      const stDD = await dash.importSource(dash.loadState(dbDD), descD, undefined, null, dbDD);
+      assert.equal(stDD.source.describe, '', 'a folder that is no git work tree stores no describe');
+
+      // -- repo source, tagged commit: the bare tag comes from the API, and the request
+      // URLs are exactly tags then nothing else; the stored key rides as a Bearer.
+      dash.setDescribeTokenHost(null);
+      fixtureTags = [{ name: 'v1', commit: { sha: ownSha } }];
+      describeRequests.length = 0;
+      const dbE = mkDb10('alat10-de1.db');
+      const stE = await dash.importSource(dash.loadState(dbE), 'own/data@main', 'repo', 'tok-desc', dbE);
+      assert.equal(stE.source.describe, 'v1', 'a tag on the imported commit yields the bare tag from the API');
+      assert.deepEqual(describeRequests.map(r => r.url), ['/repos/own/data/tags?per_page=100']);
+      assert.equal(describeRequests[0].authorization, 'Bearer tok-desc');
+
+      // -- repo source, three commits past the nearest tag: v1-3-g<hash>, one compare per
+      // tag, each naming the tag and the full imported sha exactly.
+      fixtureTags = [
+        { name: 'v9', commit: { sha: '9'.repeat(40) } },
+        { name: 'v1', commit: { sha: '1'.repeat(40) } },
+      ];
+      fixtureCompare = tag => (tag === 'v9' ? { status: 'ahead', ahead_by: 5 } : { status: 'ahead', ahead_by: 3 });
+      describeRequests.length = 0;
+      const dbF = mkDb10('alat10-df1.db');
+      const stF = await dash.importSource(dash.loadState(dbF), 'own/data@main', 'repo', 'tok-desc', dbF);
+      assert.equal(stF.source.describe, `v1-3-g${ownSha.slice(0, 7)}`);
+      assert.deepEqual(describeRequests.map(r => r.url), [
+        '/repos/own/data/tags?per_page=100',
+        `/repos/own/data/compare/v9...${ownSha}`,
+        `/repos/own/data/compare/v1...${ownSha}`,
+      ], 'the compare requests name the tag and the full sha exactly');
+
+      // -- equal smallest ahead counts take the first tag of the API's response order.
+      fixtureTags = [
+        { name: 'a-tag', commit: { sha: 'a'.repeat(40) } },
+        { name: 'b-tag', commit: { sha: 'b'.repeat(40) } },
+      ];
+      fixtureCompare = () => ({ status: 'ahead', ahead_by: 2 });
+      const dbG = mkDb10('alat10-dg1.db');
+      const stG = await dash.importSource(dash.loadState(dbG), 'own/data@main', 'repo', null, dbG);
+      assert.equal(stG.source.describe, `a-tag-2-g${ownSha.slice(0, 7)}`);
+
+      // -- unreachable tags (behind or diverged) are skipped: the short hash remains.
+      fixtureTags = [{ name: 'far', commit: { sha: 'c'.repeat(40) } }];
+      fixtureCompare = tag => (tag === 'far' ? { status: 'diverged', ahead_by: 4 } : { status: 'behind', ahead_by: 0 });
+      const dbH10 = mkDb10('alat10-h10.db');
+      const stH = await dash.importSource(dash.loadState(dbH10), 'own/data@main', 'repo', null, dbH10);
+      assert.equal(stH.source.describe, ownSha.slice(0, 7), 'no reachable tag yields the short hash');
+
+      // -- no tags at all: one tags request, the short hash.
+      fixtureTags = [];
+      describeRequests.length = 0;
+      const dbI10 = mkDb10('alat10-i10.db');
+      const stI = await dash.importSource(dash.loadState(dbI10), 'own/data@main', 'repo', null, dbI10);
+      assert.equal(stI.source.describe, ownSha.slice(0, 7));
+      assert.deepEqual(describeRequests.map(r => r.url), ['/repos/own/data/tags?per_page=100']);
+      assert.equal(describeRequests[0].authorization, undefined, 'no stored key sends no Authorization header');
+
+      // -- a rate-limited API stores the short hash and keeps the import going.
+      fixtureTags = [{ name: 'v1', commit: { sha: ownSha } }];
+      describeRequests.length = 0;
+      const rateFixture = createServer((_req, res) => {
+        res.statusCode = 403;
+        res.setHeader('x-ratelimit-remaining', '0');
+        res.end('{}');
+      });
+      await new Promise(resolve => rateFixture.listen(0, '127.0.0.1', resolve));
+      process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${/** @type {{ port: number }} */ (rateFixture.address()).port}`;
+      const dbJ = mkDb10('alat10-dj1.db');
+      const stJ = await dash.importSource(dash.loadState(dbJ), 'own/data@main', 'repo', null, dbJ);
+      assert.equal(stJ.source.kind, 'repo', 'a failed describe lookup keeps the import');
+      assert.equal(stJ.source.importedSha, ownSha);
+      assert.equal(stJ.source.describe, ownSha.slice(0, 7), 'a 403 falls back to the short hash');
+      assert.deepEqual(describeRequests, [], 'the describe failure is the API call, the import proceeds');
+      rateFixture.close();
+      process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${describePort}`;
+
+      // -- a refused connection stores the short hash and keeps the import going too.
+      process.env.ALATE_TEST_GITHUB_API_BASE = 'http://127.0.0.1:1';
+      const dbK = mkDb10('alat10-dk1.db');
+      const stK = await dash.importSource(dash.loadState(dbK), 'own/data@main', 'repo', null, dbK);
+      assert.equal(stK.source.describe, ownSha.slice(0, 7), 'an unreachable API falls back to the short hash');
+      process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${describePort}`;
+
+      // -- the stored key only rides to the host it belongs to.
+      fixtureTags = [];
+      describeRequests.length = 0;
+      dash.setDescribeTokenHost('acme.ghe.com');
+      const dbL = mkDb10('alat10-dl1.db');
+      await dash.importSource(dash.loadState(dbL), 'own/data@main', 'repo', 'tok-desc', dbL);
+      assert.equal(describeRequests[0].authorization, undefined, 'a token recorded for another host never rides to github.com');
+      dash.setDescribeTokenHost('github.com');
+      describeRequests.length = 0;
+      const dbM = mkDb10('alat10-dm1.db');
+      await dash.importSource(dash.loadState(dbM), 'own/data@main', 'repo', 'tok-desc', dbM);
+      assert.equal(describeRequests[0].authorization, 'Bearer tok-desc', 'a token recorded for this host rides');
+      dash.setDescribeTokenHost(null);
+      describeRequests.length = 0;
+
+      // -- remoteAhead: the compare endpoint's ahead_by with the same gating; failures are null.
+      const otherSha = 'd'.repeat(40);
+      fixtureCompare = () => ({ status: 'ahead', ahead_by: 7 });
+      assert.equal(await dash.remoteAhead('own/data', ownSha, otherSha, 'tok-desc', 'github.com'), 7);
+      assert.deepEqual(describeRequests.map(r => r.url), [`/repos/own/data/compare/${ownSha}...${otherSha}`]);
+      assert.equal(describeRequests[0].authorization, 'Bearer tok-desc');
+      describeRequests.length = 0;
+      assert.equal(await dash.remoteAhead('own/data', ownSha, otherSha, 'tok-desc', 'github.com', 'acme.ghe.com'), 7);
+      assert.equal(describeRequests[0].authorization, undefined, 'a token recorded for another host never rides the behind lookup');
+      describeRequests.length = 0;
+      assert.equal(await dash.remoteAhead('own/data', ownSha, ownSha, 'tok-desc', 'github.com'), null, 'identical shas send no request');
+      assert.deepEqual(describeRequests, []);
+      process.env.ALATE_TEST_GITHUB_API_BASE = 'http://127.0.0.1:1';
+      assert.equal(await dash.remoteAhead('own/data', ownSha, otherSha, 'tok-desc', 'github.com'), null, 'a failed compare lookup is null');
+      process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${describePort}`;
+    } finally {
+      if (savedApiBase10 === undefined) delete process.env.ALATE_TEST_GITHUB_API_BASE; else process.env.ALATE_TEST_GITHUB_API_BASE = savedApiBase10;
+      if (savedTokenHost10 === undefined) delete process.env.ALATE_GITHUB_HOST; else process.env.ALATE_GITHUB_HOST = savedTokenHost10;
+      dash.setDescribeTokenHost(null);
+      describeFixture.close();
+    }
+
     // -- repo-source edit: clone, write, commit, push, re-import; temp dirs never leak.
     await leak10(() => {});
     const res1 = await leak10(() => dash.applyFileEdit(r1, dbR, { path: 'edit10.md', content: 'hi ten\n', base: null }));
@@ -7049,21 +7250,21 @@ try {
     const editHash2 = dash.readStoredFile(dbR, 'edit10.md').hash;
     const res2b = await leak10(() => dash.applyFileEdit(res2.state, dbR, { path: 'edit10.md', content: 'up ten b\n', base: editHash2, message: null }));
     assert.equal(git10(['--git-dir', ghOwn, 'log', '-1', '--format=%s', 'main']).stdout.replace(/\n$/, ''), 'alate: edit edit10.md', 'a null message falls back to the default subject');
-    e = err10(() => dash.applyFileEdit(res2.state, dbR, { path: 'edit10.md', content: 'x\n', base: '0'.repeat(64) }));
+    e = await err10(() => dash.applyFileEdit(res2.state, dbR, { path: 'edit10.md', content: 'x\n', base: '0'.repeat(64) }));
     assert.equal(e.status, 409);
-    e = err10(() => dash.applyFileEdit({ source: null }, dbR, { path: 'x.md', content: 'x', base: null }));
+    e = await err10(() => dash.applyFileEdit({ source: null }, dbR, { path: 'x.md', content: 'x', base: null }));
     assert.equal(e.status, 400);
-    e = err10(() => dash.applyFileEdit(res2.state, dbR, { path: 'x.md', content: 'x', base: null, delete: true }));
+    e = await err10(() => dash.applyFileEdit(res2.state, dbR, { path: 'x.md', content: 'x', base: null, delete: true }));
     assert.equal(e.status, 400);
 
     // A clone failure names the repo and ref and carries git's stderr; nothing leaks the token.
-    e = err10(() => dash.importSource(dash.loadState(mkDb10('alat10-cl.db')), 'gone/repo@main', 'repo', null, mkDb10('alat10-cl2.db')));
+    e = await err10(() => dash.importSource(dash.loadState(mkDb10('alat10-cl.db')), 'gone/repo@main', 'repo', null, mkDb10('alat10-cl2.db')));
     assert.equal(e.status, 400);
     assert.match(e.message, /^git clone failed for gone\/repo@main: /, 'the clone failure names the repo and ref');
     assert.ok(e.message.includes('does not appear to be a git repository'), 'the clone failure carries git stderr');
     // -- explicit host in the spec: stored on the source; GH_BASE still wins for the URL.
     const dbH = mkDb10('alat10-h.db');
-    const h1 = dash.importSource(dash.loadState(dbH), 'acme.ghe.com/own/data', 'repo', null, dbH);
+    const h1 = await dash.importSource(dash.loadState(dbH), 'acme.ghe.com/own/data', 'repo', null, dbH);
     assert.equal(h1.source.host, 'acme.ghe.com');
     assert.deepEqual([h1.source.name, h1.source.ref], ['own/data', '']);
     assert.equal(h1.source.importedSha, git10(['--git-dir', ghOwn, 'rev-parse', 'main']).stdout.trim());
@@ -7076,7 +7277,7 @@ try {
       process.env.ALATE_GITHUB_HOST = 'acme.ghe.com';
       const dashHost = await import('./web/dashboard.mjs?alat10h');
       const dbHA = mkDb10('alat10-ha.db');
-      const ha1 = dashHost.importSource(dashHost.loadState(dbHA), 'own/data@main', 'repo', null, dbHA);
+      const ha1 = await dashHost.importSource(dashHost.loadState(dbHA), 'own/data@main', 'repo', null, dbHA);
       assert.equal(ha1.source.host, 'acme.ghe.com');
       const ha2 = await leak10(() => dashHost.applyFileEdit(ha1, dbHA, { path: 'host10.md', content: 'hi ghe\n', base: null }));
       assert.equal(ha2.pushed, true);
@@ -7092,7 +7293,7 @@ try {
     try {
       process.env.ALATE_GITHUB_HOST = 'https://bad host';
       const dbHB = mkDb10('alat10-hb.db');
-      e = err10(() => dash.importSource(dash.loadState(dbHB), 'own/data', 'repo', null, dbHB));
+      e = await err10(() => dash.importSource(dash.loadState(dbHB), 'own/data', 'repo', null, dbHB));
       assert.equal(e.status, 400);
       assert.ok(e.message.startsWith('ALATE_GITHUB_HOST:'), e.message);
     } finally {
@@ -7140,7 +7341,7 @@ try {
       // and the import fails instead of landing the fixture's sha.
       process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = cfgAcme11;
       const db11a = mkDb10('alat11-a.db');
-      const c11 = leak10(() => dash11.importSource(dash11.loadState(db11a), 'acme.ghe.com/own/data@main', 'repo', null, db11a));
+      const c11 = await leak10(() => dash11.importSource(dash11.loadState(db11a), 'acme.ghe.com/own/data@main', 'repo', null, db11a));
       assert.deepEqual([c11.source.name, c11.source.host, c11.source.ref, c11.source.importedSha], ['own/data', 'acme.ghe.com', 'main', ghHead11]);
       assert.equal(dash11.remoteHead('own/data', 'main', null, 'acme.ghe.com'), ghHead11);
 
@@ -7148,13 +7349,13 @@ try {
       process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = cfgNone11;
       const ghwtSha11 = git10(['-C', 'ghwt', 'rev-parse', 'HEAD']).stdout.trim();
       const db11b = mkDb10('alat11-b.db');
-      const p11 = leak10(() => dash11.importSource(dash11.loadState(db11b), join(w10, 'ghwt'), 'repo', null, db11b));
+      const p11 = await leak10(() => dash11.importSource(dash11.loadState(db11b), join(w10, 'ghwt'), 'repo', null, db11b));
       assert.deepEqual([p11.source.kind, p11.source.name, p11.source.importedSha], ['repo', join(w10, 'ghwt'), ghwtSha11]);
 
       // A ref-less clone failure names just the repo, then the colon and git's stderr.
       process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = cfgAcme11;
       const db11c = mkDb10('alat11-c.db');
-      e = err10(() => dash11.importSource(dash11.loadState(db11c), 'acme.ghe.com/own/no-such-alat11', 'repo', null, db11c));
+      e = await err10(() => dash11.importSource(dash11.loadState(db11c), 'acme.ghe.com/own/no-such-alat11', 'repo', null, db11c));
       assert.equal(e.status, 400);
       assert.match(e.message, /^git clone failed for own\/no-such-alat11: /, 'a ref-less clone failure names just the repo');
       assert.ok(!e.message.includes('@'), 'a ref-less clone failure names no ref');
@@ -7162,7 +7363,7 @@ try {
 
       // An empty remote clones fine but has no HEAD to read: the failure names the repo.
       const db11d = mkDb10('alat11-d.db');
-      e = err10(() => leak10(() => dash11.importSource(dash11.loadState(db11d), 'acme.ghe.com/own/empty-alat11', 'repo', null, db11d)));
+      e = await err10(() => leak10(() => dash11.importSource(dash11.loadState(db11d), 'acme.ghe.com/own/empty-alat11', 'repo', null, db11d)));
       assert.equal(e.message, 'cannot read cloned HEAD for own/empty-alat11', 'an empty remote reports the HEAD read failure');
 
       // git missing from PATH: the clone fails with no stderr at all, so the message ends
@@ -7170,7 +7371,7 @@ try {
       const db11e = mkDb10('alat11-e.db');
       const savedPath11 = process.env.PATH;
       process.env.PATH = '/nonexistent-alat11';
-      try { e = err10(() => leak10(() => dash11.importSource(dash11.loadState(db11e), 'own/data@main', 'repo', null, db11e))); }
+      try { e = await err10(() => leak10(() => dash11.importSource(dash11.loadState(db11e), 'own/data@main', 'repo', null, db11e))); }
       finally { process.env.PATH = savedPath11; }
       assert.equal(e.status, 400);
       assert.equal(e.message, 'git clone failed for own/data@main', 'a spawn failure appends no colon and no stderr');
@@ -7233,7 +7434,7 @@ try {
 
         // Repo source: import (clone + rev-parse), edit (clone, commit, push), ls-remote.
         const db12 = mkDb10('alat12.db');
-        const r12 = leak10(() => dash.importSource(dash.loadState(db12), 'own/data@main', 'repo', null, db12));
+        const r12 = await leak10(() => dash.importSource(dash.loadState(db12), 'own/data@main', 'repo', null, db12));
         assert.equal(r12.source.importedSha, git10(['--git-dir', ghOwn, 'rev-parse', 'main']).stdout.trim());
         const e12 = await leak10(() => dash.applyFileEdit(r12, db12, { path: 'iso12.md', content: 'iso\n', base: null }));
         assert.equal(e12.pushed, true);
@@ -7242,7 +7443,7 @@ try {
 
         // Path source: the commit runs the tree's own hook, never the hostile hooksPath.
         const dbP12 = mkDb10('alat12-p.db');
-        const p12 = dash.importSource(dash.loadState(dbP12), pt12, 'path', null, dbP12);
+        const p12 = await dash.importSource(dash.loadState(dbP12), pt12, 'path', null, dbP12);
         const pe12 = await dash.applyFileEdit(p12, dbP12, { path: 'iso12.md', content: 'path\n', base: null });
         assert.equal(pe12.warning, 'no upstream configured; the commit stayed local');
         assert.equal(git(['-C', pt12, 'log', '-1', '--format=%H %ae'], { encoding: 'utf8' }).stdout.trim(), `${pe12.commit} alate@localhost`);
@@ -7268,7 +7469,7 @@ try {
     for (const bad of ['a\\b.md', 'a//b.md']) {
       dbS.exec('DELETE FROM files');
       dbS.prepare('INSERT INTO files (path, content) VALUES (?, ?)').run(bad, Buffer.from(`x`));
-      e = err10(() => leak10(() => dash.snapshotData(dbS)));
+      e = await err10(() => leak10(() => dash.snapshotData(dbS)));
       assert.equal(e.message, `unsafe snapshot path: ${bad}`, bad);
     }
   }
@@ -7506,7 +7707,7 @@ try {
       await waitFor(async () => existsSync(capFile), 10_000);
       const child = JSON.parse(readFileSync(capFile, 'utf8'));
       assert.deepEqual(Object.keys(child).sort(), envNames
-        .concat(['ALATE_TEST_CHILD_ENV', 'ALATE_TEST_GH_BASE', 'ALATE_TEST_NO_RESULTS_FILE', 'ALATE_TEST_PROVISION_GATE', 'ALATE_TEST_SCRIPT_GATE'])
+        .concat(['ALATE_TEST_CHILD_ENV', 'ALATE_TEST_GH_BASE', 'ALATE_TEST_GITHUB_API_BASE', 'ALATE_TEST_NO_RESULTS_FILE', 'ALATE_TEST_PROVISION_GATE', 'ALATE_TEST_SCRIPT_GATE'])
         .sort(), 'the child env carries exactly the allowlisted names plus the ALATE_TEST_ pass-through (no ALATE_LAYER, no secrets)');
       assert.ok(!('ALATE_API_KEY' in child), 'secrets stay outside the child env');
       await mut10Kill(E.p);
