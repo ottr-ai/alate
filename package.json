@@ -17,7 +17,7 @@
   },
   "devDependencies": {
     "@stryker-mutator/core": "^10.1.1",
-    "@types/node": "^24.10.1",
+    "@types/node": "^26.6.6",
     "typescript": "^7.0.2"
   }
 }
