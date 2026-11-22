@@ -25,7 +25,7 @@ import { composeWorkerAdd, parseWorkerItems, validateWorkerBytes, workerItemKey 
 /** @typedef {{ rules: RuleInfo[], user: { configFiles: FileInfo[], others: FileInfo[], skills: SkillInfo[], extensions: string[], plugins: PluginInfo[] }, projects: ProjectsInventory, bundles: BundleInfo[], counts: { rules: number, skills: number, plugins: number, extensions: number, projects: number, bundles: number, userFiles: number }, warnings: string[] }} Inventory */
 /** @typedef {{ added: string[], removed: string[], updated: string[] }} SectionChanges */
 /** @typedef {Record<string, SectionChanges>} Changes */
-/** @typedef {{ kind: string, spec: string, name: string, host: string, ref: string, importedSha: string, describe: string }} SourceMeta */
+/** @typedef {{ kind: string, spec: string, name: string, host: string, ref: string, importedSha: string, commitLabel: string }} SourceMeta */
 /** @typedef {SourceMeta & { importedAt: string }} SourceInfo */
 /** @typedef {{ dir: string, temp: boolean, source: SourceMeta }} ResolvedSource */
 /** @typedef {{ checkedAt: string, remoteSha: string, available: boolean, ahead: number | null }} UpdateInfo */
@@ -590,7 +590,7 @@ function resolveSource(spec, kind, token) {
   if (kind !== 'repo' && (asGiven || existsSync(resolve(repoRoot, spec)))) {
     const dir = resolve(asGiven ? spec : resolve(repoRoot, spec));
     // a path-kind source stores no host; the cast documents the repo-source shape
-    return { dir, temp: false, source: /** @type {SourceMeta} */ ({ kind: 'path', spec, name: dir, ref: '', importedSha: '', describe: '' }) };
+    return { dir, temp: false, source: /** @type {SourceMeta} */ ({ kind: 'path', spec, name: dir, ref: '', importedSha: '', commitLabel: '' }) };
   }
   if (kind === 'path') {
     throw Object.assign(new Error(`no local data repo at ${spec}`), { status: 400 });
@@ -637,16 +637,16 @@ function cloneRepo(spec, parsed, token) {
     throw new Error(`cannot read cloned HEAD for ${parsed.name}`);
   }
   const importedSha = head.stdout.trim();
-  return { dir, temp: true, source: { kind: 'repo', spec, name: parsed.name, host, ref: parsed.ref, importedSha, describe: '' } };
+  return { dir, temp: true, source: { kind: 'repo', spec, name: parsed.name, host, ref: parsed.ref, importedSha, commitLabel: '' } };
 }
 
-// ---- Imported-commit describe (specs/imported-commit-describe.md) ----
+// ---- Imported-commit label (specs/imported-commit-describe.md) ----
 
 // The source host's REST base. The test override fakes the network for every GitHub
 // client (lib/updates.mjs reads the same variable). An unparseable host yields '' so no
-// request is built and the describe falls back to the short sha.
+// request is built and the count falls back to the short sha.
 /** @param {string} host @returns {string} */
-function describeBase(host) {
+function countApiBase(host) {
   if (process.env.ALATE_TEST_GITHUB_API_BASE) return process.env.ALATE_TEST_GITHUB_API_BASE;
   try {
     const parsed = parseGithubHost(host);
@@ -662,13 +662,13 @@ function describeBase(host) {
 // generalized to the source host: a token for one host never reaches another host's API,
 // and an invalid ambient host sends nothing.
 /** @type {string | null} */
-let describeTokenHost = null;
+let countTokenHost = null;
 /** @param {string | null | undefined} host @returns {void} */
-function setDescribeTokenHost(host) {
-  describeTokenHost = typeof host === 'string' && host !== '' ? host : null;
+function setCountTokenHost(host) {
+  countTokenHost = typeof host === 'string' && host !== '' ? host : null;
 }
 /** @param {string | undefined} token @param {string} host @param {string | null} [recorded=null] @returns {string | undefined} */
-function describeTokenFor(token, host, recorded = null) {
+function countTokenFor(token, host, recorded = null) {
   if (!token) return undefined;
   let ambient;
   try {
@@ -679,69 +679,61 @@ function describeTokenFor(token, host, recorded = null) {
   return (recorded ?? ambient) === host ? token : undefined;
 }
 /** @param {string | undefined} token @param {string} host @returns {string | undefined} */
-const describeToken = (token, host) => describeTokenFor(token, host, describeTokenHost);
+const countToken = (token, host) => countTokenFor(token, host, countTokenHost);
 
 // Every upstream GET carries an AbortSignal.timeout cap, mirroring lib/updates.mjs: the
 // default 15 s keeps a stalled API from holding the import op for minutes, and tests
 // shorten the cap through the same variable.
-/** @param {string} url @param {string | undefined} token @returns {Promise<any>} */
-async function describeJson(url, token) {
+/** @param {string} url @param {string | undefined} token @returns {Promise<{ body: any, link: string }>} */
+async function countJson(url, token) {
   /** @type {{ signal: AbortSignal, headers?: Record<string, string> }} */
   const opts = { signal: AbortSignal.timeout(Number(process.env.ALATE_TEST_FETCH_TIMEOUT_MS) > 0 ? Number(process.env.ALATE_TEST_FETCH_TIMEOUT_MS) : 15000) };
   if (token) opts.headers = { Authorization: `Bearer ${token}` };
   const res = await fetch(url, opts);
   if (!res.ok) throw new Error(`GET ${url} failed: HTTP ${res.status}`);
-  return res.json();
+  return { body: await res.json(), link: res.headers.get('link') ?? '' };
 }
 
 /** @param {string} sha @returns {string} */
 const shortSha = sha => (/^[0-9a-f]{40}$/.test(sha) ? sha.slice(0, 7) : '');
 
-// Describe string for a repo source: the nearest tag reachable from the commit as
-// `<tag>-<n>-g<hash>`, exactly `<tag>` on the tagged commit, the short hash alone when
-// no tag is reachable. Tags and ahead counts come from the source host's REST API (the
-// clone is shallow, so git describe cannot run there). Any lookup failure stores the
-// short hash and only logs: the import itself never fails on describe. At most the
-// first per_page=100 tags are compared; equal smallest ahead counts take the first tag
-// in the API's response order.
+// Label for a repo source: `<count>-<hash>` where count is the number of commits
+// reachable from the imported commit. The clone is shallow (no history to count), so the
+// count comes from the source host's REST API in one request: the commits list with
+// per_page=1 names the last page in its link header, and that page number is the exact
+// count; a response without a link header is a single page, so the count is the item
+// count. Any lookup failure stores the short hash alone and only logs: the import
+// itself never fails on the label.
 /**
  * @param {{ name: string, host: string, importedSha: string }} src
  * @param {string | undefined} token
  * @returns {Promise<string>}
  */
-async function repoDescribe(src, token) {
+async function repoCommitLabel(src, token) {
   const short = shortSha(src.importedSha);
   if (!short) return '';
-  const base = describeBase(src.host);
-  const tok = describeToken(token, src.host);
+  const base = countApiBase(src.host);
   if (!base) return short;
   try {
-    const tags = await describeJson(`${base}/repos/${src.name}/tags?per_page=100`, tok);
-    const candidates = Array.isArray(tags)
-      ? tags.filter(t => t && typeof t.name === 'string' && t.commit && typeof t.commit.sha === 'string')
-      : [];
-    if (candidates.length === 0) return short;
-    const onHead = candidates.find(t => t.commit.sha === src.importedSha);
-    if (onHead) return onHead.name;
-    const counts = await Promise.all(candidates.map(async t => {
-      const c = await describeJson(`${base}/repos/${src.name}/compare/${encodeURIComponent(t.name)}...${src.importedSha}`, tok);
-      return { name: t.name, ahead: c && c.status === 'ahead' && Number.isInteger(c.ahead_by) ? c.ahead_by : null };
-    }));
-    let best = null;
-    for (const c of counts) if (c.ahead !== null && (best === null || c.ahead < best.ahead)) best = c;
-    return best ? `${best.name}-${best.ahead}-g${short}` : short;
+    const { body, link } = await countJson(`${base}/repos/${src.name}/commits?sha=${src.importedSha}&per_page=1`, countToken(token, src.host));
+    const last = link.split(',').find(p => /rel="last"/.test(p));
+    const m = last ? /[?&]page=(\d+)/.exec(last) : null;
+    if (m) return `${Number(m[1])}-${short}`;
+    if (Array.isArray(body) && body.length === 1) return `1-${short}`;
+    throw new Error(`no count in the commits response for ${src.name}`);
   } catch (err) {
-    console.error(`describe lookup failed: ${String(/** @type {Error} */ (err).message ?? err)}`);
+    console.error(`commit count lookup failed: ${String(/** @type {Error} */ (err).message ?? err)}`);
     return short;
   }
 }
 
-// Describe string for a path source: git describe --tags --always in the checkout, ''
-// when the folder is not a git work tree or has no commits.
+// Label for a path source: `git rev-list --count HEAD` with the checkout's short hash,
+// '' when the folder is not a git work tree or has no commits.
 /** @param {string} dir @returns {string} */
-function pathDescribe(dir) {
-  const git = spawnSync('git', ['describe', '--tags', '--always'], { cwd: dir, env: serverGitEnv(), stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
-  return git.status === 0 ? git.stdout.trim() : '';
+function pathCommitLabel(dir) {
+  const count = spawnSync('git', ['rev-list', '--count', 'HEAD'], { cwd: dir, env: serverGitEnv(), stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+  const short = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: dir, env: serverGitEnv(), stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+  return count.status === 0 && short.status === 0 && /^\d+$/.test(count.stdout.trim()) ? `${count.stdout.trim()}-${short.stdout.trim()}` : '';
 }
 
 // Commits the remote is ahead of the imported commit: the compare endpoint's ahead_by
@@ -756,12 +748,12 @@ function pathDescribe(dir) {
  * @returns {Promise<number | null>}
  */
 export async function remoteAhead(name, base, head, token, host, tokenHost = null) {
-  const tok = describeTokenFor(token, host, tokenHost);
-  const api = describeBase(host);
+  const tok = countTokenFor(token, host, tokenHost);
+  const api = countApiBase(host);
   if (!shortSha(base) || !shortSha(head) || base === head || !api) return null;
   try {
-    const c = await describeJson(`${api}/repos/${name}/compare/${base}...${head}`, tok);
-    return c && Number.isInteger(c.ahead_by) ? c.ahead_by : null;
+    const { body } = await countJson(`${api}/repos/${name}/compare/${base}...${head}`, tok);
+    return body && Number.isInteger(body.ahead_by) ? body.ahead_by : null;
   } catch (err) {
     console.error(`behind lookup failed: ${String(/** @type {Error} */ (err).message ?? err)}`);
     return null;
@@ -781,11 +773,12 @@ export async function remoteAhead(name, base, head, token, host, tokenHost = nul
  */
 async function importSource(state, spec, kind, token, db, resolvedIn = null) {
   const resolved = resolvedIn ?? resolveSource(spec, kind, token);
-  // A repo clone is shallow, so its describe reads the source host's API; a path source
-  // describes its own checkout. Both store the display string next to importedSha.
-  resolved.source.describe = resolved.source.kind === 'repo'
-    ? await repoDescribe(resolved.source, token)
-    : pathDescribe(resolved.dir);
+  // A repo clone is shallow (no history to count), so its label reads the source host's
+  // API; a path source counts its own checkout. Both store the display string next to
+  // importedSha.
+  resolved.source.commitLabel = resolved.source.kind === 'repo'
+    ? await repoCommitLabel(resolved.source, token)
+    : pathCommitLabel(resolved.dir);
   try {
     const inventory = scanInventory(resolved.dir, resolved.temp ? null : dirname(resolved.dir));
     const previous = state.inventory;
@@ -1671,4 +1664,4 @@ function remoteHead(name, ref, token, host = '') {
   return git.status === 0 && git.stdout ? git.stdout.split('\n')[0].trim().split(/\s+/)[0] : '';
 }
 
-export { scanInventory, importSource, isGitWorkTree, isWritableDir, loadState, remoteHead, setDescribeTokenHost, snapshotData, readStoredFile, listStoredFiles, applyFileEdit, applyBundleAction, applyEntryAction, originCovers, withoutOrigin, withOwnText, setTrustedPathSource, getTrustedPathSource };
+export { scanInventory, importSource, isGitWorkTree, isWritableDir, loadState, remoteHead, setCountTokenHost, snapshotData, readStoredFile, listStoredFiles, applyFileEdit, applyBundleAction, applyEntryAction, originCovers, withoutOrigin, withOwnText, setTrustedPathSource, getTrustedPathSource };

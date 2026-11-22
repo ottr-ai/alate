@@ -120,7 +120,7 @@ function renderShell() {
   $('import-now').hidden = !src;
   if (src) {
     const spec = src.kind === 'repo' ? src.name + (src.ref ? '@' + src.ref : '') : src.spec;
-    const shown = src.describe || (src.importedSha ? src.importedSha.slice(0, 7) : '');
+    const shown = src.commitLabel || (src.importedSha ? src.importedSha.slice(0, 7) : '');
     const up = state && state.update;
     line.append(h('b', { text: spec }));
     if (shown) line.append(' at ' + shown);
@@ -507,7 +507,7 @@ function overviewView() {
   const provMeta = prov ? ' · provisioned ' + relTime(prov.at) + (prov.items.some((i) => i.status === 'rejected' || i.status === 'no-origin' || i.status === 'inconclusive') ? ', ' + prov.items.filter((i) => i.status === 'rejected' || i.status === 'no-origin' || i.status === 'inconclusive').length + ' failed' : '') : '';
   sheet.append(h('header', { class: 'sheet-head' },
     h('h1', { text: src.kind === 'repo' ? spec : src.name.split(/[\\/]/).filter(Boolean).pop() || spec }),
-    h('p', { class: 'meta', text: (src.kind === 'repo' ? 'GitHub repo' : 'Local path ' + src.name) + (src.importedSha ? ' · commit ' + src.importedSha.slice(0, 7) : '') + ' · imported ' + relTime(src.importedAt) + provMeta }),
+    h('p', { class: 'meta', text: (src.kind === 'repo' ? 'GitHub repo' : 'Local path ' + src.name) + (src.commitLabel || src.importedSha ? ' · commit ' + (src.commitLabel || src.importedSha.slice(0, 7)) : '') + ' · imported ' + relTime(src.importedAt) + provMeta }),
     ...provisionFailureView(prov),
     h('p', { class: 'totals' },
       plural(rules.length, 'rule'), ', ', plural(user.skills.length, 'skill'), ', ', plural(user.plugins.length, 'plugin'), ', ',
@@ -821,7 +821,7 @@ function settingsView() {
       h('dl', { class: 'kv' },
         h('dt', { text: 'Type' }), h('dd', { text: src.kind === 'repo' ? 'GitHub repo' : 'Local path' }),
         h('dt', { text: 'Source' }), h('dd', { text: src.kind === 'repo' ? src.spec : src.name }),
-        h('dt', { text: 'Commit' }), h('dd', { text: src.describe ? (src.importedSha && src.importedSha !== src.describe ? src.describe + ' (' + src.importedSha + ')' : src.describe) : (src.importedSha || 'not recorded') }),
+        h('dt', { text: 'Commit' }), h('dd', { text: src.commitLabel ? (src.importedSha && src.importedSha !== src.commitLabel ? src.commitLabel + ' (' + src.importedSha + ')' : src.commitLabel) : (src.importedSha || 'not recorded') }),
         h('dt', { text: 'Imported' }), h('dd', { text: new Date(src.importedAt).toLocaleString() + ' (' + relTime(src.importedAt) + ')' })),
       h('div', { class: 'row' },
         h('button', { type: 'button', class: 'btn', onclick: async (ev) => {

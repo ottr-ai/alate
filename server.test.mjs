@@ -2108,7 +2108,7 @@ try {
   body = await r.json();
   assert.equal(body.state.source.kind, 'repo');
   assert.equal(body.state.source.importedSha, sha1);
-  assert.equal(body.state.source.describe, sha1.slice(0, 7), 'a repo source with no reachable tag stores the short hash');
+  assert.equal(body.state.source.commitLabel, sha1.slice(0, 7), 'a repo source with an unknown count stores the short hash alone');
   assert.equal((await (await get('/config')).json()).repo, 'https://github.com/demo/data');
   await waitFor(async () => {
     const s = await (await get('/api/state')).json();
@@ -6492,7 +6492,7 @@ try {
     process.env.ALATE_TEST_GH_BASE = pathToFileURL(join(tmp, 'gh10')).href;
     process.env.GIT_CONFIG_GLOBAL = 'nul';
     process.env.GIT_CONFIG_SYSTEM = 'nul';
-    // Describe lookups fail fast against a dead local port unless a section fakes the API.
+    // Commit-count lookups fail fast against a dead local port unless a section fakes the API.
     process.env.ALATE_TEST_GITHUB_API_BASE = 'http://127.0.0.1:1';
     const dash = await import('./web/dashboard.mjs?alat10');
     const w10 = join(tmp, 'alat10');
@@ -7036,28 +7036,31 @@ try {
     assert.equal(dash.remoteHead('absent/repo'), '');
     assert.equal(dash.remoteHead('own/data', 'no-such-ref'), '', 'a successful ls-remote without the ref yields an empty sha');
 
-    // -- imported-commit describe (specs/imported-commit-describe.md): forms, URLs, token gating.
-    // A local REST fixture records every request; scenarios swap the canned responses.
-    const describeRequests = [];
-    let fixtureTags = [];
-    /** @type {(tag: string) => any} */
-    let fixtureCompare = () => ({ status: 'behind', ahead_by: 0 });
-    const describeFixture = createServer((req, res) => {
-      describeRequests.push({ url: req.url ?? '', authorization: req.headers.authorization });
-      res.setHeader('content-type', 'application/json');
-      if (/^\/repos\/own\/data\/tags/.test(req.url ?? '')) {
-        res.end(JSON.stringify(fixtureTags));
+    // -- imported-commit label (specs/imported-commit-describe.md): count forms, exact
+    // URLs, token gating. A local REST fixture records every request; scenarios swap
+    // the canned responses.
+    const countRequests = [];
+    let fixtureCommits = () => ({ link: '', items: [] });
+    let fixtureAhead = () => ({ status: 'behind', ahead_by: 0 });
+    const countFixture = createServer((req, res) => {
+      countRequests.push({ url: req.url ?? '', authorization: req.headers.authorization });
+      if (/^\/repos\/own\/data\/commits\?/.test(req.url ?? '')) {
+        const c = fixtureCommits();
+        if (c.link) res.setHeader('link', c.link);
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify(c.items));
         return;
       }
-      const cm = /^\/repos\/own\/data\/compare\/([^.]*)\.\.\.[0-9a-f]{40}$/.exec(req.url ?? '');
-      res.end(JSON.stringify(cm ? fixtureCompare(decodeURIComponent(cm[1])) : {}));
+      const cm = /^\/repos\/own\/data\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/.test(req.url ?? '');
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(cm ? fixtureAhead() : {}));
     });
-    await new Promise(resolve => describeFixture.listen(0, '127.0.0.1', resolve));
-    const describePort = /** @type {{ port: number }} */ (describeFixture.address()).port;
+    await new Promise(resolve => countFixture.listen(0, '127.0.0.1', resolve));
+    const countPort = /** @type {{ port: number }} */ (countFixture.address()).port;
     const savedApiBase10 = process.env.ALATE_TEST_GITHUB_API_BASE;
     const savedTokenHost10 = process.env.ALATE_GITHUB_HOST;
     delete process.env.ALATE_GITHUB_HOST;
-    process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${describePort}`;
+    process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${countPort}`;
     // Every git call below asserts on a captured result, so a failure carries stderr.
     /** @param {string[]} args @param {import('node:child_process').SpawnSyncOptionsWithStringEncoding} [opts] */
     const git10c = (args, opts = {}) => {
@@ -7071,109 +7074,64 @@ try {
       git10c(['-C', repo, '-c', 'user.email=t@x', '-c', 'user.name=t', 'commit', '-qm', msg]);
     };
     try {
-      // -- path source: tag v1 plus three later commits yields v1-3-g<hash>; no API request.
+      // -- path source: five commits yield 5-<hash> (rev-list count, checkout short hash); no API request.
       const descA = join(w10, 'descA');
       mkdirSync(descA, { recursive: true });
       git10c(['init', '-q', 'descA']);
       git10c(['-C', 'descA', 'symbolic-ref', 'HEAD', 'refs/heads/main']);
-      commit10('descA', 'base');
-      git10c(['-C', 'descA', 'tag', 'v1']);
-      commit10('descA', 'one');
-      commit10('descA', 'two');
-      commit10('descA', 'three');
+      for (const msg of ['c1', 'c2', 'c3', 'c4', 'c5']) commit10('descA', msg);
       const dbDA = mkDb10('alat10-da.db');
       const stDA = await dash.importSource(dash.loadState(dbDA), descA, undefined, null, dbDA);
-      const expA = git10c(['-C', 'descA', 'describe', '--tags', '--always']).stdout.trim();
-      assert.match(stDA.source.describe, /^v1-3-g[0-9a-f]{7,}$/);
-      assert.equal(stDA.source.describe, expA, 'a path source stores git describe --tags --always verbatim');
-      assert.deepEqual(describeRequests, [], 'a path source never calls the describe API');
+      const expCount = git10c(['-C', 'descA', 'rev-list', '--count', 'HEAD']).stdout.trim();
+      const expShort = git10c(['-C', 'descA', 'rev-parse', '--short', 'HEAD']).stdout.trim();
+      assert.match(stDA.source.commitLabel, /^5-[0-9a-f]{7,}$/);
+      assert.equal(stDA.source.commitLabel, `${expCount}-${expShort}`, 'a path source stores <rev-list count>-<short hash> verbatim');
+      assert.deepEqual(countRequests, [], 'a path source never calls the count API');
 
-      // -- tagged commit yields the bare tag.
-      const descB = join(w10, 'descB');
-      mkdirSync(descB, { recursive: true });
-      git10c(['init', '-q', 'descB']);
-      git10c(['-C', 'descB', 'symbolic-ref', 'HEAD', 'refs/heads/main']);
-      commit10('descB', 'only');
-      // An annotated tag carries a tagger, so it needs the identity like a commit does.
-      git10c(['-C', 'descB', '-c', 'user.email=t@x', '-c', 'user.name=t', 'tag', '-a', 'v2', '-m', 'two']);
-      const dbDB = mkDb10('alat10-db.db');
-      const stDB = await dash.importSource(dash.loadState(dbDB), descB, undefined, null, dbDB);
-      assert.equal(stDB.source.describe, 'v2', 'an annotated tag on the imported commit yields the bare tag');
-
-      // -- no tags yields the short hash; a folder outside git stores ''.
-      const descC = join(w10, 'descC');
-      mkdirSync(descC, { recursive: true });
-      git10c(['init', '-q', 'descC']);
-      git10c(['-C', 'descC', 'symbolic-ref', 'HEAD', 'refs/heads/main']);
-      commit10('descC', 'untagged');
-      const dbDC = mkDb10('alat10-dc.db');
-      const stDC = await dash.importSource(dash.loadState(dbDC), descC, undefined, null, dbDC);
-      assert.equal(stDC.source.describe, git10c(['-C', 'descC', 'describe', '--tags', '--always']).stdout.trim());
-      assert.match(stDC.source.describe, /^[0-9a-f]{7,}$/, 'a repo without tags yields the short hash');
+      // -- a folder outside git stores no label.
       const descD = join(w10, 'descD');
       mkdirSync(descD, { recursive: true });
       writeFileSync(join(descD, 'plain.md'), 'plain\n');
       const dbDD = mkDb10('alat10-dd.db');
       const stDD = await dash.importSource(dash.loadState(dbDD), descD, undefined, null, dbDD);
-      assert.equal(stDD.source.describe, '', 'a folder that is no git work tree stores no describe');
+      assert.equal(stDD.source.commitLabel, '', 'a folder that is no git work tree stores no label');
 
-      // -- repo source, tagged commit: the bare tag comes from the API, and the request
-      // URLs are exactly tags then nothing else; the stored key rides as a Bearer.
-      dash.setDescribeTokenHost(null);
-      fixtureTags = [{ name: 'v1', commit: { sha: ownSha } }];
-      describeRequests.length = 0;
+      // -- repo source: the exact count request names the repo, the full sha and per_page,
+      // and the link header's last page is the count; the stored key rides as a Bearer.
+      dash.setCountTokenHost(null);
+      fixtureCommits = () => ({ link: `<https://api.github.com/repos/own/data/commits?sha=${ownSha}&per_page=1&page=1287>; rel="last"`, items: [{ sha: ownSha }] });
+      countRequests.length = 0;
       const dbE = mkDb10('alat10-de1.db');
       const stE = await dash.importSource(dash.loadState(dbE), 'own/data@main', 'repo', 'tok-desc', dbE);
-      assert.equal(stE.source.describe, 'v1', 'a tag on the imported commit yields the bare tag from the API');
-      assert.deepEqual(describeRequests.map(r => r.url), ['/repos/own/data/tags?per_page=100']);
-      assert.equal(describeRequests[0].authorization, 'Bearer tok-desc');
+      assert.equal(stE.source.commitLabel, `1287-${ownSha.slice(0, 7)}`);
+      assert.deepEqual(countRequests.map(r => r.url), [`/repos/own/data/commits?sha=${ownSha}&per_page=1`], 'the count request names the repo, the full sha and per_page exactly');
+      assert.equal(countRequests[0].authorization, 'Bearer tok-desc');
 
-      // -- repo source, three commits past the nearest tag: v1-3-g<hash>, one compare per
-      // tag, each naming the tag and the full imported sha exactly.
-      fixtureTags = [
-        { name: 'v9', commit: { sha: '9'.repeat(40) } },
-        { name: 'v1', commit: { sha: '1'.repeat(40) } },
-      ];
-      fixtureCompare = tag => (tag === 'v9' ? { status: 'ahead', ahead_by: 5 } : { status: 'ahead', ahead_by: 3 });
-      describeRequests.length = 0;
+      // -- a single-page response (no link header) counts its one item.
+      fixtureCommits = () => ({ link: '', items: [{ sha: ownSha }] });
+      countRequests.length = 0;
       const dbF = mkDb10('alat10-df1.db');
       const stF = await dash.importSource(dash.loadState(dbF), 'own/data@main', 'repo', 'tok-desc', dbF);
-      assert.equal(stF.source.describe, `v1-3-g${ownSha.slice(0, 7)}`);
-      assert.deepEqual(describeRequests.map(r => r.url), [
-        '/repos/own/data/tags?per_page=100',
-        `/repos/own/data/compare/v9...${ownSha}`,
-        `/repos/own/data/compare/v1...${ownSha}`,
-      ], 'the compare requests name the tag and the full sha exactly');
+      assert.equal(stF.source.commitLabel, `1-${ownSha.slice(0, 7)}`);
+      assert.deepEqual(countRequests.map(r => r.url), [`/repos/own/data/commits?sha=${ownSha}&per_page=1`]);
+      assert.equal(countRequests[0].authorization, 'Bearer tok-desc');
 
-      // -- equal smallest ahead counts take the first tag of the API's response order.
-      fixtureTags = [
-        { name: 'a-tag', commit: { sha: 'a'.repeat(40) } },
-        { name: 'b-tag', commit: { sha: 'b'.repeat(40) } },
-      ];
-      fixtureCompare = () => ({ status: 'ahead', ahead_by: 2 });
+      // -- no stored key: the same request, no Authorization header.
+      countRequests.length = 0;
       const dbG = mkDb10('alat10-dg1.db');
       const stG = await dash.importSource(dash.loadState(dbG), 'own/data@main', 'repo', null, dbG);
-      assert.equal(stG.source.describe, `a-tag-2-g${ownSha.slice(0, 7)}`);
+      assert.equal(stG.source.commitLabel, `1-${ownSha.slice(0, 7)}`);
+      assert.equal(countRequests[0].authorization, undefined, 'no stored key sends no Authorization header');
 
-      // -- unreachable tags (behind or diverged) are skipped: the short hash remains.
-      fixtureTags = [{ name: 'far', commit: { sha: 'c'.repeat(40) } }];
-      fixtureCompare = tag => (tag === 'far' ? { status: 'diverged', ahead_by: 4 } : { status: 'behind', ahead_by: 0 });
+      // -- an unusable response body (no link header, no items) stores the short hash alone.
+      fixtureCommits = () => ({ link: '', items: [] });
+      countRequests.length = 0;
       const dbH10 = mkDb10('alat10-h10.db');
       const stH = await dash.importSource(dash.loadState(dbH10), 'own/data@main', 'repo', null, dbH10);
-      assert.equal(stH.source.describe, ownSha.slice(0, 7), 'no reachable tag yields the short hash');
-
-      // -- no tags at all: one tags request, the short hash.
-      fixtureTags = [];
-      describeRequests.length = 0;
-      const dbI10 = mkDb10('alat10-i10.db');
-      const stI = await dash.importSource(dash.loadState(dbI10), 'own/data@main', 'repo', null, dbI10);
-      assert.equal(stI.source.describe, ownSha.slice(0, 7));
-      assert.deepEqual(describeRequests.map(r => r.url), ['/repos/own/data/tags?per_page=100']);
-      assert.equal(describeRequests[0].authorization, undefined, 'no stored key sends no Authorization header');
+      assert.equal(stH.source.commitLabel, ownSha.slice(0, 7), 'an empty commits response falls back to the short hash');
 
       // -- a rate-limited API stores the short hash and keeps the import going.
-      fixtureTags = [{ name: 'v1', commit: { sha: ownSha } }];
-      describeRequests.length = 0;
+      countRequests.length = 0;
       const rateFixture = createServer((_req, res) => {
         res.statusCode = 403;
         res.setHeader('x-ratelimit-remaining', '0');
@@ -7183,55 +7141,64 @@ try {
       process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${/** @type {{ port: number }} */ (rateFixture.address()).port}`;
       const dbJ = mkDb10('alat10-dj1.db');
       const stJ = await dash.importSource(dash.loadState(dbJ), 'own/data@main', 'repo', null, dbJ);
-      assert.equal(stJ.source.kind, 'repo', 'a failed describe lookup keeps the import');
+      assert.equal(stJ.source.kind, 'repo', 'a failed count lookup keeps the import');
       assert.equal(stJ.source.importedSha, ownSha);
-      assert.equal(stJ.source.describe, ownSha.slice(0, 7), 'a 403 falls back to the short hash');
-      assert.deepEqual(describeRequests, [], 'the describe failure is the API call, the import proceeds');
+      assert.equal(stJ.source.commitLabel, ownSha.slice(0, 7), 'a 403 falls back to the short hash');
+      assert.deepEqual(countRequests, [], 'the count failure is the API call, the import proceeds');
       rateFixture.close();
-      process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${describePort}`;
+      process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${countPort}`;
 
       // -- a refused connection stores the short hash and keeps the import going too.
       process.env.ALATE_TEST_GITHUB_API_BASE = 'http://127.0.0.1:1';
       const dbK = mkDb10('alat10-dk1.db');
       const stK = await dash.importSource(dash.loadState(dbK), 'own/data@main', 'repo', null, dbK);
-      assert.equal(stK.source.describe, ownSha.slice(0, 7), 'an unreachable API falls back to the short hash');
-      process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${describePort}`;
+      assert.equal(stK.source.commitLabel, ownSha.slice(0, 7), 'an unreachable API falls back to the short hash');
+      process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${countPort}`;
 
       // -- the stored key only rides to the host it belongs to.
-      fixtureTags = [];
-      describeRequests.length = 0;
-      dash.setDescribeTokenHost('acme.ghe.com');
+      fixtureCommits = () => ({ link: '', items: [{ sha: ownSha }] });
+      countRequests.length = 0;
+      dash.setCountTokenHost('acme.ghe.com');
       const dbL = mkDb10('alat10-dl1.db');
       await dash.importSource(dash.loadState(dbL), 'own/data@main', 'repo', 'tok-desc', dbL);
-      assert.equal(describeRequests[0].authorization, undefined, 'a token recorded for another host never rides to github.com');
-      dash.setDescribeTokenHost('github.com');
-      describeRequests.length = 0;
+      assert.equal(countRequests[0].authorization, undefined, 'a token recorded for another host never rides to github.com');
+      dash.setCountTokenHost('github.com');
+      countRequests.length = 0;
       const dbM = mkDb10('alat10-dm1.db');
       await dash.importSource(dash.loadState(dbM), 'own/data@main', 'repo', 'tok-desc', dbM);
-      assert.equal(describeRequests[0].authorization, 'Bearer tok-desc', 'a token recorded for this host rides');
-      dash.setDescribeTokenHost(null);
-      describeRequests.length = 0;
+      assert.equal(countRequests[0].authorization, 'Bearer tok-desc', 'a token recorded for this host rides');
+      dash.setCountTokenHost(null);
+      countRequests.length = 0;
+
+      // -- a stored state without a label keeps no field: the header falls back to the
+      // short hash alone (the render fallback is `src.commitLabel || short` in app.js).
+      const dbLegacy = mkDb10('alat10-legacy.db');
+      const legacySource = { kind: 'repo', spec: 'own/data', name: 'own/data', host: 'github.com', ref: 'main', importedSha: ownSha, importedAt: new Date().toISOString() };
+      dbLegacy.prepare('INSERT INTO state (id, value) VALUES (1, ?)').run(JSON.stringify({ source: legacySource, inventory: null, previous: null, changes: null }));
+      const stLegacy = dash.loadState(dbLegacy);
+      assert.equal(stLegacy.source.importedSha, ownSha);
+      assert.equal('commitLabel' in stLegacy.source, false, 'a stored state without a count keeps no label field');
 
       // -- remoteAhead: the compare endpoint's ahead_by with the same gating; failures are null.
       const otherSha = 'd'.repeat(40);
-      fixtureCompare = () => ({ status: 'ahead', ahead_by: 7 });
+      fixtureAhead = () => ({ status: 'ahead', ahead_by: 7 });
       assert.equal(await dash.remoteAhead('own/data', ownSha, otherSha, 'tok-desc', 'github.com'), 7);
-      assert.deepEqual(describeRequests.map(r => r.url), [`/repos/own/data/compare/${ownSha}...${otherSha}`]);
-      assert.equal(describeRequests[0].authorization, 'Bearer tok-desc');
-      describeRequests.length = 0;
+      assert.deepEqual(countRequests.map(r => r.url), [`/repos/own/data/compare/${ownSha}...${otherSha}`]);
+      assert.equal(countRequests[0].authorization, 'Bearer tok-desc');
+      countRequests.length = 0;
       assert.equal(await dash.remoteAhead('own/data', ownSha, otherSha, 'tok-desc', 'github.com', 'acme.ghe.com'), 7);
-      assert.equal(describeRequests[0].authorization, undefined, 'a token recorded for another host never rides the behind lookup');
-      describeRequests.length = 0;
+      assert.equal(countRequests[0].authorization, undefined, 'a token recorded for another host never rides the behind lookup');
+      countRequests.length = 0;
       assert.equal(await dash.remoteAhead('own/data', ownSha, ownSha, 'tok-desc', 'github.com'), null, 'identical shas send no request');
-      assert.deepEqual(describeRequests, []);
+      assert.deepEqual(countRequests, []);
       process.env.ALATE_TEST_GITHUB_API_BASE = 'http://127.0.0.1:1';
       assert.equal(await dash.remoteAhead('own/data', ownSha, otherSha, 'tok-desc', 'github.com'), null, 'a failed compare lookup is null');
-      process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${describePort}`;
+      process.env.ALATE_TEST_GITHUB_API_BASE = `http://127.0.0.1:${countPort}`;
     } finally {
       if (savedApiBase10 === undefined) delete process.env.ALATE_TEST_GITHUB_API_BASE; else process.env.ALATE_TEST_GITHUB_API_BASE = savedApiBase10;
       if (savedTokenHost10 === undefined) delete process.env.ALATE_GITHUB_HOST; else process.env.ALATE_GITHUB_HOST = savedTokenHost10;
-      dash.setDescribeTokenHost(null);
-      describeFixture.close();
+      dash.setCountTokenHost(null);
+      countFixture.close();
     }
 
     // -- repo-source edit: clone, write, commit, push, re-import; temp dirs never leak.
