@@ -139,7 +139,19 @@ the reviews stay valid: compute the new key of each reviewed finding on the same
 - A judged report with `runtime_limit` ledger entries is a degraded scan (a wall-clock
   budget busted under concurrent load; the AE1 finding set varies with it). The gate
   re-scans such skills one at a time after the concurrent pass and adopts the re-run
-  verdict; only the post-re-run verdict can record a pass.
+  verdict. A re-run that is still runtime-limit-limited runs one pass 3 on a fresh
+  staged copy with raised budgets (`SKILLSPECTOR_OSV_TIMEOUT=120`,
+  `SKILLSPECTOR_MAX_STATIC_ANALYSIS_SECONDS_PER_ARTIFACT=1200`,
+  `SKILLSPECTOR_MAX_WORKFLOW_SECONDS=2400`; 4x the pinned v2.13.0 defaults, bounded so a
+  hung scan cannot stall the provision; at most 3 scans per skill per install). A
+  pass-3 verdict adopts through the same `applyVerdict` path, and a clean pass caches as
+  today. A pass-3 report that still carries `runtime_limit` entries makes the skill
+  `inconclusive`: no verdict is provable under this load, so the skill keeps its
+  previous install status, never installs, never caches, and rescans on the next run. A
+  pass-3 `scan error` still rejects through `applyVerdict`. Only the post-re-run
+  verdict can record a pass. Decision and risks:
+  `specs/scan-budget-and-ae1-determinism.md` (Finding 2, decision 2026-11-22, card
+  ALAT-203 P2).
 - Other partial-coverage reasons (`static_parse_limit`, `reference_missing`) occur in 64
   of the 85 skills of agent-data and drop no finding, so they do not reject. On
   2026-11-15 no skill of agent-data or of `shipped/` had an `output_limit` exception.

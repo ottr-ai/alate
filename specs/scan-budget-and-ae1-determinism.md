@@ -93,30 +93,56 @@ fix content-side.
 ## Finding 2: load-dependent AE1 verdicts — decision
 
 A judged scan whose ledger holds `reason_code: "runtime_limit"` entries is a degraded
-scan: its verdict depends on machine load, not on the skill bytes. Decision: `runScan`
-re-runs every degraded skill sequentially after the concurrent pass and adopts the re-run
-verdict:
+scan: its verdict depends on machine load, not on the skill bytes.
 
-- The first pass runs the pool as today. A scan that resolves judged with runtime_limit
-  entries records no verdict; `runScan` logs the count.
-- After the concurrent pass, the degraded skills re-scan one at a time (fresh staged copy
-  each, same arguments, bounded to one re-run per skill per install). A clean re-scan
-  adopts its verdict through the same path (findings, unreviewed acceptances, pass, scan
-  error). A re-run that is still runtime-limit-limited rejects with rule `scan error`
-  (never cached): a sequential retry does not remove OSV latency from the wall-clock
-  budget, so the verdict is still load-dependent and unprovable. A degraded scan can never
-  produce a pass, and the cache only ever holds verdicts whose sequential scans fit the
-  scanner's budgets.
+Decision 2026-11-22 (card ALAT-203 P2). This supersedes the earlier clause "a
+still-degraded sequential re-scan rejects with rule `scan error`". `runScan` re-runs every
+degraded skill sequentially after the concurrent pass; if that re-scan is still degraded,
+it runs one pass 3 with raised scanner budgets, and only a still-unprovable verdict then
+marks the skill `inconclusive`:
+
+- Pass 1 runs the pool as today. A scan that resolves judged with runtime_limit entries
+  records no verdict; `runScan` logs the count.
+- Pass 2 re-scans the degraded skills one at a time (fresh staged copy each, same
+  arguments). A clean re-scan adopts its verdict through the same path (findings,
+  unreviewed acceptances, pass, scan error). A degraded scan can never produce a pass,
+  and the cache only ever holds verdicts whose sequential scans fit the scanner's budgets.
+- Pass 3 runs only when pass 2 is still degraded: one more sequential scan on a fresh
+  staged copy, with extra child env `SKILLSPECTOR_OSV_TIMEOUT=120`,
+  `SKILLSPECTOR_MAX_STATIC_ANALYSIS_SECONDS_PER_ARTIFACT=1200`, and
+  `SKILLSPECTOR_MAX_WORKFLOW_SECONDS=2400`. These are 4x the pinned v2.13.0 defaults
+  (30/300/600 s; the names are documented in the scanner's
+  docs/ANALYSIS_RESOURCE_BOUNDS.md and the scanner reads them at module import per
+  process, so per-spawn env works). The budgets stay bounded, so a hung scan cannot stall
+  the provision. At most 3 scans per skill per install.
+- A pass-3 verdict with no runtime_limit entries adopts through the same `applyVerdict`
+  path (findings, unreviewed acceptances, incomplete dependency coverage, pass, scan
+  error) and a clean pass caches as today. A pass-3 report that still carries
+  `runtime_limit` entries makes the skill `inconclusive`: no verdict is provable under
+  this load, so the skill never installs and never caches, and the previous install
+  status stays. A pass-3 `scan error` still rejects through `applyVerdict`. A pass-3
+  staging failure rejects that one skill as `unreadable skill files`, never the whole run
+  (the worker's policy).
+- `inconclusive` keeps the previous install status:
+  - In-place mode the skill gets the scan-rejected retention treatment (ALAT-178): it
+    enters the retention set, its record-matching installed copy stays whole (including
+    recorded files the snapshot no longer ships), with note text `scan inconclusive <item
+    key>, kept the previously installed version`. A skill that never installed stays out.
+  - Layer mode: for a layer-owned skill dir with a live-layer counterpart at the same rel
+    path, alate removes the fresh layer's dir and copies the live layer's bytes in its
+    place, and restores the record rels under the skill's prefix from the copied bytes.
+    With no live counterpart (a new skill), alate removes the dir and strips its record
+    rels like a rejected skill. A shelf snapshot dir is report-only.
+- Effect: the cache never holds a degraded verdict, and machine load can no longer reject
+  a skill. For bytes whose sequential scans fit the budgets, two installs produce the
+  same verdicts regardless of pool load; extra AE1 instances that only exist under pool
+  load can no longer reject a skill, and a skill that busts the budgets even at the
+  raised budgets stays `inconclusive`, keeps its previous install, and rescans on the
+  next run.
 - Residual variance stays fail-closed: external OSV latency can still flip a borderline
-  skill between a rejection (this install) and a pass (a later cold-cache install, when
-  the sequential scan fits the budget). A rejection costs one rescan on the next install;
-  no degraded verdict is ever hidden in the cache. Staging a re-run copy keeps the
-  worker's policy: a staging failure rejects that one skill as `unreadable skill files`,
-  never the whole run.
-- Effect: the cache never holds a degraded verdict. For bytes whose sequential scans fit
-  the scanner's budgets, two installs produce the same verdicts regardless of pool load;
-  extra AE1 instances that only exist under pool load can no longer reject a skill, and a
-  skill that busts the budgets even sequentially rejects every cold-cache install.
+  skill between `inconclusive` (this install, previous status kept) and a verdict (a
+  later cold-cache install, when the scans fit the budgets). No degraded verdict is ever
+  hidden in the cache.
 
 `SCAN_CACHE_FORMAT` bumps `skill-pass-fmt-3` → `skill-pass-fmt-4`: a pass an older alate
 recorded may come from a load-degraded scan, so every cached verdict misses once and
@@ -146,14 +172,15 @@ rescans under the new semantics.
   rate-limited this machine and rejected as `incomplete dependency coverage` the next
   minute. The re-run mechanism cannot see this state; fixing it needs a scanner-side
   ledger entry for the fallback (pin-bump path, out of scope here).
-- A skill whose dependency analysis busts the 30 s budget even sequentially pays one extra
-  scan per cold-cache install. Bounded and deterministic; the deploy log names it.
+- A skill whose dependency analysis busts the 30 s budget even at the raised budgets ends
+  `inconclusive` and pays up to three scans per cold-cache install. Bounded and
+  deterministic; the deploy log names it.
 
 ## Contract changes in other specs
 
 - `specs/skillspector-reviewed-acceptances.md`, Scan contract: the blanket
   `output_limit → scan error` clause splits into the two classes above, and gains the
-  runtime_limit re-run clause.
+  runtime_limit pass-3 clause with the `inconclusive` status.
 - `specs/provision-item-by-item.md`, install-user gate order step 6: gains the
   `incomplete dependency coverage` rejection class; it is a scan-gate rejection, so the
   scan-rejected retention rule (ALAT-178: the installed record-matching copy stays whole)
@@ -172,10 +199,22 @@ rescans under the new semantics.
 - A first-pass report with a `runtime_limit` entry and an extra unreviewed HIGH finding,
   followed by a clean re-scan, installs the skill, scans it exactly twice, and the re-scan
   starts after the first scan ends (test fails before the fix: today the skill rejects).
-- A re-scan that is still runtime-limit-limited rejects as `scan error` with the
-  unresolved-degradation message, never runs a third scan, never caches, and the same
-  holds for a clean-but-still-degraded re-scan (the shape that must never fall through to
-  a cached pass).
+- A pass-2 re-scan that is still runtime-limit-limited runs pass 3 with the raised env
+  (`SKILLSPECTOR_OSV_TIMEOUT=120`,
+  `SKILLSPECTOR_MAX_STATIC_ANALYSIS_SECONDS_PER_ARTIFACT=1200`,
+  `SKILLSPECTOR_MAX_WORKFLOW_SECONDS=2400`) on a fresh staged copy, so the skill is
+  scanned exactly three times at most (test fails before the fix: today pass 2 rejects as
+  `scan error` and no third scan runs).
+- A pass-3 report that still carries `runtime_limit` entries marks the skill
+  `inconclusive`: the run exits 1, the failed-items block names the skill, the results
+  file holds status `inconclusive` with `rule: null`, `at: null`, and the report, the
+  cache holds nothing, and a clean pass-3 verdict still adopts and caches.
+- Survival of an installed skill across an exhausted run: an installed, record-matching
+  skill that ends `inconclusive` keeps its whole installed copy, its record, and the
+  note `scan inconclusive <item key>, kept the previously installed version`; a new
+  skill with no previous install is left out (no copy, no record rels). In layer mode
+  the fresh layer holds the live layer's previous bytes for the skill, or drops a skill
+  with no previous install.
 - A static `output_limit` entry with no `path` rejects with rule `incomplete dependency
   coverage` and no position: the flag rejects, not the presence of a diagnostic path.
 - A retry whose staged copy cannot be created rejects that skill as `unreadable skill

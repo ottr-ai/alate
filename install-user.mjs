@@ -50,7 +50,7 @@ import { isBundlesMode, parseManifestProjects, renderToolsJson, resolveBundlePla
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
-/** @typedef {{ item: string, status: 'installed' | 'unchanged' | 'added' | 'updated' | 'rejected' | 'no-origin', rule: string | null, at: string | null, report?: string }} ProvisionItem */
+/** @typedef {{ item: string, status: 'installed' | 'unchanged' | 'added' | 'updated' | 'rejected' | 'no-origin' | 'inconclusive', rule: string | null, at: string | null, report?: string }} ProvisionItem */
 /** @typedef {{ rule?: string, at?: string, report: string }} ScanRejection */
 /** @typedef {{ skill: string, rule: string, file: string, key: string, reason: string }} ReviewEntry */
 /** @typedef {{ id?: unknown, severity?: unknown, pattern?: unknown, category?: unknown, explanation?: unknown, match_fingerprint?: unknown, location?: { file?: unknown, start_line?: unknown } | null }} ScanFinding */
@@ -206,6 +206,11 @@ const childEnv = extra => {
 // time too (specs/skillspector-scanner-trust.md, contract 7). Never passed through from the
 // parent.
 const scannerEnv = () => ({ ...childEnv(), PYTHONNOUSERSITE: '1' });
+
+// The pass-3 budgets (ALAT-203): 4x the pinned v2.13.0 defaults (30/300/600). SkillSpector
+// reads these env names at module import per process (docs/ANALYSIS_RESOURCE_BOUNDS.md), so
+// a per-spawn env raises the budgets for that one scan only.
+const SCAN_RETRY_ENV = { SKILLSPECTOR_OSV_TIMEOUT: '120', SKILLSPECTOR_MAX_STATIC_ANALYSIS_SECONDS_PER_ARTIFACT: '1200', SKILLSPECTOR_MAX_WORKFLOW_SECONDS: '2400' };
 
 // True when the path (realpath when it exists, else itself, resolved) lies inside the
 // canonical target home install-user writes into. A scanner inside that home is
@@ -569,11 +574,11 @@ const parseScanReport = stdout => {
 // under the snapshot folder's name, so a deploy log's tail still names the skill.
 /**
  * @param {string} scanner @param {string} dir @param {number} total @param {string} display
- * @param {string} skill @param {ReviewEntry[]} entries
+ * @param {string} skill @param {ReviewEntry[]} entries @param {Record<string, string>} [extraEnv]
  * @returns {Promise<{ issues: ScanFinding[], unreviewed: ScanFinding[], report: string, degraded: boolean, lookupLimited: boolean, lookupPaths: string[] } | { scanError: string, report: string }>}
  */
-const scanOne = (scanner, dir, total, display, skill, entries) => new Promise((resolve, reject) => {
-  const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: scannerEnv() });
+const scanOne = (scanner, dir, total, display, skill, entries, extraEnv = {}) => new Promise((resolve, reject) => {
+  const child = spawn(scanner, ['scan', dir, ...SCAN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...scannerEnv(), ...extraEnv } });
   /** @type {Buffer[]} */
   const out = [];
   /** @type {Buffer[]} */
@@ -631,7 +636,7 @@ const scanOne = (scanner, dir, total, display, skill, entries) => new Promise((r
  * @param {string[]} skillDirs
  * @param {(dir: string) => string} keyOf the skill item key of a dir, as the provision results spell it
  * @param {Map<string, ReviewEntry[]>} reviews review entries by skill item key
- * @returns {Promise<{ rejected: Map<string, ScanRejection> }>}
+ * @returns {Promise<{ rejected: Map<string, ScanRejection>, inconclusive: Map<string, string> }>}
  */
 const runScan = async (skillDirs, keyOf, reviews) => {
   // Trust first, probe second (specs/skillspector-scanner-trust.md): no candidate runs
@@ -708,6 +713,11 @@ const runScan = async (skillDirs, keyOf, reviews) => {
   // every other skill.
   /** @type {Map<string, ScanRejection>} */
   const rejected = new Map();
+  // Skills whose third scan still hit the runtime limit: the verdict is unprovable under
+  // this load, so the skill is never cached and never rejected (ALAT-203). The value is
+  // the report text the results file carries for the item.
+  /** @type {Map<string, string>} */
+  const inconclusive = new Map();
   /** @type {Map<string, string>} */
   const keys = new Map();
   for (const dir of skillDirs) {
@@ -725,7 +735,7 @@ const runScan = async (skillDirs, keyOf, reviews) => {
   const scanList = skillDirs.filter(dir => keys.has(dir));
   const pending = scanList.filter(dir => passes[/** @type {string} */ (keys.get(dir))] !== true);
   console.log(`Scanning ${pending.length} of ${scanList.length} skill snapshot(s) (${scanList.length - pending.length} cached) with SkillSpector ${SKILLSPECTOR_REF} at ${scanner} (--no-llm, static only, shipped baselines applied up to MEDIUM, above it only with a review entry)...`);
-  if (!pending.length) return { rejected };
+  if (!pending.length) return { rejected, inconclusive };
   // Findings and unreviewed baseline acceptances reject their own skill only; so does any other
   // scan failure (another exit, a signal kill, a report that does not parse): the skill is left
   // out with rule `scan error` and the scan continues. Lookup-limited scans (output_limit with
@@ -813,13 +823,16 @@ const runScan = async (skillDirs, keyOf, reviews) => {
     // The re-run scans one degraded skill at a time on a fresh staged copy per call (basename
     // survives, so per-skill report stubs keep working): it gives the verdict one chance to
     // land under the scanner's budgets without the pool's load. A re-run that is still
-    // runtime-limit-limited rejects as `scan error` and is never cached: a degraded scan can
-    // never produce a pass, so the cache only ever holds verdicts whose sequential scans fit
-    // the budgets. Residual variance stays fail-closed: external OSV latency can still flip a
-    // borderline skill between a rejection and a pass across installs, and a rejection costs
-    // one rescan on the next cold-cache install. Staging errors keep the worker's policy: one
-    // per-skill `unreadable skill files` rejection, never a whole-run refusal. It never runs a
-    // third scan, so the cost is bounded to one extra scan per skill per install.
+    // runtime-limit-limited gets one last sequential scan of a fresh staged copy with the
+    // budgets raised 4x (SCAN_RETRY_ENV): a verdict there adopts through applyVerdict like
+    // any other, and one that is still runtime-limit-limited marks the skill `inconclusive`
+    // (ALAT-203) — never cached, never rejected — so the skill keeps its previous install
+    // status and the provision report carries the reason. Residual variance stays
+    // fail-closed: external OSV latency can still flip a borderline skill between a
+    // rejection and a pass across installs, and an inconclusive skill costs three rescans
+    // on the next cold-cache install. A scan error still rejects; staging errors keep the
+    // worker's policy: one per-skill `unreadable skill files` rejection, never a whole-run
+    // refusal. The cost is bounded to three scans per skill per install.
     if (degradedDirs.length > 0) {
       console.log(`${degradedDirs.length} scan(s) hit the scanner's runtime limit under concurrent load; re-scanning them one at a time for a stable verdict...`);
       for (const dir of degradedDirs) {
@@ -838,10 +851,28 @@ const runScan = async (skillDirs, keyOf, reviews) => {
           if (!('scanError' in res) && res.degraded === true) {
             // The sequential re-run hit the wall-clock budget again: the verdict is still
             // load-dependent, so it is unprovable and must not pass or enter the cache.
-            const why = 'the scan hit the scanner\'s runtime limit again when re-scanned one at a time, so its verdict stays load-dependent';
-            rejected.set(dir, { rule: 'scan error', report: `SkillSpector scan of ${dir} failed (${why}).\n${res.report}` });
-            // Stdout too: the deploy log's tail must name the rejected skill folder.
-            console.log(`SkillSpector scan of ${dir} failed (${why}). The skill is left out of this install.`);
+            // Pass 3 (ALAT-203): one more sequential scan of a fresh staged copy with the
+            // scanner's budgets raised 4x, the last chance for a stable verdict.
+            let pass3Target;
+            try {
+              pass3Target = scanTargetFor(dir);
+            } catch (err) {
+              // Same policy as the worker's staging catch: a mid-run race rejects the one skill.
+              rejected.set(dir, { rule: 'unreadable skill files', report: `${dir}: ${/** @type {Error} */ (err).message}` });
+              continue;
+            }
+            const pass3 = await scanOne(/** @type {string} */ (scanner), pass3Target, skillDirs.length, dir, skill, reviews.get(skill) ?? [], SCAN_RETRY_ENV);
+            if (!('scanError' in pass3) && pass3.degraded === true) {
+              // Even the raised budgets hit the runtime limit: the verdict stays
+              // unprovable under this load, so the skill is inconclusive — never cached,
+              // never rejected — and keeps its previous install status.
+              const why = 'the scan hit the scanner\'s runtime limit again even at the raised budgets (OSV 120 s, static 1200 s per artifact, workflow 2400 s), so its verdict stays unprovable under this load';
+              inconclusive.set(dir, `SkillSpector scan of ${dir} stayed inconclusive: ${why}.\n${pass3.report}`);
+              // Stdout too: the deploy log's tail must name the inconclusive skill folder.
+              console.log(`SkillSpector scan of ${dir} stayed inconclusive: ${why}. The skill keeps its previous install status.`);
+            } else {
+              applyVerdict(dir, pass3);
+            }
           } else {
             applyVerdict(dir, res);
           }
@@ -858,7 +889,7 @@ const runScan = async (skillDirs, keyOf, reviews) => {
   } finally {
     if (stageRoot !== null) rmSync(stageRoot, { recursive: true, force: true });
   }
-  return { rejected };
+  return { rejected, inconclusive };
 };
 
 // Resolves one tools.json source's per-OS data for this platform (specs/canonical-form.md):
@@ -1927,10 +1958,25 @@ try {
     // keeps today's deletion rule, so the retention paths below must not see it.
     /** @type {Set<string>} */
     const scanRejected = new Set();
+    // The item keys whose scan ended inconclusive: their retention note spells `scan
+    // inconclusive` instead of `scan rejected` (ALAT-203).
+    /** @type {Set<string>} */
+    const inconclusiveKeys = new Set();
     for (const [dir, info] of scan.rejected) {
       addScanRejection(itemKey(dir), info);
       rejectedSkills.add(dir);
       scanRejected.add(dir);
+    }
+    // An inconclusive scan keeps the skill's previous install status (ALAT-203): the
+    // retention below treats it exactly like a scan rejection — its rels strip from
+    // plan/current/conflicts and its record-matching installed copy stays whole — but the
+    // item reports `inconclusive` with rule and position null, never a rejection. A skill
+    // nothing installed yet has no copy to keep, so the retention paths leave it out.
+    for (const [dir, report] of scan.inconclusive) {
+      failItem(itemKey(dir), 'inconclusive', null, null, report);
+      rejectedSkills.add(dir);
+      scanRejected.add(dir);
+      inconclusiveKeys.add(itemKey(dir));
     }
     // Drop every rel inside a rejected skill from the plan, the manifest, and the conflicts.
     // A rejection strips only the entries its own dir contributed (relSource): a rejected
@@ -2022,7 +2068,7 @@ try {
       current[rel] = fp;
       keptKeys.add(owner);
     }
-    for (const key of keptKeys) notes.push(`scan rejected ${key}, kept the previously installed version`);
+    for (const key of keptKeys) notes.push(`${inconclusiveKeys.has(key) ? 'scan inconclusive' : 'scan rejected'} ${key}, kept the previously installed version`);
     conflicts = conflicts.filter(dest => {
       const rel = relative(home, dest).split(sep).join('/');
       return !relRejected(rel.startsWith('.') ? rel.slice(1) : rel);
@@ -2218,6 +2264,57 @@ try {
             addScanRejection(item, info);
           }
         }
+        // An inconclusive scan keeps the skill's previous install status (ALAT-203). A
+        // layer-owned dir whose live-layer counterpart exists (same rel path under
+        // readRoot) swaps the unproven fresh bytes back for the live dir's bytes: a plain
+        // byte copy with clean modes, every read through the machine-read guard
+        // (readMachineFile runs checkDestination first), and the record rels under the
+        // skill's prefix are restored from the copied bytes — the rels the copied tree
+        // lacks drop out. No live counterpart (the skill is new): the dir drops from the
+        // fresh layer exactly like a rejected skill. A shelf snapshot dir is report-only.
+        for (const [dir, report] of scan.inconclusive) {
+          const item = itemKey(dir);
+          if (!failed.has(item)) {
+            failed.add(item);
+            failItem(item, 'inconclusive', null, null, report);
+          }
+          if (!layerOwned.has(dir)) continue;
+          assertLayer();
+          const layerRel = relative(/** @type {string} */ (newLayerDir), dir).split(sep).join('/');
+          const prefix = layerRel.startsWith('.') ? layerRel.slice(1) : layerRel;
+          makeDirInside(layerHome, dir);
+          rmSync(dir, { recursive: true, force: true });
+          for (const rel of Object.keys(current)) {
+            if (rel === prefix || rel.startsWith(`${prefix}/`)) delete current[rel];
+          }
+          const liveDir = readRoot === /** @type {string} */ (newLayerDir) ? null : join(readRoot, `.${prefix}`);
+          if (liveDir !== null && existsSync(liveDir)) {
+            /** @type {[string, Buffer][]} */
+            const copied = [];
+            /** @param {string} src @param {string} dest @param {string} sub @returns {void} */
+            const copyLive = (src, dest, sub) => {
+              mkdirSync(dest, { recursive: true });
+              for (const entry of readdirSync(src, { withFileTypes: true })) {
+                const child = join(src, entry.name);
+                const childSub = sub ? `${sub}/${entry.name}` : entry.name;
+                if (entry.isDirectory()) copyLive(child, join(dest, entry.name), childSub);
+                else {
+                  const bytes = readMachineFile(readRoot, child);
+                  // A null read means the live file vanished mid-run: the previous
+                  // install status cannot be proven, so refuse instead of half-restoring.
+                  if (bytes === null) throw new Error(`${child} vanished; the inconclusive skill's previous install status cannot be restored, refusing the run`);
+                  writeFileSync(join(dest, entry.name), bytes, { mode: 0o644 });
+                  copied.push([childSub, bytes]);
+                }
+              }
+            };
+            copyLive(liveDir, dir, '');
+            for (const [fileRel, bytes] of copied) {
+              const recordRel = `${prefix}/${fileRel}`;
+              current[recordRel] = /** @type {string} */ (machineFingerprint(recordRel, bytes));
+            }
+          }
+        }
       }
     }
     // The record the snapshot dropped is written as gone: if the path returns, an untouched
@@ -2385,10 +2482,16 @@ try {
     if (pluginsStatus) statuses.set('user/omp/plugins', pluginsStatus);
     for (const [key, status] of statuses) items.push({ item: key, status, rule: null, at: null });
     items.sort((a, b) => (a.item < b.item ? -1 : a.item > b.item ? 1 : 0));
-    const failed = items.filter(i => i.status === 'rejected' || i.status === 'no-origin');
+    const failed = items.filter(i => i.status === 'rejected' || i.status === 'no-origin' || i.status === 'inconclusive');
     if (failed.length) {
       console.log('Failed items:');
       for (const f of failed) {
+        // An inconclusive item carries no rule; the why text rides as the first line of its
+        // report, after the boilerplate prefix, and the full report stays in the results file.
+        if (f.status === 'inconclusive') {
+          console.log(`  ${f.item} — inconclusive: ${(f.report ?? '').split('\n')[0].replace(/^SkillSpector scan of .*? stayed inconclusive: /, '').replace(/\.$/, '')}`);
+          continue;
+        }
         console.log(`  ${f.item} — ${f.status === 'no-origin' ? 'no origin' : `rejected: ${f.rule}${f.at ? ` at ${f.at}` : ''}`}`);
         // Rejected skills already printed their full scan report block above; only the short
         // origin hints (for example the pinned-Python remediation) ride on the status line.

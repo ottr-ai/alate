@@ -46,22 +46,37 @@ Every item gets exactly one result:
   `rejected`: left out, stale record-matching copy deleted. An uncovered MCP server is
   reported but does not exclude the `mcp.json` file itself, so one uncovered server
   never disconnects the other servers on the machine.
+- `inconclusive` — the scan gate could not prove a verdict: the scan hit the scanner's
+  runtime limit again even at the raised pass-3 budgets (OSV 120 s, static 1200 s per
+  artifact, workflow 2400 s), so the verdict stays unprovable under this load
+  (`specs/scan-budget-and-ae1-determinism.md`, Finding 2). The item keeps its previous
+  install status, it never installs and never caches, and the next run rescans it.
+  In-place mode: the item gets the scan-rejected retention treatment (ALAT-178) with the
+  note `scan inconclusive <item key>, kept the previously installed version`. A skill
+  that never installed is left out. Layer mode: the fresh layer carries the live layer's
+  previous bytes for the skill, or drops a skill with no previous install.
 
 `rejected` carries the first finding as `rule` and `at`, plus the full report text
 (scan reports capped at 4000 characters). A scan gate error carries
 `rule: "scan error"` and no position; its report starts with the failure line and
-carries the scanner output.
+carries the scanner output. `inconclusive` carries `rule: null` and `at: null`; its
+report starts with the reason line and carries the last scan report.
 
 ## Exit codes and output
 
 - Exit `0`: every item installed or unchanged.
-- Exit `1`: any item failed (`rejected`, `no origin`) or the run was refused.
+- Exit `1`: any item failed (`rejected`, `no origin`, `inconclusive`) or the run was
+  refused.
 - The failed items are printed to stdout as one block at the end, so the deploy-log
   tail names every failure:
   ```
   Failed items:
     user/omp/agent/skills/bad — rejected: SC2 at SKILL.md:7
     user/agents/skills/orphan — no origin
+    user/omp/agent/skills/slow — inconclusive: the scan hit the scanner's runtime
+    limit again even at the raised budgets (OSV 120 s, static 1200 s per artifact,
+    workflow 2400 s), so its verdict stays unprovable under this load. The skill
+    keeps its previous install status.
   ```
 
 ## Machine-readable results file
@@ -78,12 +93,14 @@ results and fails closed.
   "items": [
     { "item": "user/omp/agent/skills/demo", "status": "installed", "rule": null, "at": null },
     { "item": "user/omp/agent/skills/bad", "status": "rejected", "rule": "SC2", "at": "SKILL.md:7", "report": "..." },
-    { "item": "user/agents/skills/orphan", "status": "no-origin", "rule": null, "at": null }
+    { "item": "user/agents/skills/orphan", "status": "no-origin", "rule": null, "at": null },
+    { "item": "user/omp/agent/skills/slow", "status": "inconclusive", "rule": null, "at": null, "report": "..." }
   ]
 }
 ```
 
-- `status`: `installed` | `unchanged` | `added` | `updated` | `rejected` | `no-origin`.
+- `status`: `installed` | `unchanged` | `added` | `updated` | `rejected` | `no-origin` |
+  `inconclusive`.
   `added` and `updated` replace `installed` in layer mode, where every item is compared
   with the live layer instead of the empty new layer: `added` when the live layer lacks
   the file, `updated` when its bytes differ, `unchanged` when they are equal. `sync.mjs`
@@ -173,8 +190,15 @@ failure; `provisionedSha` still moves only on `ok`.
    rule `incomplete dependency coverage` at the entry's path (findings complete,
    advisory coverage missing; `specs/scan-budget-and-ae1-determinism.md`), and a
    judged report with `runtime_limit` entries re-scans sequentially and adopts a clean
-   re-scan verdict, while a still runtime-limit-limited re-scan rejects with rule
-   `scan error`; excluded skills are dropped from the plan, the manifest, and the
+   re-scan verdict; a still runtime-limit-limited re-scan runs one pass 3 with raised
+   budgets (`SKILLSPECTOR_OSV_TIMEOUT=120`,
+   `SKILLSPECTOR_MAX_STATIC_ANALYSIS_SECONDS_PER_ARTIFACT=1200`,
+   `SKILLSPECTOR_MAX_WORKFLOW_SECONDS=2400`), and a pass-3 verdict adopts through the
+   same path, while a pass-3 report that still carries `runtime_limit` entries makes the
+   skill `inconclusive` (previous install status kept, never cached, rescanned next run;
+   in-place retention as above, layer mode restores the live layer's bytes or drops a
+   skill with no previous install; `specs/scan-budget-and-ae1-determinism.md`); excluded
+   skills are dropped from the plan, the manifest, and the
    conflicts before any write, except that every
    record-matching file of a scan-rejected skill keeps its record entry and stays
    untouched with the warning note from the per-item result above — including a
@@ -185,7 +209,9 @@ failure; `provisionedSha` still moves only on `ok`.
    layer keeps running;
 7. writes, deletions, manifest; layer mode scans the fresh layer before the manifest
    is written, removes rejected skill dirs from the layer, and drops them from the
-   manifest;
+   manifest. Known cosmetic limit: in layer mode the deleted-count summary line may
+   overcount by the files of a live-layer copy that a reverted `inconclusive` skill
+   restored — the copy is whole on disk, only the counted deletions are wrong;
 8. the nested `sync.mjs` in layer mode gets `ALATE_PROVISION_RESULTS` pointing at
    `<results>.rules.json`; a fatal nested refusal aborts the layer; per-item nested
    failures merge into this run's items and keep the run failed.
@@ -195,8 +221,9 @@ failure; `provisionedSha` still moves only on `ok`.
 - `dashState.provision` = `{ at, sha, ok, items, failures }`, persisted with the dashboard
   state, served by `GET /api/state`. `sha` is the imported snapshot sha, so a stale
   result set is never shown for a newer snapshot. Items are merged by key from both
-  scripts; the worse status wins (`rejected` > `no-origin` > `installed` = `added` =
-  `updated` > `unchanged`; `added`/`updated` are the layer-mode labels of `installed`).
+  scripts; the worse status wins (`rejected` > `no-origin` > `inconclusive` >
+  `installed` = `added` = `updated` > `unchanged`; `added`/`updated` are the layer-mode
+  labels of `installed`).
 - `failures` lists the scripts that exited non-zero or closed with a null code, in
   run order, with their captured (redacted, truncated) output.
 - The dashboard shows each item's status next to it in the Rules, Skills, and User
@@ -228,6 +255,20 @@ e. A scan error (exit 2, for example an unparseable `.skillspector-baseline.yaml
    `fatal: false` (so the server's `ok` stays false), and the run exits 1. The
    scan-error skill is rescanned on the next run. A scanner that cannot run at all
    (spawn error, missing binary) still refuses the whole run.
+e2. A skill whose sequential re-scan is still runtime-limit-limited runs pass 3 with
+   the raised budgets (`SKILLSPECTOR_OSV_TIMEOUT=120`,
+   `SKILLSPECTOR_MAX_STATIC_ANALYSIS_SECONDS_PER_ARTIFACT=1200`,
+   `SKILLSPECTOR_MAX_WORKFLOW_SECONDS=2400`) on a fresh staged copy; a pass-3 report
+   that still carries `runtime_limit` entries makes the skill `inconclusive`: the run
+   exits 1, the failed-items block names the skill with the why text, the results file
+   holds status `inconclusive` with `rule: null`, `at: null`, and the report, the cache
+   holds nothing, and a pass-3 content verdict still adopts as today.
+e3. Survival of an installed skill across an exhausted run: an installed,
+   record-matching skill that ends `inconclusive` keeps its whole installed copy, its
+   record, and the note `scan inconclusive <item key>, kept the previously installed
+   version`; a skill that never installed is left out (no copy, no record rels). In
+   layer mode the fresh layer carries the live layer's previous bytes for the skill, or
+   drops a skill with no previous install.
 f. `upstreams.json` that is not JSON refuses the whole run; a structurally broken
    entry refuses the whole run.
 g. The server pipeline continues past a per-item failure and stops on a killed

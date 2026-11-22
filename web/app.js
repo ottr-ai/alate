@@ -454,6 +454,7 @@ function overviewView() {
     if (!it) return { aside: fallback, alert: false, report: null };
     if (it.status === 'rejected') return { aside: 'rejected: ' + (it.rule || '?') + (it.at ? ' at ' + it.at : ''), alert: true, report: it.report || null };
     if (it.status === 'no-origin') return { aside: 'no origin', alert: true, report: it.report || null };
+    if (it.status === 'inconclusive') return { aside: 'inconclusive', alert: true, report: it.report || null };
     return { aside: fallback ? fallback + ' · ' + it.status : it.status, alert: false, report: null };
   };
   // Same shape as entry(), with the provision status in the aside and the report in a
@@ -497,7 +498,7 @@ function overviewView() {
 
   const sheet = h('article', { class: 'sheet' });
   const spec = src.kind === 'repo' ? src.name + (src.ref ? '@' + src.ref : '') : src.spec;
-  const provMeta = prov ? ' · provisioned ' + relTime(prov.at) + (prov.items.some((i) => i.status === 'rejected' || i.status === 'no-origin') ? ', ' + prov.items.filter((i) => i.status === 'rejected' || i.status === 'no-origin').length + ' failed' : '') : '';
+  const provMeta = prov ? ' · provisioned ' + relTime(prov.at) + (prov.items.some((i) => i.status === 'rejected' || i.status === 'no-origin' || i.status === 'inconclusive') ? ', ' + prov.items.filter((i) => i.status === 'rejected' || i.status === 'no-origin' || i.status === 'inconclusive').length + ' failed' : '') : '';
   sheet.append(h('header', { class: 'sheet-head' },
     h('h1', { text: src.kind === 'repo' ? spec : src.name.split(/[\\/]/).filter(Boolean).pop() || spec }),
     h('p', { class: 'meta', text: (src.kind === 'repo' ? 'GitHub repo' : 'Local path ' + src.name) + (src.importedSha ? ' · commit ' + src.importedSha.slice(0, 7) : '') + ' · imported ' + relTime(src.importedAt) + provMeta }),

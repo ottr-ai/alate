@@ -152,6 +152,35 @@ const writeStub = (exit, version = 'SkillSpector v2.13.0', rejectNames = [], err
   ].join('\n'));
   chmodSync(join(stubDir, 'skillspector'), 0o755);
 };
+// The counting stub's per-skill scan log, and the stub writer: it serves <name>.json on scan
+// 1, <name>.second.json from scan 2, <name>.third.json from scan 3 (falling back to the
+// earlier files), and every start line carries the raised-budget env, so a test proves the
+// pass-3 scan ran with SKILLSPECTOR_OSV_TIMEOUT=120,
+// SKILLSPECTOR_MAX_STATIC_ANALYSIS_SECONDS_PER_ARTIFACT=1200 and
+// SKILLSPECTOR_MAX_WORKFLOW_SECONDS=2400 while scans 1-2 ran with none of them set.
+const budgetCalls = join(stubDir, 'budget-calls.log');
+const writeCountingStub = () => {
+  writeFileSync(join(stubDir, 'skillspector'), [
+    '#!/bin/sh',
+    `if [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi`,
+    `name=$(basename "$2")`,
+    `printf "start %s %s osv=\${SKILLSPECTOR_OSV_TIMEOUT:-unset} static=\${SKILLSPECTOR_MAX_STATIC_ANALYSIS_SECONDS_PER_ARTIFACT:-unset} workflow=\${SKILLSPECTOR_MAX_WORKFLOW_SECONDS:-unset}\\n" "$name" "$(date +%s%N)" >> '${budgetCalls}'`,
+    `cnt=0; [ -f '${reportsDir}/'"$name.count" ] && cnt=$(cat '${reportsDir}/'"$name.count"); cnt=$((cnt+1)); echo "$cnt" > '${reportsDir}/'"$name.count"`,
+    `if [ "$cnt" -ge 3 ] && [ -f '${reportsDir}/'"$name.third.json" ]; then`,
+    `  cat '${reportsDir}/'"$name.third.json"`,
+    `elif [ "$cnt" -ge 2 ] && [ -f '${reportsDir}/'"$name.second.json" ]; then`,
+    `  cat '${reportsDir}/'"$name.second.json"`,
+    `elif [ -f '${reportsDir}/'"$name.json" ]; then`,
+    `  cat '${reportsDir}/'"$name.json"`,
+    'else',
+    `  ${shPrint(CLEAN_REPORT)}`,
+    'fi',
+    `printf 'end %s %s\\n' "$name" "$(date +%s%N)" >> '${budgetCalls}'`,
+    'exit 0',
+    '',
+  ].join('\n'));
+  chmodSync(join(stubDir, 'skillspector'), 0o755);
+};
 // The scan argument list every scan must carry, after `scan <dir>`.
 const SCAN_ARGV_TAIL = '--no-llm --fail-on-findings --use-shipped-baseline --show-suppressed --format json';
 if (scanned) {
@@ -2652,27 +2681,6 @@ exit 0
     // Same-name scans never run concurrently in either pass (one worker per dir; the re-run is
     // sequential), so the plain counter read/increment/write is race-free. Red-before: today
     // the first-pass AE1 finding rejects as `unreviewed baseline acceptance` after 1 scan.
-    const budgetCalls = join(stubDir, 'budget-calls.log');
-    const writeCountingStub = () => {
-      writeFileSync(join(stubDir, 'skillspector'), [
-        '#!/bin/sh',
-        `if [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi`,
-        `name=$(basename "$2")`,
-        `printf 'start %s %s\\n' "$name" "$(date +%s%N)" >> '${budgetCalls}'`,
-        `cnt=0; [ -f '${reportsDir}/'"$name.count" ] && cnt=$(cat '${reportsDir}/'"$name.count"); cnt=$((cnt+1)); echo "$cnt" > '${reportsDir}/'"$name.count"`,
-        `if [ "$cnt" -ge 2 ] && [ -f '${reportsDir}/'"$name.second.json" ]; then`,
-        `  cat '${reportsDir}/'"$name.second.json"`,
-        `elif [ -f '${reportsDir}/'"$name.json" ]; then`,
-        `  cat '${reportsDir}/'"$name.json"`,
-        'else',
-        `  ${shPrint(CLEAN_REPORT)}`,
-        'fi',
-        `printf 'end %s %s\\n' "$name" "$(date +%s%N)" >> '${budgetCalls}'`,
-        'exit 0',
-        '',
-      ].join('\n'));
-      chmodSync(join(stubDir, 'skillspector'), 0o755);
-    };
     const degradedReport = scanReport([], [fixtureFinding('AE1', 'HIGH', 'SKILL.md', 34)], { analysis_completeness: { is_complete: false, ledger_exceptions: [{ outcome: 'partial', phase: 'static', reason_code: 'runtime_limit', message: 'Inspection reached its configured runtime limit.', path: 'requirements.txt', start_line: null, end_line: null, fatal: false }] } });
     const flakyData = join(tmp, 'flaky-data');
     const flakyHome = join(tmp, 'flaky-home');
@@ -2692,38 +2700,120 @@ exit 0
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, new RegExp(`Scanning 0 of ${2 + shippedCount} skill snapshot\\(s\\) \\(${2 + shippedCount} cached\\)`));
 
-    // Fixture 4 (unresolved degradation, red-before against the previous commit): a re-scan
-    // that is still runtime-limit-limited rejects as `scan error` — a degraded verdict can
-    // neither pass nor enter the cache — and never runs a third scan. `flaky2`'s second
-    // report also carries the AE1 finding; `flaky3`'s is clean but still degraded, the exact
-    // shape that used to fall through to a cached pass.
+    // Fixture 4 (pass 3, ALAT-203): a re-scan that is still runtime-limit-limited gets one
+    // last scan of a fresh staged copy with the raised budgets. `flaky2`'s third report is
+    // degraded too, so the skill ends `inconclusive`: never cached, never rejected, and its
+    // start lines prove scans 1-2 ran without the budget env while scan 3 ran with
+    // osv=120 static=1200 workflow=2400. `flaky3`'s third report is clean but still
+    // degraded — the exact shape that used to fall through to a cached pass — so it too
+    // ends inconclusive.
     const flaky2Data = join(tmp, 'flaky2-data');
     const flaky2Home = join(tmp, 'flaky2-home');
+    const flaky2Results = join(tmp, 'results-flaky2.json');
     fixtureRepo(flaky2Data, ['flaky2']);
     stubReport('flaky2', degradedReport);
     stubReport('flaky2.second', degradedReport);
+    stubReport('flaky2.third', degradedReport);
     rmSync(budgetCalls, { force: true });
+    rmSync(flaky2Results, { force: true });
+    r = run(['--data', flaky2Data, '--skip-plugins'], flaky2Home, { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv'), ALATE_PROVISION_RESULTS: flaky2Results });
+    assert.equal(r.status, 1, 'a skill still degraded at the raised budgets is inconclusive: the run fails');
+    assert.ok(r.stdout.includes(`${skillItem('flaky2')} — inconclusive`), r.stdout);
+    assert.ok(!r.stdout.includes(`${skillItem('flaky2')} — rejected: scan error`), `an inconclusive skill is never reported rejected: ${r.stdout}`);
+    assert.ok(r.stdout.includes("stayed inconclusive: the scan hit the scanner's runtime limit again even at the raised budgets (OSV 120 s, static 1200 s per artifact, workflow 2400 s)"), `the stdout line names the raised budgets: ${r.stdout}`);
+    const flaky2Starts = readFileSync(budgetCalls, 'utf8').trim().split('\n').filter(l => l.startsWith('start flaky2 '));
+    assert.equal(flaky2Starts.length, 3, `exactly three scans, never a fourth: ${flaky2Starts.join('\n')}`);
+    assert.ok(flaky2Starts[0].includes('osv=unset static=unset workflow=unset'), `pass 1 runs at the default budgets: ${flaky2Starts[0]}`);
+    assert.ok(flaky2Starts[1].includes('osv=unset static=unset workflow=unset'), `pass 2 runs at the default budgets: ${flaky2Starts[1]}`);
+    assert.ok(flaky2Starts[2].includes('osv=120 static=1200 workflow=2400'), `pass 3 runs with the raised budgets: ${flaky2Starts[2]}`);
+    assert.ok(!existsSync(join(flaky2Home, '.omp/agent/skills/flaky2')), 'the inconclusive skill never lands');
+    const flaky2Res = JSON.parse(readFileSync(flaky2Results, 'utf8'));
+    const flaky2Item = flaky2Res.items.find(i => i.item === skillItem('flaky2'));
+    assert.equal(flaky2Item.status, 'inconclusive');
+    assert.equal(flaky2Item.rule, null);
+    assert.equal(flaky2Item.at, null);
+    assert.match(flaky2Item.report, /^SkillSpector scan of .*stayed inconclusive: the scan hit the scanner's runtime limit again even at the raised budgets/);
     r = run(['--data', flaky2Data, '--skip-plugins'], flaky2Home);
-    assert.equal(r.status, 1, 'a still-degraded re-scan rejects: the verdict stays load-dependent');
-    assert.ok(r.stdout.includes(`${skillItem('flaky2')} — rejected: scan error`), r.stdout);
-    assert.ok(r.stdout.includes("hit the scanner's runtime limit again when re-scanned one at a time"), r.stdout);
-    const flaky2Starts = readFileSync(budgetCalls, 'utf8').trim().split('\n').filter(l => l.startsWith('start flaky2 ')).length;
-    assert.equal(flaky2Starts, 2, `the bounded re-run scans exactly twice, never a third time: ${flaky2Starts}`);
-    r = run(['--data', flaky2Data, '--skip-plugins'], flaky2Home);
-    assert.equal(r.status, 1, 'a scan-error verdict is never cached: the next run rescans');
-    const flaky2StartsAgain = readFileSync(budgetCalls, 'utf8').trim().split('\n').filter(l => l.startsWith('start flaky2 ')).length;
-    assert.equal(flaky2StartsAgain, 4, `the still-degraded skill rescans on the next run: ${flaky2StartsAgain}`);
+    assert.equal(r.status, 1, 'an inconclusive verdict is never cached: the next run rescans');
+    const flaky2StartsAgain = readFileSync(budgetCalls, 'utf8').trim().split('\n').filter(l => l.startsWith('start flaky2 '));
+    assert.equal(flaky2StartsAgain.length, 6, `the inconclusive skill rescans all three passes on the next run: ${flaky2StartsAgain.join('\n')}`);
+    assert.ok(flaky2StartsAgain[5].includes('osv=120 static=1200 workflow=2400'), `the next run raises the budgets on its pass 3 too: ${flaky2StartsAgain[5]}`);
     const cleanButDegraded = scanReport([], [], { analysis_completeness: { is_complete: false, ledger_exceptions: [{ outcome: 'partial', phase: 'static', reason_code: 'runtime_limit', message: 'Inspection reached its configured runtime limit.', path: 'requirements.txt', start_line: null, end_line: null, fatal: false }] } });
     const flaky3Data = join(tmp, 'flaky3-data');
     const flaky3Home = join(tmp, 'flaky3-home');
     fixtureRepo(flaky3Data, ['flaky3']);
     stubReport('flaky3', cleanButDegraded);
     stubReport('flaky3.second', cleanButDegraded);
+    stubReport('flaky3.third', cleanButDegraded);
     rmSync(budgetCalls, { force: true });
     r = run(['--data', flaky3Data, '--skip-plugins'], flaky3Home);
-    assert.equal(r.status, 1, 'a clean but still-degraded re-scan rejects, never passes');
-    assert.ok(r.stdout.includes(`${skillItem('flaky3')} — rejected: scan error`), r.stdout);
-    assert.ok(!existsSync(join(flaky3Home, '.omp/agent/skills/flaky3')), 'the still-degraded skill never lands');
+    assert.equal(r.status, 1, 'a clean verdict at pass 2 still gets pass 3; one degraded there is inconclusive, never a pass');
+    assert.ok(r.stdout.includes(`${skillItem('flaky3')} — inconclusive`), r.stdout);
+    assert.ok(!existsSync(join(flaky3Home, '.omp/agent/skills/flaky3')), 'the inconclusive skill never lands');
+    assert.equal(readFileSync(budgetCalls, 'utf8').trim().split('\n').filter(l => l.startsWith('start flaky3 ')).length, 3, 'flaky3 scans exactly three times');
+
+    // Fixture 4b (pass-3 adoption, ALAT-203): `flaky4` is degraded at the default budgets
+    // but scans clean at the raised ones, so the pass-3 verdict adopts through the same
+    // path as any other: the skill installs, the run exits 0, and the verdict is cached.
+    const flaky4Data = join(tmp, 'flaky4-data');
+    const flaky4Home = join(tmp, 'flaky4-home');
+    fixtureRepo(flaky4Data, ['flaky4']);
+    stubReport('flaky4', degradedReport);
+    stubReport('flaky4.second', degradedReport);
+    stubReport('flaky4.third', CLEAN_REPORT);
+    writeCountingStub();
+    rmSync(budgetCalls, { force: true });
+    r = run(['--data', flaky4Data, '--skip-plugins'], flaky4Home);
+    assert.equal(r.status, 0, `the raised-budget pass-3 verdict installs the skill: ${r.stdout}`);
+    assert.equal(readFileSync(join(flaky4Home, '.omp/agent/skills/flaky4/SKILL.md'), 'utf8'), skillText('flaky4'), 'flaky4 installs byte-exact after the raised-budget scan');
+    const flaky4Starts = readFileSync(budgetCalls, 'utf8').trim().split('\n').filter(l => l.startsWith('start flaky4 '));
+    assert.equal(flaky4Starts.length, 3, `exactly three scans: ${flaky4Starts.join('\n')}`);
+    assert.ok(flaky4Starts[2].includes('osv=120 static=1200 workflow=2400'), `the clean verdict came from the raised-budget pass 3: ${flaky4Starts[2]}`);
+    r = run(['--data', flaky4Data, '--skip-plugins'], flaky4Home);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`Scanning 0 of ${1 + shippedCount} skill snapshot\\(s\\) \\(${1 + shippedCount} cached\\)`), 'the pass-3 verdict is cached');
+
+    // Fixture 5b (pass-3 staging policy, ALAT-203): the stub swaps the snapshot's
+    // requirements.txt for a dangling symlink while serving the second scan, so the pass-3
+    // staging (a fresh staged copy read after pass 2) cannot be created. Pass 3 keeps the
+    // worker's policy — one per-skill `unreadable skill files` rejection — and `anchor2`
+    // installs: never a whole-run refusal.
+    const vanish2Data = join(tmp, 'vanish2-data');
+    const vanish2Home = join(tmp, 'vanish2-home');
+    fixtureRepo(vanish2Data, ['vanish2', 'anchor2']);
+    writeFileSync(join(vanish2Data, 'user/omp/agent/skills/vanish2/requirements.txt'), 'left-pad==1.3.0\n');
+    stubReport('vanish2', cleanButDegraded);
+    stubReport('vanish2.second', cleanButDegraded);
+    stubReport('anchor2', CLEAN_REPORT);
+    rmSync(budgetCalls, { force: true });
+    writeFileSync(join(stubDir, 'skillspector'), [
+      '#!/bin/sh',
+      `if [ "$1" = "--version" ]; then echo 'SkillSpector v2.13.0'; exit 0; fi`,
+      `name=$(basename "$2")`,
+      `printf 'start %s %s\\n' "$name" "$(date +%s%N)" >> '${budgetCalls}'`,
+      `cnt=0; [ -f '${reportsDir}/'"$name.count" ] && cnt=$(cat '${reportsDir}/'"$name.count"); cnt=$((cnt+1)); echo "$cnt" > '${reportsDir}/'"$name.count"`,
+      `if [ "$name" = vanish2 ] && [ "$cnt" -ge 2 ]; then`,
+      `  snap=/$(printf '%s' "$2" | sed 's#^.*alate-scan-[^/]*/[0-9][0-9][0-9]/##')`,
+      `  ln -sf /nonexistent/vanish2-target "$snap/requirements.txt"`,
+      'fi',
+      `if [ "$cnt" -ge 2 ] && [ -f '${reportsDir}/'"$name.second.json" ]; then`,
+      `  cat '${reportsDir}/'"$name.second.json"`,
+      `elif [ -f '${reportsDir}/'"$name.json" ]; then`,
+      `  cat '${reportsDir}/'"$name.json"`,
+      'else',
+      `  ${shPrint(CLEAN_REPORT)}`,
+      'fi',
+      `printf 'end %s %s\\n' "$name" "$(date +%s%N)" >> '${budgetCalls}'`,
+      'exit 0',
+      '',
+    ].join('\n'));
+    chmodSync(join(stubDir, 'skillspector'), 0o755);
+    r = run(['--data', vanish2Data, '--skip-plugins'], vanish2Home);
+    assert.equal(r.status, 1, `the run carries the per-skill rejection: ${r.stdout}`);
+    assert.ok(r.stdout.includes(`${skillItem('vanish2')} — rejected: unreadable skill files`), `the pass-3 staging failure rejects its one skill: ${r.stdout}`);
+    assert.equal(readFileSync(join(vanish2Home, '.omp/agent/skills/anchor2/SKILL.md'), 'utf8'), skillText('anchor2'), 'the pass-3 staging failure never refuses the whole run');
+    const vanish2Starts = readFileSync(budgetCalls, 'utf8').trim().split('\n').filter(l => l.startsWith('start vanish2 ')).length;
+    assert.equal(vanish2Starts, 2, `the pass-3 staging failure happens after pass 2, before any third scan: ${readFileSync(budgetCalls, 'utf8')}`);
 
     // Fixture 5 (retry staging policy): the stub swaps the snapshot's requirements.txt for a
     // dangling symlink while serving the first-pass scan, so the retry's staged copy cannot
@@ -2766,6 +2856,44 @@ exit 0
     const vanishStarts = readFileSync(budgetCalls, 'utf8').trim().split('\n').filter(l => l.startsWith('start vanish ')).length;
     assert.equal(vanishStarts, 1, `the retry whose staging fails never scans: ${readFileSync(budgetCalls, 'utf8')}`);
     writeStub(0);
+
+    // Fixture 6 (in-place survival, ALAT-203): a skill whose third scan still hits the
+    // runtime limit keeps its previous install status — the record-matching files stay on
+    // disk under the `scan inconclusive` note — and a later clean scan installs the new
+    // bytes and deletes the file the snapshot no longer ships.
+    const ghostData = join(tmp, 'ghost-data');
+    const ghostHome = join(tmp, 'ghost-home');
+    fixtureRepo(ghostData, ['ghost']);
+    writeFileSync(join(ghostData, 'user/omp/agent/skills/ghost/extra.txt'), 'run one extra\n');
+    stubReport('ghost', CLEAN_REPORT);
+    writeCountingStub();
+    rmSync(budgetCalls, { force: true });
+    r = run(['--data', ghostData, '--skip-plugins'], ghostHome);
+    assert.equal(r.status, 0, `run 1 installs ghost clean: ${r.stdout}`);
+    const ghostRunOne = readFileSync(join(ghostHome, '.omp/agent/skills/ghost/SKILL.md'), 'utf8');
+    // Run 2: the snapshot changes under a scan that stays degraded through pass 3.
+    writeFileSync(join(ghostData, 'user/omp/agent/skills/ghost/SKILL.md'), skillText('ghost', '# ghost, changed\n'));
+    rmSync(join(ghostData, 'user/omp/agent/skills/ghost/extra.txt'));
+    stubReport('ghost.second', degradedReport);
+    stubReport('ghost.third', degradedReport);
+    rmSync(budgetCalls, { force: true });
+    r = run(['--data', ghostData, '--skip-plugins'], ghostHome);
+    assert.equal(r.status, 1, 'an inconclusive skill fails the run');
+    assert.ok(r.stdout.includes(`${skillItem('ghost')} — inconclusive`), r.stdout);
+    assert.ok(!r.stdout.includes('rejected: scan error'), `an inconclusive skill is never reported rejected: ${r.stdout}`);
+    assert.equal(readFileSync(join(ghostHome, '.omp/agent/skills/ghost/SKILL.md'), 'utf8'), ghostRunOne, 'the installed SKILL.md keeps the run-1 bytes');
+    assert.equal(readFileSync(join(ghostHome, '.omp/agent/skills/ghost/extra.txt'), 'utf8'), 'run one extra\n', 'the file the snapshot dropped stays on disk');
+    assert.ok(r.stdout.includes(`scan inconclusive ${skillItem('ghost')}, kept the previously installed version`), `the retention note spells scan inconclusive: ${r.stdout}`);
+    const ghostStarts2 = readFileSync(budgetCalls, 'utf8').trim().split('\n').filter(l => l.startsWith('start ghost '));
+    assert.equal(ghostStarts2.length, 3, `the inconclusive scan runs all three passes: ${ghostStarts2.join('\n')}`);
+    assert.ok(ghostStarts2[2].includes('osv=120 static=1200 workflow=2400'), `pass 3 carries the raised budgets: ${ghostStarts2[2]}`);
+    // Run 3: a clean scan proves the new bytes, so they install; extra.txt still matched
+    // its record, so the snapshot's drop deletes it like any dropped path.
+    writeStub(0);
+    r = run(['--data', ghostData, '--skip-plugins'], ghostHome);
+    assert.equal(r.status, 0, `run 3 installs the new bytes: ${r.stdout}`);
+    assert.equal(readFileSync(join(ghostHome, '.omp/agent/skills/ghost/SKILL.md'), 'utf8'), skillText('ghost', '# ghost, changed\n'), 'the new snapshot bytes install after a clean scan');
+    assert.ok(!existsSync(join(ghostHome, '.omp/agent/skills/ghost/extra.txt')), 'the dropped file is deleted once a clean scan proves the snapshot');
 
     // (g) A report the gate cannot judge — stdout that is not JSON, a suppressed_count that
     // disagrees with the list, a JSON array, or a missing issues list — is a scan error for
@@ -4095,6 +4223,53 @@ exit 0
     assert.deepEqual(alItems.items.find(i => i.item === 'user/omp/agent/MANAGE~1'), { item: 'user/omp/agent/MANAGE~1', status: 'rejected', rule: '8.3 short name of skill root "managed-skills"', at: null, report: 'user/omp/agent/MANAGE~1: 8.3 short name of skill root "managed-skills"; NTFS resolves the 8.3 short name to the long folder, so it installs as managed-skills/ unchecked by the skill gates. Rename the folder to managed-skills/.' });
     assert.deepEqual(alItems.items.find(i => i.item === 'user/omp/agent/skil\u200Cls'), { item: 'user/omp/agent/skil\u200Cls', status: 'rejected', rule: 'ignorable code point variant of skill root "skills"', at: null, report: 'user/omp/agent/skil\u200Cls: ignorable code point variant of skill root "skills"; HFS+ name comparison ignores these code points, so it installs as skills/ unchecked by the skill gates. Rename the folder to skills/.' });
     assert.deepEqual(alItems.items.find(i => i.item === 'user/omp/agent/skills.'), { item: 'user/omp/agent/skills.', status: 'rejected', rule: 'case variant of skill root "skills"', at: null, report: 'user/omp/agent/skills.: case variant of skill root "skills"; a case-insensitive filesystem installs it as skills/ unchecked by the skill gates. Rename the folder to skills/.' });
+
+    // Layer-mode inconclusive scan (ALAT-203): a skill whose third scan still hits the
+    // runtime limit keeps its previous install status. The fresh layer drops the unproven
+    // bytes and raw-copies the live layer's dir back, the record keeps the old rels, and
+    // the layer still switches. A new skill with no live counterpart is dropped exactly
+    // like a rejected skill.
+    const layerHome = join(tmp, 'home-layer-incon');
+    const ldata = join(tmp, 'data-layer-incon');
+    const putL = (rel, text) => { mkdirSync(dirname(join(ldata, 'user', rel)), { recursive: true }); writeFileSync(join(ldata, 'user', rel), text); };
+    const runL = (h, extra) => run(['--data', ldata, ...extra], h);
+    const lcurrent = join(layerHome, '.alate', 'current');
+    const lgot = (layer, rel) => readFileSync(join(layer, rel), 'utf8');
+    const layerDegraded = scanReport([], [], { analysis_completeness: { is_complete: false, ledger_exceptions: [{ outcome: 'partial', phase: 'static', reason_code: 'runtime_limit', message: 'Inspection reached its configured runtime limit.', path: 'requirements.txt', start_line: null, end_line: null, fatal: false }] } });
+    putL('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
+    putL('omp/agent/skills/stable-l/SKILL.md', skillText('stable-l'));
+    writeStub(0);
+    r = runL(layerHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 0, r.stderr);
+    const lStableLayer = realpathSync(lcurrent);
+    const lStableRecord = JSON.parse(lgot(lStableLayer, '.alate/installed.json'));
+    const lStableFp = lStableRecord['omp/agent/skills/stable-l/SKILL.md'];
+    assert.ok(lStableFp, 'run 1 records the installed skill');
+    // Run 2: stable-l's snapshot bytes change, fresh-l is new, and both scans stay degraded
+    // through pass 3.
+    putL('omp/agent/skills/stable-l/SKILL.md', skillText('stable-l', '# stable-l, changed\n'));
+    putL('omp/agent/skills/fresh-l/SKILL.md', skillText('fresh-l'));
+    writeCountingStub();
+    mkdirSync(reportsDir, { recursive: true });
+    for (const name of ['stable-l', 'fresh-l']) {
+      for (const suffix of ['', '.second', '.third']) writeFileSync(join(reportsDir, `${name}${suffix}.json`), layerDegraded);
+    }
+    rmSync(budgetCalls, { force: true });
+    r = runL(layerHome, ['--skip-plugins', '--layer']);
+    assert.equal(r.status, 1, 'an inconclusive layer skill fails the run');
+    assert.ok(r.stdout.includes('user/omp/agent/skills/stable-l — inconclusive'), r.stdout);
+    assert.ok(r.stdout.includes('user/omp/agent/skills/fresh-l — inconclusive'), r.stdout);
+    const lInconLayer = realpathSync(lcurrent);
+    assert.notEqual(lInconLayer, lStableLayer, 'the layer still switches');
+    assert.equal(lgot(lInconLayer, '.omp/agent/skills/stable-l/SKILL.md'), skillText('stable-l'), 'the switched layer keeps the previous bytes for the inconclusive skill');
+    assert.ok(!existsSync(join(lInconLayer, '.omp/agent/skills/fresh-l')), 'the new skill with no live counterpart is dropped from the fresh layer');
+    const lInconRecord = JSON.parse(lgot(lInconLayer, '.alate/installed.json'));
+    assert.equal(lInconRecord['omp/agent/skills/stable-l/SKILL.md'], lStableFp, 'the record keeps the old rel for the inconclusive skill');
+    assert.ok(!Object.keys(lInconRecord).some(rel => rel.startsWith('omp/agent/skills/fresh-l')), 'the dropped new skill leaves no record rels');
+    const lStableStarts = readFileSync(budgetCalls, 'utf8').trim().split('\n').filter(l => l.startsWith('start stable-l '));
+    assert.equal(lStableStarts.length, 3, `the layer scan runs all three passes: ${lStableStarts.join('\n')}`);
+    assert.ok(lStableStarts[2].includes('osv=120 static=1200 workflow=2400'), `the layer pass 3 carries the raised budgets: ${lStableStarts[2]}`);
+    writeStub(0);
   }
 
   // The machine-readable results file: with ALATE_PROVISION_RESULTS set, every run writes
