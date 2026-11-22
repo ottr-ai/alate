@@ -1,5 +1,5 @@
 # alate provisioning server, local build (Node runs TS directly, no build step)
-FROM node:24-alpine
+FROM node:26-alpine
 RUN apk add --no-cache git
 # SkillSpector: install-user.mjs statically scans every skill snapshot before it installs
 # and refuses to run without the scanner (fail-closed), so the image that provisions must
