@@ -33,3 +33,9 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
