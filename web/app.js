@@ -812,6 +812,11 @@ function onboardingView() {
 
 function settingsView() {
   const src = state.source;
+  // The commit row shows the label; the full sha joins it only when the label carries a
+  // count (an unknown count stores the short hash alone, per specs/imported-commit-describe.md).
+  const label = src.commitLabel || (src.importedSha ? src.importedSha.slice(0, 7) : '');
+  const commitText = !label ? (src.importedSha || 'not recorded')
+    : src.importedSha && label !== src.importedSha.slice(0, 7) ? label + ' (' + src.importedSha + ')' : label;
   const sheet = h('article', { class: 'sheet settings' }, h('header', { class: 'sheet-head' }, h('h1', { text: 'Settings' })));
 
   const sourceBody = h('div');
@@ -821,7 +826,7 @@ function settingsView() {
       h('dl', { class: 'kv' },
         h('dt', { text: 'Type' }), h('dd', { text: src.kind === 'repo' ? 'GitHub repo' : 'Local path' }),
         h('dt', { text: 'Source' }), h('dd', { text: src.kind === 'repo' ? src.spec : src.name }),
-        h('dt', { text: 'Commit' }), h('dd', { text: src.commitLabel ? (src.importedSha && src.importedSha !== src.commitLabel ? src.commitLabel + ' (' + src.importedSha + ')' : src.commitLabel) : (src.importedSha || 'not recorded') }),
+        h('dt', { text: 'Commit' }), h('dd', { text: commitText }),
         h('dt', { text: 'Imported' }), h('dd', { text: new Date(src.importedAt).toLocaleString() + ' (' + relTime(src.importedAt) + ')' })),
       h('div', { class: 'row' },
         h('button', { type: 'button', class: 'btn', onclick: async (ev) => {

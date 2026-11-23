@@ -656,11 +656,12 @@ function countApiBase(host) {
   }
 }
 
-// The stored key rides only to the host it belongs to: the host a foreign-host import
-// recorded (tokenHost, see noteTokenHost in server.ts), else the ambient
-// ALATE_GITHUB_HOST. Same fail-closed rule as the update checker's github.com gating,
-// generalized to the source host: a token for one host never reaches another host's API,
-// and an invalid ambient host sends nothing.
+// The stored key rides only to the host it belongs to: the configured
+// ALATE_GITHUB_HOST, the same rule gitAuthEnv applies to repo-source git. tokenHost is
+// a withhold flag only: a foreign-host import records it (noteTokenHost in server.ts)
+// because the token is then presumed to belong to that foreign host, so it must not
+// ride anywhere — never to a spec-named foreign host's API, and not to github.com
+// either. An invalid ambient host sends nothing.
 /** @type {string | null} */
 let countTokenHost = null;
 /** @param {string | null | undefined} host @returns {void} */
@@ -676,7 +677,9 @@ function countTokenFor(token, host, recorded = null) {
   } catch {
     return undefined;
   }
-  return (recorded ?? ambient) === host ? token : undefined;
+  if (host !== ambient) return undefined;
+  if (recorded !== null && recorded !== ambient) return undefined;
+  return token;
 }
 /** @param {string | undefined} token @param {string} host @returns {string | undefined} */
 const countToken = (token, host) => countTokenFor(token, host, countTokenHost);
@@ -728,11 +731,13 @@ async function repoCommitLabel(src, token) {
 }
 
 // Label for a path source: `git rev-list --count HEAD` with the checkout's short hash,
-// '' when the folder is not a git work tree or has no commits.
+// '' when the folder is not a git work tree or has no commits. runGit adds
+// safe.directory for the operator-configured source dir, so a work tree another user
+// owns (the compose /data bind mount) counts like it does for /health's git flag.
 /** @param {string} dir @returns {string} */
 function pathCommitLabel(dir) {
-  const count = spawnSync('git', ['rev-list', '--count', 'HEAD'], { cwd: dir, env: serverGitEnv(), stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
-  const short = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: dir, env: serverGitEnv(), stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+  const count = runGit(dir, ['rev-list', '--count', 'HEAD']);
+  const short = runGit(dir, ['rev-parse', '--short', 'HEAD']);
   return count.status === 0 && short.status === 0 && /^\d+$/.test(count.stdout.trim()) ? `${count.stdout.trim()}-${short.stdout.trim()}` : '';
 }
 

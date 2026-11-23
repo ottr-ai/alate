@@ -6544,12 +6544,22 @@ try {
       const flagsForeign = join(w10, 'flags-foreign');
       mkdirSync(flagsForeign, { recursive: true });
       assert.equal(git(['init', flagsForeign]).status, 0);
+      assert.equal(git(['-C', flagsForeign, '-c', 'user.email=t@x', '-c', 'user.name=t', 'commit', '--allow-empty', '-qm', 'counted']).status, 0);
+      const flagsShort = git(['-C', flagsForeign, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
       assert.equal(spawnSync('chown', ['-R', '65534', flagsForeign]).status, 0);
       // Without the operator-configured trust the ownership check stays on: a foreign
       // repo that only a runtime request chose stays inert, so its hooks never run.
       assert.equal(dash.isGitWorkTree(flagsForeign), false, 'a foreign-owned folder stays refused without the boot-config trust');
+      // The commit label rides the same trust: without safe.directory the import of the
+      // foreign-owned source stores no label, with it the count lands (ALAT-212 send-back).
+      const dbFlagNo = mkDb10('alat10-flag-no.db');
+      const stNoTrust = await dash.importSource(dash.loadState(dbFlagNo), flagsForeign, 'path', null, dbFlagNo);
+      assert.equal(stNoTrust.source.commitLabel, '', 'a foreign-owned path source stores no label without the boot-config trust');
       dash.setTrustedPathSource(flagsForeign);
       assert.equal(dash.isGitWorkTree(flagsForeign), true, 'a foreign-owned git folder is still a work tree');
+      const dbFlag = mkDb10('alat10-flag.db');
+      const stTrust = await dash.importSource(dash.loadState(dbFlag), flagsForeign, 'path', null, dbFlag);
+      assert.equal(stTrust.source.commitLabel, `1-${flagsShort}`, 'a foreign-owned path source counts once the operator-configured trust applies');
     }
 
     // -- scanInventory: empty repo returns the full default shape.
@@ -7169,6 +7179,50 @@ try {
       assert.equal(countRequests[0].authorization, 'Bearer tok-desc', 'a token recorded for this host rides');
       dash.setCountTokenHost(null);
       countRequests.length = 0;
+
+      // -- The configured ALATE_GITHUB_HOST is the only host the key rides to: the
+      // ambient state rides, a spec-named foreign host never does — recorded for it or
+      // not — and a refused clone sends no count request (AGENTS.md credential states).
+      process.env.ALATE_GITHUB_HOST = 'git.example.com';
+      countRequests.length = 0;
+      const dbN = mkDb10('alat10-dn1.db');
+      const stN = await dash.importSource(dash.loadState(dbN), 'own/data@main', 'repo', 'tok-desc', dbN);
+      assert.equal(stN.source.host, 'git.example.com', 'the ambient host resolves into the source');
+      assert.equal(stN.source.commitLabel, `1-${ownSha.slice(0, 7)}`);
+      assert.deepEqual(countRequests.map(r => r.url), [`/repos/own/data/commits?sha=${ownSha}&per_page=1`]);
+      assert.equal(countRequests[0].authorization, 'Bearer tok-desc', 'a key rides to the configured ALATE_GITHUB_HOST');
+
+      countRequests.length = 0;
+      dash.setCountTokenHost('acme.ghe.com');
+      const dbO = mkDb10('alat10-do1.db');
+      const stO = await dash.importSource(dash.loadState(dbO), 'acme.ghe.com/own/data@main', 'repo', 'tok-desc', dbO);
+      assert.equal(stO.source.host, 'acme.ghe.com');
+      assert.deepEqual(countRequests.map(r => r.url), [`/repos/own/data/commits?sha=${ownSha}&per_page=1`]);
+      assert.equal(countRequests[0].authorization, undefined, 'a spec-named foreign host never sees the key, even when it is recorded for that host');
+      dash.setCountTokenHost(null);
+      countRequests.length = 0;
+      const dbP = mkDb10('alat10-dp1.db');
+      await dash.importSource(dash.loadState(dbP), 'acme.ghe.com/own/data@main', 'repo', 'tok-desc', dbP);
+      assert.equal(countRequests[0].authorization, undefined, 'a spec-named foreign host never sees the key unrecorded either');
+      delete process.env.ALATE_GITHUB_HOST;
+
+      // -- the behind lookup obeys the same host states.
+      const specSha = 'e'.repeat(40);
+      fixtureAhead = () => ({ status: 'ahead', ahead_by: 7 });
+      process.env.ALATE_GITHUB_HOST = 'git.example.com';
+      countRequests.length = 0;
+      assert.equal(await dash.remoteAhead('own/data', ownSha, specSha, 'tok-desc', 'git.example.com'), 7);
+      assert.equal(countRequests[0].authorization, 'Bearer tok-desc', 'the behind lookup rides to the configured host');
+      countRequests.length = 0;
+      assert.equal(await dash.remoteAhead('own/data', ownSha, specSha, 'tok-desc', 'acme.ghe.com'), 7);
+      assert.equal(countRequests[0].authorization, undefined, 'the behind lookup never rides to a spec-named foreign host');
+      delete process.env.ALATE_GITHUB_HOST;
+      countRequests.length = 0;
+
+      // -- a refused clone sends no count request at all.
+      const eQ = await err10(() => dash.importSource(dash.loadState(mkDb10('alat10-dq1.db')), 'gone/repo@main', 'repo', 'tok-desc', mkDb10('alat10-dq2.db')));
+      assert.equal(eQ.status, 400);
+      assert.deepEqual(countRequests, [], 'a refused clone sends no count request');
 
       // -- a stored state without a label keeps no field: the header falls back to the
       // short hash alone (the render fallback is `src.commitLabel || short` in app.js).
@@ -8075,7 +8129,13 @@ try {
         this.scrollTop = 0;
         this._text = null;
       }
-      get textContent() { return this._text != null ? this._text : this.children.map((c) => c.textContent).join(''); }
+      // Children win over a stale set('') marker: the app clears a node with
+      // textContent = '' and then appends (renderShell does exactly that). Raw strings
+      // count as their own text, like DOM append does.
+      get textContent() {
+        if (!this.children.length) return this._text ?? '';
+        return this.children.map((c) => (typeof c === 'string' ? c : c.textContent)).join('');
+      }
       set textContent(v) { this._text = String(v); this.children.length = 0; }
       get className() { return this.attrs.class || ''; }
       set className(v) { this.attrs.class = v; }
@@ -8198,6 +8258,41 @@ try {
       for (const claimed of ['a.md', 'user/omp/agent/skills/demo', 'user/omp/agent/mcp.json "mcp-server"', '"safe-server"', 'user/omp/agent/config.yml']) {
         assert.ok(!restText80.includes(claimed), `claimed key not repeated in the fallback list: ${claimed}`);
       }
+
+      // -- A stored state without a commit count renders the short hash alone: the header
+      // and the Settings commit row come from app.js's `src.commitLabel || short` fallback,
+      // and this render pins it (a stored legacy source carries no commitLabel field).
+      const sha81 = 'c'.repeat(64);
+      const state81 = {
+        source: { kind: 'repo', name: 'demo/data', ref: 'main', importedSha: sha81, importedAt: new Date().toISOString() },
+        inventory: state80.inventory,
+        provision: null,
+        updates: { updates: [], checkedAt: new Date().toISOString() },
+        changes: null,
+      };
+      const before81 = galley80.children[0];
+      location.hash = '#/settings';
+      globalThis.fetch = async (url) => (String(url).includes('/api/state')
+        ? { ok: true, status: 200, json: async () => state81 }
+        : { ok: true, status: 200, json: async () => ({ files: files80 }) });
+      await import('./web/app.js?alat212render');
+      let ready81 = false;
+      for (let i = 0; i < 200 && !ready81; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        ready81 = galley80.children[0] !== undefined && galley80.children[0] !== before81;
+      }
+      assert.ok(ready81, 'the stubbed dashboard re-rendered the settings view');
+      const nodes81 = [];
+      const flat81 = (el) => { nodes81.push(el); for (const c of el.children || []) flat81(c); };
+      flat81(galley80.children[0]);
+      const dl81 = nodes81.find((e2) => e2.tag === 'dl' && (e2.children || []).some((c) => c.tag === 'dt' && c.textContent === 'Commit'));
+      assert.ok(dl81, 'the settings view rendered its key list');
+      const kids81 = dl81.children;
+      const dd81 = kids81[kids81.findIndex((c) => c.tag === 'dt' && c.textContent === 'Commit') + 1];
+      assert.equal(dd81.textContent, sha81.slice(0, 7), 'a stored state without a count renders the short hash alone in the commit row');
+      const header81 = document80.getElementById('source');
+      assert.ok(header81.textContent.includes(` at ${sha81.slice(0, 7)} ·`), `a stored state without a count renders the short hash alone in the header; got: ${JSON.stringify(header81.textContent)} children: ${JSON.stringify(header81.children.map(c => (c.tag ?? '') + ':' + String(c.textContent ?? c)))}`);
+      location.hash = '#/';
     } finally {
       for (const [g, d] of Object.entries(saved80)) {
         if (d) Object.defineProperty(globalThis, g, d);

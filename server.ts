@@ -582,7 +582,7 @@ async function selectSource(spec: string, kind?: string, token = dashToken()): P
   const run = importChain.then(async () => {
     importing = true
     try {
-      const next = await runImport({ dbFile, state: dashState, spec, kind, token, tokenHost: config.tokenHost })
+      const next = await runImport({ dbFile, state: dashState, spec, kind, token, tokenHost: config.tokenHost, trustedDir: getTrustedPathSource() })
       const changed = dashState.source?.spec !== next.source.spec || dashState.source?.kind !== next.source.kind
       const newCommit = next.source.kind === 'repo' && !!next.source.importedSha && next.source.importedSha !== dashState.source?.importedSha
       dashState = next
@@ -620,6 +620,10 @@ async function dashCheck(): Promise<void> {
   const behind = sha !== '' && sha !== src.importedSha
     ? await remoteAhead(src.name, src.importedSha, sha, dashToken(), src.host, config.tokenHost)
     : null
+  // The ahead lookup above awaited the network: an import, an edit or a queued op that
+  // ran in between has its own update write, and this one would pair a stale remoteSha
+  // with the fresh state (a phantom 'N behind' until the next tick). Drop the check.
+  if (dashState.source !== src || importing || editing || snapshotting || opsQueued > 0) return
   dashState.update = { checkedAt: new Date().toISOString(), remoteSha: sha, available: sha !== '' && sha !== src.importedSha, ahead: behind }
   if (sha) config.update.remoteSha = sha
   config.update.lastChecked = dashState.update.checkedAt
