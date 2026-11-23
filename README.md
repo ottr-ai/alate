@@ -271,6 +271,9 @@ npm ci && npm audit --omit=dev --audit-level=low && node license-gate.mjs && nod
 
 home-guard.test.mjs brackets the chain: the early record snapshots the home's `.alate`, `.agents` and `.omp`, and the final check fails the run when a path or an mtime there changed. The platform's own runtime files (the omp databases, logs, cache, run, the session stores under `.omp`, the live worker's `memories` and `agent/memories` stores, the cache and session stores of the browser profiles under `.omp/browser-profiles`, and the two bookkeeping files under `.alate`) stay excluded: a live worker writes them during any chain. A directory mtime diff is dropped when no checked direct child has a diff of its own: the memory backend can create `agent/memories` mid-chain, which moves the `agent` mtime alone.
 
+The guard also ignores `plugins/cache` and `plugins/node_modules` under `.omp`, including each layer's `.omp`.
+The platform seed rewrites plugin dependency shims there. Other paths under `plugins/` stay watched.
+
 `npm test` runs this chain's checks after an `npm ci`.
 
 CI runs this chain on every push. `release.yml` builds a multi-arch Docker image and publishes it to `ghcr.io/ottr-ai/alate` on each GitHub release, tagged `latest`, `vX.Y.Z` and `X.Y.Z`.

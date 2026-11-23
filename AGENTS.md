@@ -31,9 +31,9 @@ with `--data`. `examples/data` is a neutral fixture used by tests and CI.
   `DawnWebGPUCache`) plus the
   `Cookies` and `History` stores with their `-wal` and `-journal` files; the rest of
   each profile stays watched), the agent
-  blob cache `agent/blobs`, the plugin download cache `plugins/cache` (anything
-  else under `plugins/` stays checked), the live worker's `memories` store and its
-  memory backend store `agent/memories` (under `.omp` and, through the layer ignore
+  blob cache `agent/blobs`, the plugin download cache `plugins/cache`, and plugin
+  dependencies under `plugins/node_modules` (other paths under `plugins/` stay watched),
+  the live worker's `memories` store and its memory backend store `agent/memories` (under `.omp` and, through the layer ignore
   set, under each layer's `.omp`), `oauth`,
   `install-id`, `marketplaces.json` and `natives` files, the live worker's
   `.omp/autoqa.db` runtime database with its `-wal` and `-journal` files, the alate rules
@@ -45,6 +45,8 @@ with `--data`. `examples/data` is a neutral fixture used by tests and CI.
   A directory mtime diff is dropped when no checked direct child has a diff of its own:
   the memory backend can create `agent/memories` mid-chain, which moves the `agent`
   mtime alone. A checked child diff keeps the parent mtime diff.
+  ALAT-195's merge turn lost a 191.03s chain run to platform seed mtime changes under `plugins/node_modules/.bin`.
+  The `/etc/ottr/seed-failed` and `/etc/ottr/restart-wait` records identified the seed as the writer.
 - `web/index.html`/`style.css`/`app.js`/`diff.mjs`: the dashboard's static assets (Galley Proof world, see `DESIGN.md`; `diff.mjs` is the editor's line diff for proof marks; `manifest.webmanifest`, `sw.js`, and `icons/` make the dashboard installable as a PWA — `sw.js` is a network-first offline shell, and its precache list mirrors the static table in `server.ts`), and `web/dashboard.mjs` its inventory and file-edit logic, served by `server.ts` on the same loopback port as the provisioning API; the dashboard's self-check lives in `server.test.mjs`.
 - `server.ts` (+ `server.test.mjs`): long-running loopback provisioning server (key-authenticated provision API, server-side config, periodic data-repo update checks), built on Fastify and run via `node server.ts` type stripping — no build step; it also serves the dashboard UI, its inventory API (`GET /api/state`, `POST /api/import`) and its file editor API (`GET /api/files`, `GET`/`PUT`/`DELETE /api/file`: snapshot reads plus edits that verify a base hash, commit and push) with `--db <file>` (SQLite snapshot of source files and inventory, default `alate.db` beside the config file) and `--data <dir>` (import at startup) flags; `server.test.mjs` is its self-check.
 - `package.json` + `package-lock.json` + `tsconfig.json`: the only manifest, lockfile, and TS config; `dependencies` holds the server's runtime deps (`fastify`) and the two self-hosted dashboard fonts (`@fontsource-variable/source-serif-4`, `@fontsource-variable/jetbrains-mono`, served as woff2 from `/fonts/`), `devDependencies` the tooling (`typescript`, `@types/node`, `@stryker-mutator/core`). Everything else stays plain node with no third-party imports.

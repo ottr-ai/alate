@@ -4,9 +4,9 @@
 // The platform's own runtime state (the omp databases and hour logs, .omp/cache,
 // .omp/run, the session stores under .omp — context-mode, custom-session-files,
 // snapcompact — the cache and session stores of the browser profiles under
-// .omp/browser-profiles, the live worker's .omp/plugins/cache downloads (anything
-// else under plugins/ stays checked), .omp/memories, the memory backend store
-// .omp/agent/memories, .omp/oauth, .omp/install-id,
+// .omp/browser-profiles, the live worker's .omp/plugins/cache downloads and
+// .omp/plugins/node_modules dependencies (other plugins/ paths stay checked),
+// .omp/memories, the memory backend store .omp/agent/memories, .omp/oauth, .omp/install-id,
 // .omp/marketplaces.json, .omp/natives, the .omp/autoqa.db database with its -wal and
 // -journal files, the alate rules install record .omp/agent/rules/.alate-installed.json,
 // the bookkeeping files under .alate (in-use.json, in-use.owners.json,
@@ -32,9 +32,10 @@ const WATCHED = ['.alate', '.agents', '.omp'];
 // GPU shader caches GPUCache, GPUPersistentCache, GrShaderCache, ShaderCache, GraphiteDawnCache,
 // DawnGraphiteCache, DawnWebGPUCache) and the Cookies and History session stores with
 // their -wal and -journal files: a live browser rewrites those mid-chain. A live worker
-// also rewrites its plugin download cache (.omp/plugins/cache; anything else under
-// plugins/ stays checked), its memories (.omp/memories and the memory backend store
-// .omp/agent/memories), its oauth state, its native grammar files
+// also rewrites its plugin download cache (.omp/plugins/cache). The platform seed
+// rewrites .omp/plugins/node_modules dependency shims (ALAT-195); other plugins/ paths
+// stay checked. The worker also rewrites its memories (.omp/memories and the memory
+// backend store .omp/agent/memories), its oauth state, its native grammar files
 // (.omp/natives), the install-id and marketplaces.json bookkeeping files, and its
 // autoqa.db runtime database with its -wal and -journal files. A sibling session's
 // provisioning run (sync.mjs) rewrites the alate rules install record
@@ -56,6 +57,7 @@ const OMP_LIVE = rel => rel === 'logs' || rel.startsWith('logs/') || rel === 'ca
     && (/\/(?:Cache|Code Cache|GPUCache|GPUPersistentCache|GrShaderCache|ShaderCache|GraphiteDawnCache|DawnGraphiteCache|DawnWebGPUCache)(?:\/|$)/.test(rel)
       || /\/(?:Cookies|History)(?:-wal|-journal)?$/.test(rel)))
   || rel === 'plugins/cache' || rel.startsWith('plugins/cache/')
+  || rel === 'plugins/node_modules' || rel.startsWith('plugins/node_modules/')
   || rel === 'memories' || rel.startsWith('memories/')
   || rel === 'oauth' || rel.startsWith('oauth/')
   || rel === 'install-id'
@@ -189,6 +191,7 @@ const selfCheck = () => {
     '.omp/snapcompact-savings.jsonl', 'unwatched.txt', '.omp/autoqa.db', '.omp/autoqa.db-wal',
     '.omp/autoqa.db-journal',
     '.omp/plugins/cache/marketplaces/idx.json', '.omp/plugins/installed/p/manifest.json',
+    '.omp/plugins/node_modules/.bin/plugin-tool',
     '.omp/memories/m.md', '.omp/oauth/tokens.json', '.omp/install-id',
     '.omp/marketplaces.json', '.omp/natives/grammars/en.wasm',
     '.alate/layers/w1/.omp/puppeteer/package.json', '.alate/layers/w1/.omp/install-id',
@@ -256,6 +259,15 @@ const selfCheck = () => {
     writeFileSync(join(fake, '.alate/layers/w1/.omp/install-id'), 'id-2\n');
     writeFileSync(join(fake, '.alate/layers/w1/.omp/cache/idx'), '{}\n');
     assert.equal(run('check', fake, snap).status, 0, 'live runtime churn passes');
+    // ALAT-195: a platform seed rewrites plugin dependency shims mid-chain.
+    utimesSync(join(fake, '.omp/plugins/node_modules/.bin/plugin-tool'), new Date(), new Date(Date.now() + 9000));
+    assert.equal(run('check', fake, snap).status, 0, 'plugin dependency shim mtime churn passes');
+    // A sibling outside node_modules and cache still fails this clean bracket.
+    utimesSync(join(fake, '.omp/plugins/installed/p/manifest.json'), new Date(), new Date(Date.now() + 9000));
+    const pluginChange = run('check', fake, snap);
+    assert.equal(pluginChange.status, 1, 'plugin entry outside node_modules and cache fails');
+    assert.match(pluginChange.stderr, /^home-guard: mtime changed: plugins\/installed\/p\/manifest\.json$/m);
+    assert.equal(run('record', fake, snap).status, 0, 'record after plugin sibling change passes');
     // A write to a checked child of agent still fails: the new file reports itself as an
     // added entry, and with that direct-child diff the agent dir mtime diff stays too.
     writeFileSync(join(fake, '.omp/agent/rules/x.md'), 'x');
@@ -264,9 +276,6 @@ const selfCheck = () => {
     utimesSync(join(fake, '.alate/layers/w1/config.yml'), new Date(), new Date(Date.now() + 9000));
     utimesSync(join(fake, '.alate/layers/token-reminders.json'), new Date(), new Date(Date.now() + 9000));
     assert.notEqual(run('check', fake, snap).status, 0, 'watched layer manifest write fails');
-    // Anything under plugins/ outside cache/ stays checked.
-    utimesSync(join(fake, '.omp/plugins/installed/p/manifest.json'), new Date(), new Date(Date.now() + 9000));
-    assert.notEqual(run('check', fake, snap).status, 0, 'plugins entry outside cache fails');
     // Adding a file under a watched dir fails.
     writeFileSync(join(fake, '.alate', 'extra.txt'), 'x');
     assert.equal(run('check', fake, snap).status !== 0, true, 'added entry fails');
