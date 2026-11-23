@@ -6502,6 +6502,13 @@ try {
     const fm = d => `---\ndescription: ${d}\n---\n`;
     const git10 = (args, opts = {}) => git(args, { ...opts, cwd: w10, encoding: 'utf8' });
     const scan10 = d => dash.scanInventory(join(w10, d));
+    // Hoisted above the write-flag probes: the root-only foreign-ownership block at the
+    // top of the section imports fixtures through it too.
+    const mkDb10 = name => {
+      const db = new DatabaseSync(join(tmp, name));
+      db.exec('CREATE TABLE state (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL); CREATE TABLE files (path TEXT PRIMARY KEY, content BLOB NOT NULL)');
+      return db;
+    };
     // Temp-dir leak watcher: dashboard and snapshot temp dirs never outlive a call, also
     // when the call throws. The call's tmpdir() is a fresh root inside this run's own tmp,
     // so the watcher sees only dirs this run created, never a concurrent run's dirs in the
@@ -6781,11 +6788,6 @@ try {
       [[], ['user/omp/agent/extensions: link escapes the data repo; skipped']]);
 
     // -- importSource: snapshot walk skips VCS dirs, stores nested paths, rolls nothing back.
-    const mkDb10 = name => {
-      const db = new DatabaseSync(join(tmp, name));
-      db.exec('CREATE TABLE state (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL); CREATE TABLE files (path TEXT PRIMARY KEY, content BLOB NOT NULL)');
-      return db;
-    };
     dig('if10/top.md', 'top\n');
     dig('if10/sub/note.md', 'note\n');
     dig('if10/node_modules/x.js', 'x\n');
@@ -7216,6 +7218,11 @@ try {
       countRequests.length = 0;
       assert.equal(await dash.remoteAhead('own/data', ownSha, specSha, 'tok-desc', 'acme.ghe.com'), 7);
       assert.equal(countRequests[0].authorization, undefined, 'the behind lookup never rides to a spec-named foreign host');
+      countRequests.length = 0;
+      dash.setCountTokenHost('acme.ghe.com');
+      assert.equal(await dash.remoteAhead('own/data', ownSha, specSha, 'tok-desc', 'acme.ghe.com', 'acme.ghe.com'), 7);
+      assert.equal(countRequests[0].authorization, undefined, 'the behind lookup never rides the key to a foreign host recorded for that host');
+      dash.setCountTokenHost(null);
       delete process.env.ALATE_GITHUB_HOST;
       countRequests.length = 0;
 
@@ -8289,7 +8296,7 @@ try {
       assert.ok(dl81, 'the settings view rendered its key list');
       const kids81 = dl81.children;
       const dd81 = kids81[kids81.findIndex((c) => c.tag === 'dt' && c.textContent === 'Commit') + 1];
-      assert.equal(dd81.textContent, sha81.slice(0, 7), 'a stored state without a count renders the short hash alone in the commit row');
+      assert.equal(dd81.textContent, sha81, 'a stored state without a count keeps the full sha in the commit row');
       const header81 = document80.getElementById('source');
       assert.ok(header81.textContent.includes(` at ${sha81.slice(0, 7)} ·`), `a stored state without a count renders the short hash alone in the header; got: ${JSON.stringify(header81.textContent)} children: ${JSON.stringify(header81.children.map(c => (c.tag ?? '') + ':' + String(c.textContent ?? c)))}`);
       location.hash = '#/';
@@ -9245,6 +9252,11 @@ try {
       const health = await (await ownGet('/health')).json();
       assert.equal(health.git, true, 'the boot-configured foreign-owned source reports git true');
       assert.equal(health.writable, true, 'the boot-configured foreign-owned source reports writable');
+      // The boot import counts through the trusted dir: runGit passes safe.directory for
+      // it, so the label lands here too, not only for the /health probe (ALAT-212).
+      const ownState = await (await ownGet('/api/state')).json();
+      const ownShort = git(['-C', ownSource, '-c', `safe.directory=${realpathSync(ownSource)}`, 'rev-parse', '--short', 'HEAD']).stdout.toString().trim();
+      assert.equal(ownState.source.commitLabel, `1-${ownShort}`, 'the foreign-owned boot source stores its commit count label');
       const notes = await (await ownGet('/api/file?path=notes.md')).json();
       const er = await ownPut({ path: 'notes.md', content: `${notes.content}edited by the server\n`, base: notes.hash, message: 'test: edit in a foreign-owned source' });
       const edit = await er.json();

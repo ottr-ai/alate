@@ -812,11 +812,11 @@ function onboardingView() {
 
 function settingsView() {
   const src = state.source;
-  // The commit row shows the label; the full sha joins it only when the label carries a
-  // count (an unknown count stores the short hash alone, per specs/imported-commit-describe.md).
-  const label = src.commitLabel || (src.importedSha ? src.importedSha.slice(0, 7) : '');
-  const commitText = !label ? (src.importedSha || 'not recorded')
-    : src.importedSha && label !== src.importedSha.slice(0, 7) ? label + ' (' + src.importedSha + ')' : label;
+  // The commit row keeps the full sha whenever the source stores one (the card's
+  // "full sha kept in the Commit row"); the label sits in front of it.
+  const commitText = src.commitLabel
+    ? (src.importedSha && src.importedSha !== src.commitLabel ? src.commitLabel + ' (' + src.importedSha + ')' : src.commitLabel)
+    : (src.importedSha || 'not recorded');
   const sheet = h('article', { class: 'sheet settings' }, h('header', { class: 'sheet-head' }, h('h1', { text: 'Settings' })));
 
   const sourceBody = h('div');

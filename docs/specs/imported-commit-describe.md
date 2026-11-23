@@ -14,8 +14,9 @@ is used. This replaces the earlier describe-string format of this card.
 - The count comes from `git rev-list --count HEAD` for a path source, and from the
   source host's REST API for a repo source: one `GET /repos/<name>/commits?sha=<sha>&per_page=1`
   request whose `link` header names the last page, which is the exact count. The stored
-  key rides only to the host it belongs to (the recorded `tokenHost`, else the ambient
-  `ALATE_GITHUB_HOST`).
+  key rides only to the configured `ALATE_GITHUB_HOST` (the `gitAuthEnv` rule); a
+  `tokenHost` recorded by a foreign-host import is a withhold flag: the key then rides
+  nowhere.
 - When the count is unknown, the label is the short hash alone. A failed lookup (network,
   rate limit, bad key, 404) only logs; the import never fails because the count failed.
 - A folder that is not a git work tree stores `''` and shows no commit.
