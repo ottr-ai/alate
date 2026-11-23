@@ -7231,57 +7231,61 @@ try {
       assert.equal(eQ.status, 400);
       assert.deepEqual(countRequests, [], 'a refused clone sends no count request');
 
-      // -- The count rides the runGit form on every runner: a PATH shim refuses a
+      // -- The count rides the runGit form on every POSIX runner: a PATH shim refuses a
       // `-C <dir>` child unless safe.directory names the trusted dir, so the untrusted
       // import stores no label and the trusted import counts. This test is red on the
       // pre-runGit pathCommitLabel, whose git child carried cwd and no -C, which the
-      // shim cannot see (probed on eece4b9: the label landed there).
-      const shimRepo10 = join(w10, 'shim-repo10');
-      mkdirSync(shimRepo10, { recursive: true });
-      git10c(['init', '-q', 'shim-repo10']);
-      git10c(['-C', 'shim-repo10', 'symbolic-ref', 'HEAD', 'refs/heads/main']);
-      commit10('shim-repo10', 's1');
-      commit10('shim-repo10', 's2');
-      const shimShort10 = git10c(['-C', 'shim-repo10', 'rev-parse', '--short', 'HEAD']).stdout.trim();
-      const shimGuarded10 = realpathSync(shimRepo10);
-      const shimDir10 = join(w10, 'git-shim10');
-      mkdirSync(shimDir10, { recursive: true });
-      const realGit10 = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
-      assert.ok(realGit10, 'the real git binary was found for the count shim');
-      writeFileSync(join(shimDir10, 'git'), [
-        '#!/bin/sh',
-        `guarded='${shimRepo10}'`,
-        `guarded2='${shimGuarded10}'`,
-        `real='${realGit10}'`,
-        "target=''",
-        "prev=''",
-        'for arg in "$@"; do',
-        '  if [ "$prev" = "-C" ]; then target="$arg"; fi',
-        '  prev="$arg"',
-        'done',
-        'if [ "$target" = "$guarded" ] || [ "$target" = "$guarded2" ]; then',
-        '  target=refuse',
-        '  for arg in "$@"; do',
-        '    if [ "$arg" = "safe.directory=$guarded" ] || [ "$arg" = "safe.directory=$guarded2" ]; then target=pass; fi',
-        '  done',
-        'fi',
-        'if [ "$target" = refuse ]; then',
-        '  printf "fatal: detected dubious ownership in repository at \'%s\'\\n" "$guarded" >&2',
-        '  exit 128',
-        'fi',
-        'exec "$real" "$@"',
-      ].join('\n'), { mode: 0o755 });
-      const savedPath10 = process.env.PATH;
-      process.env.PATH = `${shimDir10}${delimiter}${process.env.PATH ?? ''}`;
-      const dbShimA = mkDb10('alat10-shim-a.db');
-      const stShimA = await dash.importSource(dash.loadState(dbShimA), shimRepo10, 'path', null, dbShimA);
-      assert.equal(stShimA.source.commitLabel, '', 'an untrusted count call is refused (the runGit -C form the shim sees)');
-      dash.setTrustedPathSource(shimRepo10);
-      const dbShimB = mkDb10('alat10-shim-b.db');
-      const stShimB = await dash.importSource(dash.loadState(dbShimB), shimRepo10, 'path', null, dbShimB);
-      assert.equal(stShimB.source.commitLabel, `2-${shimShort10}`, 'the trusted count call carries safe.directory and lands');
-      process.env.PATH = savedPath10;
-      dash.setTrustedPathSource(null);
+      // shim cannot see (probed on eece4b9: the label landed there). Windows has no sh
+      // to run the shim and skips the simulation, like the foreign-owned block near the
+      // end of this suite; there the count is covered by the plain-folder run.
+      if (process.platform !== 'win32') {
+        const shimRepo10 = join(w10, 'shim-repo10');
+        mkdirSync(shimRepo10, { recursive: true });
+        git10c(['init', '-q', 'shim-repo10']);
+        git10c(['-C', 'shim-repo10', 'symbolic-ref', 'HEAD', 'refs/heads/main']);
+        commit10('shim-repo10', 's1');
+        commit10('shim-repo10', 's2');
+        const shimShort10 = git10c(['-C', 'shim-repo10', 'rev-parse', '--short', 'HEAD']).stdout.trim();
+        const shimGuarded10 = realpathSync(shimRepo10);
+        const shimDir10 = join(w10, 'git-shim10');
+        mkdirSync(shimDir10, { recursive: true });
+        const realGit10 = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+        assert.ok(realGit10, 'the real git binary was found for the count shim');
+        writeFileSync(join(shimDir10, 'git'), [
+          '#!/bin/sh',
+          `guarded='${shimRepo10}'`,
+          `guarded2='${shimGuarded10}'`,
+          `real='${realGit10}'`,
+          "target=''",
+          "prev=''",
+          'for arg in "$@"; do',
+          '  if [ "$prev" = "-C" ]; then target="$arg"; fi',
+          '  prev="$arg"',
+          'done',
+          'if [ "$target" = "$guarded" ] || [ "$target" = "$guarded2" ]; then',
+          '  target=refuse',
+          '  for arg in "$@"; do',
+          '    if [ "$arg" = "safe.directory=$guarded" ] || [ "$arg" = "safe.directory=$guarded2" ]; then target=pass; fi',
+          '  done',
+          'fi',
+          'if [ "$target" = refuse ]; then',
+          '  printf "fatal: detected dubious ownership in repository at \'%s\'\\n" "$guarded" >&2',
+          '  exit 128',
+          'fi',
+          'exec "$real" "$@"',
+        ].join('\n'), { mode: 0o755 });
+        const savedPath10 = process.env.PATH;
+        process.env.PATH = `${shimDir10}${delimiter}${process.env.PATH ?? ''}`;
+        const dbShimA = mkDb10('alat10-shim-a.db');
+        const stShimA = await dash.importSource(dash.loadState(dbShimA), shimRepo10, 'path', null, dbShimA);
+        assert.equal(stShimA.source.commitLabel, '', 'an untrusted count call is refused (the runGit -C form the shim sees)');
+        dash.setTrustedPathSource(shimRepo10);
+        const dbShimB = mkDb10('alat10-shim-b.db');
+        const stShimB = await dash.importSource(dash.loadState(dbShimB), shimRepo10, 'path', null, dbShimB);
+        assert.equal(stShimB.source.commitLabel, `2-${shimShort10}`, 'the trusted count call carries safe.directory and lands');
+        process.env.PATH = savedPath10;
+        dash.setTrustedPathSource(null);
+      }
 
       // -- a stored state without a label keeps no field: the header falls back to the
       // short hash alone (the render fallback is `src.commitLabel || short` in app.js).
