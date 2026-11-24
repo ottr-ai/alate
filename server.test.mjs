@@ -7056,6 +7056,9 @@ try {
     let fixtureCommits = () => ({ link: '', items: [] });
     let fixtureAhead = () => ({ status: 'behind', ahead_by: 0 });
     const countFixture = createServer((req, res) => {
+      // A fresh socket per request: under heavy load a pooled keep-alive socket can be
+      // reset before the next import reuses it (ECONNRESET), and the request never lands.
+      res.setHeader('connection', 'close');
       countRequests.push({ url: req.url ?? '', authorization: req.headers.authorization });
       if (/^\/repos\/own\/data\/commits\?/.test(req.url ?? '')) {
         const c = fixtureCommits();
