@@ -21,10 +21,18 @@ colors:
   line-number: "#8a929b"
   light:
     primary: "#b3261e"
+    primary-wash: "#fbeae8"
     edit: "#8f6200"
+    edit-wash: "#f9f0d8"
     secondary: "#3c6a99"
+    secondary-wash: "#e7eef5"
     paper: "#f1f2f4"
     sheet: "#fbfcfd"
+    ink: "#1b1e22"
+    ink-soft: "#5d656e"
+    rule: "#c6ccd2"
+    rule-soft: "#d6dade"
+    line-number: "#8a929b"
   dark:
     primary: "#ffb4ae"
     edit: "#f0b429"
