@@ -1,6 +1,10 @@
 ---
+version: alpha
 name: alate
 description: "Galley Proof: the agent-data repo as a proof sheet on Ottr's cool steel palette — amber for edits, red for deletions and errors, steel blue for the reader's pencil."
+omitted:
+  - section: "Voice & Content Strategy"
+    reason: "The dashboard's copy is short labels and status lines; the visual rules here own its tone."
 colors:
   primary: "#b3261e"
   primary-wash: "#fbeae8"
@@ -15,16 +19,28 @@ colors:
   rule: "#c6ccd2"
   rule-soft: "#d6dade"
   line-number: "#8a929b"
+  light:
+    primary: "#b3261e"
+    edit: "#8f6200"
+    secondary: "#3c6a99"
+    paper: "#f1f2f4"
+    sheet: "#fbfcfd"
+  dark:
+    primary: "#ffb4ae"
+    edit: "#f0b429"
+    secondary: "#8fb0d0"
+    paper: "#2b2e32"
+    sheet: "#303338"
 typography:
   display:
     fontFamily: "Source Serif 4, Georgia, serif"
-    fontSize: "clamp(2rem, 4vw, 2.7rem)"
+    fontSize: "2.7rem"
     fontWeight: 650
     lineHeight: 1.08
     letterSpacing: "-0.025em"
   headline:
     fontFamily: "Source Serif 4, Georgia, serif"
-    fontSize: "clamp(1.6rem, 2.4vw, 2.15rem)"
+    fontSize: "2.15rem"
     fontWeight: 650
     lineHeight: 1.12
     letterSpacing: "-0.022em"
@@ -50,13 +66,17 @@ typography:
     fontWeight: 400
     lineHeight: 1.75
 rounded:
-  none: "0"
+  none: "0px"
 spacing:
   xs: "0.25rem"
   sm: "0.5rem"
   md: "1rem"
   lg: "1.5rem"
   xl: "2.5rem"
+motion:
+  proof-mark:
+    duration: 150ms
+    timingFunction: ease-out
 components:
   button-primary:
     backgroundColor: "{colors.ink}"
@@ -107,7 +127,7 @@ The world refuses the code-editor default: no grey tree chrome, no tab strip, no
 
 ## Colors
 
-The palette is Ottr's: cool steel neutrals and three working inks with pale washes for fills. Light values are listed; the dark theme uses Ottr's dark set (`--field` #2b2e32, `--panel` #303338, amber #f0b429, red #ffb4ae, steel #8fb0d0).
+The palette is Ottr's: cool steel neutrals and three working inks with pale washes for fills. Light values are listed; the dark theme uses Ottr's dark set (`--field` #2b2e32, `--panel` #303338, amber #f0b429, red #ffb4ae, steel #8fb0d0). The front matter holds these mode-dependent values under `colors.light` and `colors.dark`; the top-level color tokens are the light defaults.
 
 ### Primary
 - **Proof Red** (#b3261e): deletions (deleted-line rules, delete margin marks), errors, the danger button. It says *this is gone or broken* — never decoration, never links.
@@ -143,8 +163,8 @@ The palette is Ottr's: cool steel neutrals and three working inks with pale wash
 **Character:** A serif proof sheet with a typewriter margin. The serif reads like print and carries all hierarchy through weight (650 vs 400), never through color. The mono is the working voice: every path, count, version, sha, and line of file text.
 
 ### Hierarchy
-- **Display** (650, clamp(2rem, 4vw, 2.7rem), 1.08, -0.025em): onboarding headline only.
-- **Headline** (650, clamp(1.6rem, 2.4vw, 2.15rem), 1.12): sheet h1 — view title, open file path.
+- **Display** (650, clamp(2rem, 4vw, 2.7rem), 1.08, -0.025em): onboarding headline only. The `typography.display` token holds the 2.7rem upper bound.
+- **Headline** (650, clamp(1.6rem, 2.4vw, 2.15rem), 1.12): sheet h1 — view title, open file path. The `typography.headline` token holds the 2.15rem upper bound.
 - **Title** (650, 1.3rem, 1.2): overview section heads, always sitting on a 2px ink rule; wordmark (700, 1.45rem).
 - **Body** (400, 1rem, 1.55): serif reading text; ledes capped at 68ch, notes at 70ch.
 - **Label/Meta** (400–500, 0.78rem, mono): source line, counts, asides, table metadata. Counts use `tabular-nums`.
@@ -155,7 +175,7 @@ The palette is Ottr's: cool steel neutrals and three working inks with pale wash
 
 ## Layout
 
-The page is a fixed masthead over a two-column desk: an 18.5rem file index (right hairline border) and the galley. The galley centers a sheet at max-width 76rem with 2rem/2.5rem padding. While editing, the desk becomes editor (1fr) plus a 15rem proof margin; the press bar pins under the galley. The index is a column of `<details>` groups, each headed by a 600-weight serif summary over a 1px ink rule (closed groups fall back to `--rule`).
+The page is a fixed masthead over a two-column desk: an 18.5rem file index (right hairline border, `@web/index.html#index`) and the galley (`@web/index.html#galley`). The galley centers a sheet at max-width 76rem with 2rem/2.5rem padding. While editing, the desk becomes editor (1fr) plus a 15rem proof margin; the press bar pins under the galley. The index is a column of `<details>` groups, each headed by a 600-weight serif summary over a 1px ink rule (closed groups fall back to `--rule`).
 
 Spacing sits on a rem rhythm of 0.25 / 0.5 / 1 / 1.5 / 2.5rem. Section blocks (`part`) stack at 2.6rem. Entry rows are three-column grids (name 12–22rem / description / right-aligned mono aside) with 1px rule dividers.
 
@@ -201,7 +221,7 @@ Light `--sheet` surface, max-width 76rem, top edge 2px ink while editing with ha
 Every text input stops at 30rem, so a field never reads as a full-width section rule.
 
 ### Proof Margin (signature component)
-A 15rem column beside the editor. Each mark: 2px amber left border, 600-weight amber serif text naming the change, then a mono quote of the old text prefixed `was: `. A deletion mark (`.mark.del`) uses red instead. Marks align to changed lines via absolute `top`; they animate 150ms ease-out. This margin is the memorable moment — the user reads the push before making it.
+A 15rem column beside the editor. Each mark: 2px amber left border, 600-weight amber serif text naming the change, then a mono quote of the old text prefixed `was: `. A deletion mark (`.mark.del`) uses red instead. Marks align to changed lines via absolute `top`; they animate 150ms ease-out, the `motion.proof-mark` token. This margin is the memorable moment — the user reads the push before making it.
 
 ### Editor (backdrop + textarea stack)
 Transparent textarea stacked over a backdrop that draws line numbers (`tabular-nums`, gutter 3.6em) and per-line change bands. Identical metrics keep the layers aligned: mono 0.8125rem / 1.75, tab-size 4, pre-wrap. Caret is amber — the pen, not the error.
