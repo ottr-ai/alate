@@ -111,7 +111,7 @@ release.
 
 ## Ready reports
 
-- Before a ready report, check the diff against every acceptance clause of the card, one clause at a time. List each clause with its evidence in the report.
+- Before a ready report, check the diff against every acceptance clause of the card, one clause at a time. Also check the diff against every set that the card's steps name, one element at a time. A step can name a set that no acceptance clause enumerates. List each clause with its evidence in the report.
 - A ready report states every deviation from the card or steer text, with the reason. The implementation ships the mechanism the card or steer names unless the ready report gives that reason.
 - When a change touches a failure path, test each point where the failure can fire in the first commit. One fixture covers one point. A fetch timeout fires at connect, at the response headers, and at the body read (ALAT-103, ALAT-113, ALAT-131). When a change keeps, restores, or resurrects state that a deletion or cleanup loop would otherwise remove, derive the kept set from the durable record, not from a walk of the new source tree (ALAT-178). Test each disagreement class between the record and each source tree (changed, dropped, added) in the first commit.
 - Prove refusal, gating, and portability paths by injection, not by the turn environment. A new test must not gate on root, on one test runner, on one OS, or on the turn's host state. Inject the probe (the access function, the fetch, the git shim) so the proof runs in the CI chain. ALAT-212 needed three send-backs for a root-only test, a runner-bound refusal proof, and a Windows-bound shim. ALAT-105 lesson 1 lists the root variant of the same class.
