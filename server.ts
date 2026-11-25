@@ -543,7 +543,9 @@ function persistDash(): void {
 const dashToken = (): string | undefined => config.token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
 
 // A repo import named a host other than github.com: the stored token is presumed to
-// belong to that host, so the update checker never sends it to github.com. Recorded
+// belong to that host, so no route sends it to github.com — the update checker, the
+// git children of later imports and ticks, and the editor push all ride without it.
+// Recorded
 // before the clone runs, so a failed import (a private repo clone throws before any
 // source host is stored) is remembered too, and it stays sticky across later github.com
 // imports and restarts. The fail-closed cost is only the unauthenticated GitHub rate
@@ -623,7 +625,7 @@ async function selectSource(spec: string, kind?: string, token = dashToken()): P
 async function dashCheck(): Promise<void> {
   if (running || importing || editing || snapshotting || dashState.source?.kind !== 'repo') return
   const src = dashState.source
-  const sha = await remoteHead(src.name, src.ref, dashToken(), src.host ?? '');
+  const sha = await remoteHead(src.name, src.ref, dashToken(), src.host ?? '', config.tokenHost)
   const behind = sha !== '' && sha !== src.importedSha
     ? await remoteAhead(src.name, src.importedSha, sha, dashToken(), src.host, config.tokenHost)
     : null

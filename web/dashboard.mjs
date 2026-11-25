@@ -612,6 +612,10 @@ const remoteUrl = (name, host = '') => (existsSync(name) ? name : `${GH_BASE ?? 
 // bounds the whole call, so a slow-dribble transfer or a non-http stall ends too.
 const GIT_NET_TIMEOUT_MS = 15000;
 
+// Host of a git URL; '' for a local path (gitAuthEnv attaches no auth there either way).
+/** @param {string} url @returns {string} */
+const urlHost = url => { try { return new URL(url).host; } catch { return ''; } };
+
 // Clone a GitHub repo into a fresh temp dir; temp: true so importSource cleans it up.
 /**
  * @param {string} spec
@@ -629,7 +633,7 @@ function cloneRepo(spec, parsed, token) {
   const url = remoteUrl(parsed.name, host);
   const active = token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
   const dir = mkdtempSync(join(tmpdir(), 'alate-dashboard-'));
-  const { args: gitArgs, env } = cloneCommand(url, parsed.ref, active, dir, repoGitBase());
+  const { args: gitArgs, env } = cloneCommand(url, parsed.ref, gitTokenFor(active, url), dir, repoGitBase());
   const git = spawnSync('git', gitArgs, { env, stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8', timeout: GIT_NET_TIMEOUT_MS, killSignal: 'SIGKILL' });
   if (git.status !== 0) {
     rmSync(dir, { recursive: true, force: true }); // our own fresh temp dir only
@@ -689,6 +693,12 @@ function countTokenFor(token, host, recorded = null) {
 }
 /** @param {string | undefined} token @param {string} host @returns {string | undefined} */
 const countToken = (token, host) => countTokenFor(token, host, countTokenHost);
+
+// The token a git child may carry, after the same rule the REST calls apply: the key
+// rides only to the ambient host, and a tokenHost recorded for another host withholds
+// it everywhere — the import clone, the tick's ls-remote and the editor push included.
+/** @param {string | undefined} token @param {string} url @param {string | null} [recorded] @returns {string | undefined} */
+const gitTokenFor = (token, url, recorded) => countTokenFor(token, urlHost(url), recorded ?? countTokenHost);
 
 // Every upstream GET carries an AbortSignal.timeout cap, mirroring lib/updates.mjs: the
 // default 15 s keeps a stalled API from holding the import op for minutes, and tests
@@ -1030,7 +1040,8 @@ async function editRepoSource(state, db, src, ops, token) {
   const resolved = cloneRepo(src.spec, { name: src.name, ref: src.ref, host: src.host }, token);
   try {
     for (const op of ops) applyToTree(resolved.dir, op.rel, op.base, op.bytes);
-    const env = gitAuthEnv(remoteUrl(src.name, src.host), token, repoGitBase());
+    const url = remoteUrl(src.name, src.host);
+    const env = gitAuthEnv(url, gitTokenFor(token, url), repoGitBase());
     const commit = commitEdit(resolved.dir, ops.map(op => op.rel), ops[0].message, env, token);
     const branch = src.ref || runGit(resolved.dir, ['rev-parse', '--abbrev-ref', 'HEAD'], env).stdout.trim();
     const push = runGit(resolved.dir, ['push', 'origin', `HEAD:${branch}`], env);
@@ -1661,18 +1672,21 @@ async function applyEntryAction(state, db, body, token, known) {
 // Async spawn: a stalled remote must not block the event loop, so the server's routes and
 // boot keep answering while the check runs. The spawn timeout kills a stalled git; the
 // low-speed env (repoGitBase) aborts a silent https transfer on git's own clock.
+// recorded is the tokenHost a foreign-host import stored (dashCheck passes config.tokenHost);
+// it withholds the key here the way it does on the REST lookups.
 /**
  * @param {string} name
  * @param {string} ref
  * @param {string | undefined} token
  * @param {string} [host='']
+ * @param {string | null} [recorded=null]
  * @returns {Promise<string>}
  */
-async function remoteHead(name, ref, token, host = '') {
+async function remoteHead(name, ref, token, host = '', recorded = null) {
   const url = remoteUrl(name, host);
   return await new Promise(resolve => {
     const git = spawn('git', ['ls-remote', url, ref || 'HEAD'], {
-      env: gitAuthEnv(url, token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN, repoGitBase()),
+      env: gitAuthEnv(url, gitTokenFor(token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN, url, recorded), repoGitBase()),
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: GIT_NET_TIMEOUT_MS,
       killSignal: 'SIGKILL',

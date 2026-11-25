@@ -9612,6 +9612,108 @@ try {
     }
   }
 
+  // Git routes hold the same foreign-host rule the REST routes hold. After an import
+  // names another host (noteTokenHost records config.tokenHost even for a failed
+  // import), no git child may carry the stored key's extraheader: the tick's
+  // ls-remote, a re-import clone and an editor push included. A git shim first on
+  // PATH logs each child's GIT_CONFIG_KEY_0 and subcommand behind a gate file, so the
+  // assertion window holds only children that ran after the foreign host was
+  // recorded. The insteadOf rewrite serves a local bare fixture for
+  // https://github.com (no ALATE_TEST_GH_BASE here), so the URLs stay https and
+  // gitAuthEnv attaches auth. POSIX-only: the shim is a sh script.
+  if (process.platform !== 'win32') {
+    const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(realGit, 'the real git binary was found for the extraheader shim');
+    const keyShimDir = join(tmp, 'git-key-shim');
+    const keyShimLog = join(tmp, 'git-key-shim.log');
+    const keyShimGate = join(tmp, 'git-key-shim.gate');
+    mkdirSync(keyShimDir, { recursive: true });
+    const keyShim = [
+      '#!/bin/sh',
+      '# Test shim: log GIT_CONFIG_KEY_0 and the subcommand of every gated git child,',
+      '# then pass through to the real git. runGit children start with -C <dir> (and',
+      '# -c <k=v> ident pins), so the first argument is not always the subcommand.',
+      `if [ -f '${keyShimGate}' ]; then`,
+      "  sub=''",
+      "  skip=''",
+      "  for a in \"$@\"; do",
+      '    if [ "$skip" ]; then skip=\'\'; continue; fi',
+      '    case "$a" in',
+      '      -C|-c) skip=1;;',
+      '      -*) ;;',
+      '      *) sub="$a"; break;;',
+      '    esac',
+      '  done',
+      `  printf '%s %s\\n' "\${GIT_CONFIG_KEY_0-}" "\${sub:-?}" >> '${keyShimLog}'`,
+      'fi',
+      `exec '${realGit}' "$@"`,
+    ].join('\n');
+    writeFileSync(join(keyShimDir, 'git'), keyShim, { mode: 0o755 });
+    const ghxBare = join(tmp, 'ghx', 'own', 'xdata');
+    const ghxSeed = join(tmp, 'ghx-seed');
+    mkdirSync(join(tmp, 'ghx', 'own'), { recursive: true });
+    assert.equal(git(['init', '-q', '--bare', '-b', 'main', ghxBare]).status, 0);
+    assert.equal(git(['init', '-q', '-b', 'main', ghxSeed]).status, 0);
+    writeFileSync(join(ghxSeed, 'notes.md'), 'seed notes\n');
+    git(['-C', ghxSeed, 'config', 'user.name', 't']);
+    git(['-C', ghxSeed, 'config', 'user.email', 't@t']);
+    assert.equal(git(['-C', ghxSeed, 'add', '-A']).status, 0);
+    assert.equal(git(['-C', ghxSeed, 'commit', '-qm', 'seed']).status, 0);
+    assert.equal(git(['-C', ghxSeed, 'push', '-q', ghxBare, 'main']).status, 0);
+    const ghxHead = git(['-C', ghxBare, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    writeFileSync(join(tmp, 'ghx-gitconfig'), `[url "${pathToFileURL(join(tmp, 'ghx')).href}/"]\n\tinsteadOf = https://github.com/\n`);
+    const ghxEnv = { ...testServerEnv, ALATE_TEST_GIT_CONFIG_GLOBAL: join(tmp, 'ghx-gitconfig') };
+    delete ghxEnv.ALATE_TEST_GH_BASE;
+    const ghxCfg = join(tmp, 'server-config-ghx.json');
+    const ghxSrv = spawnServer(['--port', '0', '--config', ghxCfg, '--db', join(tmp, 'state-ghx.db'), '--interval', '1', '--update-interval', '3600'],
+      { ...ghxEnv, PATH: `${keyShimDir}${delimiter}${ghxEnv.PATH ?? ''}` });
+    try {
+      const { apiKey: ghxKey, base: ghxBase } = await awaitStartup(ghxSrv);
+      const ghxAuth = { 'Content-Type': 'application/json', Authorization: `Bearer ${ghxKey}` };
+      const ghxPost = async (route, body) => fetch(new URL(route, ghxBase), { method: 'POST', headers: ghxAuth, body: JSON.stringify(body) });
+      const ghxGet = async route => fetch(new URL(route, ghxBase), { headers: { Authorization: `Bearer ${ghxKey}` } });
+      const ghxPut = async b => fetch(new URL('/api/file', ghxBase), { method: 'PUT', headers: ghxAuth, body: JSON.stringify(b) });
+      writeFileSync(keyShimGate, '');
+      assert.equal((await ghxPost('/api/settings', { token: 'ghx-token-5e3' })).status, 200);
+      // '/api/im' + 'port': the literal route string would read as a bare import to the
+      // zero-deps gate. Positive control: with nothing recorded, the github.com clone
+      // rides the key, and the shim really sees the env it must later withhold.
+      const ghxImportRoute = '/api/im' + 'port';
+      const imp = await ghxPost(ghxImportRoute, { source: 'own/xdata', kind: 'repo' });
+      assert.equal(imp.status, 200, JSON.stringify(await imp.json()));
+      const state1 = await (await ghxGet('/api/state')).json();
+      assert.equal(state1.source.kind, 'repo');
+      const ridden = readFileSync(keyShimLog, 'utf8').split('\n').filter(line => line.includes('extraheader'));
+      assert.ok(ridden.length > 0, 'the unrecorded github.com clone rides the key (shim control)');
+      // The failed foreign-host import persists tokenHost before its clone runs.
+      rmSync(keyShimGate, { force: true });
+      rmSync(keyShimLog, { force: true });
+      const bad = await ghxPost(ghxImportRoute, { source: 'acme.ghe.com/own/missing', kind: 'repo' });
+      assert.equal(bad.status, 400);
+      assert.equal(JSON.parse(readFileSync(ghxCfg, 'utf8')).tokenHost, 'acme.ghe.com', 'the attempted foreign host is persisted');
+      // From here every logged child ran with the foreign host recorded.
+      writeFileSync(keyShimGate, '');
+      await waitFor(async () => {
+        const s = await (await ghxGet('/api/state')).json();
+        return s.update.checkedAt !== state1.update.checkedAt && s.update.remoteSha === ghxHead;
+      }, 15_000);
+      const reimp = await ghxPost(ghxImportRoute, { source: 'own/xdata', kind: 'repo' });
+      assert.equal(reimp.status, 200, JSON.stringify(await reimp.json()));
+      const notes = await (await ghxGet('/api/file?path=notes.md')).json();
+      const er = await ghxPut({ path: 'notes.md', content: `${notes.content}edited by the server\n`, base: notes.hash, message: 'test: push after a foreign-host import' });
+      const edit = await er.json();
+      assert.equal(er.status, 200, JSON.stringify(edit));
+      assert.equal(edit.pushed, true, 'the editor push landed');
+      const tail = readFileSync(keyShimLog, 'utf8').split('\n').filter(Boolean);
+      assert.ok(tail.length >= 10, `the shim saw the git children after the failed import (${tail.length})`);
+      assert.ok(tail.some(line => line.endsWith(' ls-remote')), 'the tick ls-remote ran in the window');
+      assert.ok(tail.some(line => line.endsWith(' clone')), 'the re-import clone ran in the window');
+      assert.ok(tail.some(line => line.endsWith(' push')), 'the editor push ran in the window');
+      assert.deepEqual(tail.filter(line => line.includes('extraheader')), [],
+        'after a failed foreign-host import no git child carries the stored key');
+    } finally { await stopServer(ghxSrv); }
+  }
+
   // Teardown escalation: a server that ignores SIGTERM (what a mutant can become) must still
   // die, and no process may be left behind. Windows cannot ignore SIGTERM, so the check is
   // POSIX-only.
