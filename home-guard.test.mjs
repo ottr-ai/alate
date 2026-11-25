@@ -6,7 +6,8 @@
 // snapcompact — the cache and session stores of the browser profiles under
 // .omp/browser-profiles, the live worker's .omp/plugins/cache downloads and
 // .omp/plugins/node_modules dependencies (other plugins/ paths stay checked),
-// .omp/memories, the memory backend store .omp/agent/memories, .omp/oauth, .omp/install-id,
+// .omp/memories, the memory backend store .omp/agent/memories, the hindsight outbox
+// .omp/agent/hindsight-outbox, .omp/oauth, .omp/install-id,
 // .omp/marketplaces.json, .omp/natives, the .omp/autoqa.db database with its -wal and
 // -journal files, the alate rules install record .omp/agent/rules/.alate-installed.json,
 // the bookkeeping files under .alate (in-use.json, in-use.owners.json,
@@ -35,7 +36,9 @@ const WATCHED = ['.alate', '.agents', '.omp'];
 // also rewrites its plugin download cache (.omp/plugins/cache). The platform seed
 // rewrites .omp/plugins/node_modules dependency shims (ALAT-195); other plugins/ paths
 // stay checked. The worker also rewrites its memories (.omp/memories and the memory
-// backend store .omp/agent/memories), its oauth state, its native grammar files
+// backend store .omp/agent/memories), its hindsight outbox (.omp/agent/hindsight-outbox;
+// on a shared machine a sibling session creates its own entries there mid-chain,
+// ALAT-227), its oauth state, its native grammar files
 // (.omp/natives), the install-id and marketplaces.json bookkeeping files, and its
 // autoqa.db runtime database with its -wal and -journal files. A sibling session's
 // provisioning run (sync.mjs) rewrites the alate rules install record
@@ -53,6 +56,7 @@ const OMP_LIVE = rel => rel === 'logs' || rel.startsWith('logs/') || rel === 'ca
   || rel === 'snapcompact-savings.jsonl'
   || rel === 'agent/blobs' || rel.startsWith('agent/blobs/')
   || rel === 'agent/memories' || rel.startsWith('agent/memories/')
+  || rel === 'agent/hindsight-outbox' || rel.startsWith('agent/hindsight-outbox/')
   || (/^browser-profiles\//.test(rel)
     && (/\/(?:Cache|Code Cache|GPUCache|GPUPersistentCache|GrShaderCache|ShaderCache|GraphiteDawnCache|DawnGraphiteCache|DawnWebGPUCache)(?:\/|$)/.test(rel)
       || /\/(?:Cookies|History)(?:-wal|-journal)?$/.test(rel)))
@@ -253,12 +257,27 @@ const selfCheck = () => {
     writeFileSync(join(fake, '.omp/agent/memories/mnemopi/m2.md'), 'memory\n');
     mkdirSync(join(fake, '.alate/layers/w1/.omp/agent/memories/mnemopi'), { recursive: true });
     writeFileSync(join(fake, '.alate/layers/w1/.omp/agent/memories/mnemopi/m.md'), 'memory\n');
+    // A live worker session creates its hindsight outbox mid-chain (ALAT-227 chain run:
+    // agent/hindsight-outbox/<session-id> appeared between record and check on a shared
+    // machine). The creation also moves the agent dir's mtime; with no checked child
+    // changed that parent-mtime diff must be dropped.
+    mkdirSync(join(fake, '.omp/agent/hindsight-outbox/908f33a5e28e02b6'), { recursive: true });
+    writeFileSync(join(fake, '.omp/agent/hindsight-outbox/908f33a5e28e02b6/outbox.jsonl'), '{}\n');
+    mkdirSync(join(fake, '.alate/layers/w1/.omp/agent/hindsight-outbox/908f33a5e28e02b6'), { recursive: true });
+    writeFileSync(join(fake, '.alate/layers/w1/.omp/agent/hindsight-outbox/908f33a5e28e02b6/outbox.jsonl'), '{}\n');
     // The live worker's layer runtime churns the same way inside .alate/layers/<id>/.omp,
     // and its browser tooling rewrites puppeteer there mid-chain.
     writeFileSync(join(fake, '.alate/layers/w1/.omp/puppeteer/package.json'), '{"puppeteer":true}\n');
     writeFileSync(join(fake, '.alate/layers/w1/.omp/install-id'), 'id-2\n');
     writeFileSync(join(fake, '.alate/layers/w1/.omp/cache/idx'), '{}\n');
     assert.equal(run('check', fake, snap).status, 0, 'live runtime churn passes');
+    // The outbox ignore stays narrow: a watched sibling of agent/hindsight-outbox still fails.
+    mkdirSync(join(fake, '.omp/agent/skills/x'), { recursive: true });
+    writeFileSync(join(fake, '.omp/agent/skills/x/SKILL.md'), 'x\n');
+    const skillsChange = run('check', fake, snap);
+    assert.notEqual(skillsChange.status, 0, 'watched agent/skills child write fails');
+    assert.match(skillsChange.stderr, /^home-guard: added entry: agent\/skills\/x\/SKILL\.md$/m);
+    rmSync(join(fake, '.omp/agent/skills'), { recursive: true, force: true });
     // ALAT-195: a platform seed rewrites plugin dependency shims mid-chain.
     utimesSync(join(fake, '.omp/plugins/node_modules/.bin/plugin-tool'), new Date(), new Date(Date.now() + 9000));
     assert.equal(run('check', fake, snap).status, 0, 'plugin dependency shim mtime churn passes');
@@ -318,7 +337,8 @@ const selfCheck = () => {
       && !('browser-profiles/chrome-x/Default/Cookies' in recorded.mtime)
       && !('browser-profiles/chrome-x/Default/History-journal' in recorded.mtime)
       && !('layers/w1/.omp/puppeteer' in recorded.mtime) && !('layers/w1/.omp/cache' in recorded.mtime)
-      && !('layers/w1/.omp/install-id' in recorded.mtime),
+      && !('layers/w1/.omp/install-id' in recorded.mtime)
+      && !('agent/hindsight-outbox' in recorded.mtime),
       'live runtime entries stay out of the snapshot');
     assert.deepEqual(Object.keys(recorded.dirs).sort(), ['agent', 'agent/rules',
       'browser-profiles', 'browser-profiles/chrome-x', 'browser-profiles/chrome-x/Default',
