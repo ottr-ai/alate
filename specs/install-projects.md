@@ -148,4 +148,5 @@ l. A `.md` snapshot item with hidden characters: rejected per item, never instal
 - No dashboard UI changes for the new config field.
 - No deletion of files dropped from the manifest.
 - No layer-mode variant for project checkouts.
-- No change to capture semantics in `sync-projects.mjs`.
+- No change to capture semantics in `sync-projects.mjs`. (ALAT-228 later gated the
+  same snapshot-to-checkout refresh; see `specs/capture-baseline.md`.)

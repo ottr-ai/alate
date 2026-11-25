@@ -5,12 +5,12 @@
 // need to know about this repo; the snapshots here are refreshed copies, never hand-edited.
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
-import { canonicalizeBytes, parseArgs, resolveDataDir, checkDestination, assertSourceInside, safeRel, fingerprint, lineOf, SHAPES, readBaselines, writeBaselines } from './lib/data.mjs';
+import { canonicalizeBytes, parseArgs, resolveDataDir, checkDestination, assertSourceInside, safeRel, fingerprint, lineOf, SHAPES, readBaselines, writeBaselines, describeProblem, renderForTarget, ruleProblems } from './lib/data.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
 /** @typedef {string[] | { extras?: string[], bundles?: string[] }} ProjectValue */
 /** @typedef {{ contextFiles: string[], projects: Record<string, ProjectValue> }} ProjectsManifest */
-/** @typedef {{ key: string, from: string, to: string, bytes: Buffer, old: Buffer | null }} CopyPlan */
+/** @typedef {{ key: string, rel: string, from: string, to: string, bytes: Buffer, old: Buffer | null }} CopyPlan */
 
 const args = /** @type {CliArgs} */ (parseArgs(process.argv.slice(2), ['--root', '--data', '--repo'], ['--first']));
 const firstCapture = args.flags.has('--first'); // the starter-template escape hatch: see specs/capture-baseline.md
@@ -113,7 +113,7 @@ for (const [name, extras] of validated) {
       const hit = shape.exec(text);
       if (hit) problems.push(`${name}/${rel}:${lineOf(text, hit.index)}: possible ${shapeName}`);
     }
-    plan.push({ key: `${name}/${rel}`, from, to, bytes: canon.bytes, old: existsSync(to) ? readFileSync(to) : null });
+    plan.push({ key: `${name}/${rel}`, rel, from, to, bytes: canon.bytes, old: existsSync(to) ? readFileSync(to) : null });
   }
   for (const rel of have) {
     if (!existsSync(join(src, rel))) notes.push(`${rel} is gone in ${name}; delete projects/${name}/${rel} by hand if stale`);
@@ -149,7 +149,7 @@ const noBase = [];
 const noBaseStale = [];
 let added = 0, updated = 0, unchanged = 0, refreshed = 0;
 for (const entry of plan) {
-  const { key, from, to, bytes, old } = entry;
+  const { key, rel, from, to, bytes, old } = entry;
   const fpMachine = fingerprint(key, bytes);
   const fpSnap = old ? fingerprint(key, old) : null;
   const base = baselines ? baselines[key] ?? null : null;
@@ -174,9 +174,7 @@ for (const entry of plan) {
   }
   if (base === null) noBase.push(key);
   if (old && fpMachine === base) { // the snapshot moved elsewhere, the machine still holds the captured state
-    refreshed++;
-    actions.push({ key, from, snap: old });
-    if (stateUsable) updates[key] = fingerprint(key, old);
+    actions.push({ key, rel, from, snap: old });
     continue;
   }
   // capture: a machine edit, a first run, or a snapshot file missing in the data repo
@@ -191,9 +189,25 @@ if (conflicts.length) {
 }
 // ponytail: preflight is not a transaction — one snapshot copy may land before a later
 // write fails; rerun after fixing the cause. Upgrade to staging+rename if atomicity matters.
+/** @type {{ key: string, from: string, first: { rule: string, at: string | null } }[]} */
+const rejected = [];
 for (const a of actions) {
   if (a.snap) { // refresh: the committed snapshot is the newer truth, so the machine takes it
-    writeFileSync(a.from, a.snap);
+    // The refresh writes committed bytes into the checkout, where omp loads them as
+    // always-on context, so .md/.mdc items pass the same hidden-character gate
+    // install-projects.mjs applies; a laced snapshot is refused per file, the machine
+    // copy stays, and the run exits 1 below.
+    const rendered = renderForTarget(a.rel, canonicalizeBytes(a.rel, a.snap).bytes);
+    if (/\.mdc?$/i.test(a.rel)) {
+      const problems = ruleProblems(a.key, rendered.toString('utf8'), { frontmatter: false });
+      if (problems.length) {
+        rejected.push({ key: a.key, from: a.from, first: describeProblem(problems[0]) });
+        continue;
+      }
+    }
+    writeFileSync(a.from, rendered);
+    refreshed++;
+    if (stateUsable) updates[a.key] = fingerprint(a.key, a.snap);
     console.log(`refreshed projects/${a.key} into ${a.from} (the snapshot changed elsewhere; the machine copy was unchanged)`);
     continue;
   }
@@ -201,6 +215,11 @@ for (const a of actions) {
   writeFileSync(a.to, a.bytes);
   if (a.old) { updated++; console.log(`updated  ${relative(data.dir, a.to)}`); }
   else { added++; console.log(`added    ${relative(data.dir, a.to)}`); }
+}
+if (rejected.length) {
+  console.error('Nothing synced for these files. Fix the snapshot, then rerun:');
+  for (const m of rejected)
+    console.error(`hidden characters: the snapshot projects/${m.key} fails the .md/.mdc gate for ${m.from}; kept the machine copy, wrote nothing for it (${m.first.rule} at ${m.first.at})`);
 }
 if (noBaseStale.length) {
   console.error('Nothing synced for these files. Provision first or resolve by hand, then rerun:');
@@ -218,4 +237,4 @@ if (stateUsable && Object.keys(updates).length) {
     console.log(`note: ${statePath}: could not write the capture baseline (${/** @type {Error} */ (err).message}); the next capture runs without one`);
   }
 }
-if (noBaseStale.length) process.exit(1);
+if (noBaseStale.length || rejected.length) process.exit(1);

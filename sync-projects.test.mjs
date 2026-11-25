@@ -224,6 +224,44 @@ try {
     assert.equal(readFileSync(state3, 'utf8'), 'not json', 'a corrupt baseline file is left as-is');
   }
 
+  // ALAT-228: the refresh path writes committed snapshot bytes into the project checkout,
+  // where omp loads them as always-on context, so it passes the same hidden-character
+  // gate install-projects.mjs applies to .md/.mdc items: a laced snapshot is refused,
+  // the machine copy stays byte-identical, and the run exits 1.
+  {
+    const dataH = join(tmp, 'dataH');
+    const wsH = join(tmp, 'wsH');
+    mkdirSync(join(dataH, 'projects'), { recursive: true });
+    mkdirSync(join(wsH, 'eta'), { recursive: true });
+    mkdirSync(join(dataH, 'projects', 'eta'), { recursive: true });
+    writeFileSync(join(dataH, 'projects/projects.json'), JSON.stringify({ contextFiles: ['AGENTS.md'], projects: { eta: [] } }, null, 2) + '\n');
+    const runH = () => spawnSync(process.execPath, [join(repo, 'sync-projects.mjs'), '--root', wsH, '--data', dataH], { encoding: 'utf8' });
+    const machineH = join(wsH, 'eta', 'AGENTS.md');
+    const snapH = join(dataH, 'projects', 'eta', 'AGENTS.md');
+    const stateH = join(wsH, '.alate', 'captured-projects.json');
+    const fpH = text => fingerprint('eta/AGENTS.md', Buffer.from(text));
+    const v1 = '# eta v1\n';
+    writeFileSync(machineH, v1);
+    mkdirSync(join(wsH, '.alate'), { recursive: true });
+    writeFileSync(stateH, JSON.stringify({ 'eta/AGENTS.md': fpH(v1) })); // seeded baseline
+    writeFileSync(snapH, '# eta v2 board\u200b\n'); // laced snapshot changed elsewhere
+    const before = readFileSync(machineH);
+    let rH = runH();
+    assert.equal(rH.status, 1, `a laced refresh must exit 1: ${rH.stdout}`);
+    assert.match(rH.stderr, /hidden characters: the snapshot projects\/eta\/AGENTS\.md fails the \.md\/\.mdc gate for .+eta.AGENTS\.md; kept the machine copy, wrote nothing for it \(hidden character U\+200B at eta\/AGENTS\.md:1:15\)/);
+    assert.ok(readFileSync(machineH).equals(before), 'the refused refresh leaves the machine copy byte-identical');
+    assert.equal(readFileSync(snapH, 'utf8'), '# eta v2 board\u200b\n', 'the refusal leaves the snapshot alone');
+    assert.equal(JSON.parse(readFileSync(stateH, 'utf8'))['eta/AGENTS.md'], fpH(v1), 'a refused refresh leaves the baseline alone');
+    assert.doesNotMatch(rH.stdout, /refreshed/, 'the refused refresh is not counted or logged as one');
+    // The same refresh succeeds once the snapshot is clean: the refusal is content-gated.
+    writeFileSync(snapH, '# eta v2 board\n');
+    rH = runH();
+    assert.equal(rH.status, 0, rH.stderr);
+    assert.match(rH.stdout, /refreshed projects\/eta\/AGENTS\.md into .+ \(the snapshot changed elsewhere; the machine copy was unchanged\)/);
+    assert.equal(readFileSync(machineH, 'utf8'), '# eta v2 board\n');
+    assert.equal(JSON.parse(readFileSync(stateH, 'utf8'))['eta/AGENTS.md'], fpH('# eta v2 board\n'), 'the baseline adopts the clean snapshot');
+  }
+
   // Canonical capture (specs/canonical-form.md): CRLF machine text lands as LF in the data
   // repo with a note line, a .cmd captures LF too (install renders CRLF for it), binary
   // bytes pass through identically, and a re-capture of canonical output is unchanged.

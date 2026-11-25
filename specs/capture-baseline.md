@@ -82,9 +82,17 @@ and `B` the baseline fingerprint. `fp()` is `fingerprint()` from `lib/data.mjs`.
 
 When only the snapshot changed, the two scripts act in opposite ways:
 
-- `sync-projects.mjs` refreshes the machine copy. It writes the snapshot bytes to the
-  project file, leaves the data repo untouched, sets `B := fp(S)`, and prints
+- `sync-projects.mjs` refreshes the machine copy. It renders the snapshot bytes for
+  the target (`renderForTarget(rel, canonicalizeBytes(rel, S).bytes)`) and writes
+  them to the project file. It leaves the data repo untouched, sets `B := fp(S)`,
+  and prints
   `refreshed projects/<key> into <machine path> (the snapshot changed elsewhere; the machine copy was unchanged)`.
+  A `.md`/`.mdc` item (any letter case) first passes the hidden-character gate that
+  `install-projects.mjs` applies, because omp loads a checkout copy as always-on
+  project context. A gate failure refuses that file: the machine copy stays, `B`
+  stays, and the run prints one line per refused file,
+  `hidden characters: the snapshot projects/<key> fails the .md/.mdc gate for <machine path>; kept the machine copy, wrote nothing for it (<rule> at <at>)`.
+  The run exits with code 1.
 - `sync-user.mjs` keeps the committed snapshot and never writes the home. It prints
   `note: user/<rel>: the committed snapshot changed elsewhere and this machine still holds the captured state; kept the snapshot (provision the machine to get it)`.
   `B` stays unchanged.
