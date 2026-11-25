@@ -103,7 +103,11 @@ Rules for the links:
    runs, `<layer>/.omp/package.json` holds a barrier with empty `workspaces`: bun ends its
    workspace-root search there, so a `package.json` that a turn plants higher in the home is
    never adopted as the root, and its scripts never run. An entry that already sits at the
-   barrier path moves aside and comes back after the install. The install
+   barrier path moves aside and comes back after the install. Every barrier step resolves
+   `.omp` by path, so the provisioner pins `.omp`'s directory identity before the barrier
+   write and refuses the run before the next barrier step when a turn swaps `.omp` for
+   another directory or a symlink while bun runs; the clean-up's unlink and the aside
+   restore never touch a path through a swapped `.omp`. The install
    runs with `--ignore-scripts` unless the data repo ships a `plugins-allow-scripts` marker
    at its root, and the spawn environment is an explicit allowlist, so server secrets never
    reach bun or a lifecycle script. The copyfile backend and the hoisted linker keep every

@@ -2336,9 +2336,18 @@ try {
       // existing entry at the barrier path moves aside (rename never follows a link) and
       // comes back after the install; the exclusive write refuses a path replanted meanwhile.
       assertLayer();
-      const barrier = join(writeRoot, '.omp', 'package.json');
+      const ompDir = join(writeRoot, '.omp');
+      // Every barrier op resolves .omp by path, so a swap of .omp while the build runs must
+      // never turn the barrier write, the aside move, the clean-up's unlink, or the aside
+      // restore into writes or deletes inside the swapped-in target. Pin .omp's identity
+      // here and refuse before each op, the clean-up ones first: a refusal must land before
+      // any op can touch a path through a swapped .omp.
+      const ompId = dirIdentity(ompDir);
+      const assertOmp = () => assertDirIdentity(ompDir, ompId);
+      assertOmp();
+      const barrier = join(ompDir, 'package.json');
       const aside = lstatSync(barrier, { throwIfNoEntry: false }) ? `${barrier}.alate-aside-${process.pid}` : null;
-      if (aside) renameSync(barrier, aside);
+      if (aside) { assertOmp(); renameSync(barrier, aside); }
       // A fresh, provisioner-private package cache per install: bun copies cached package
       // bytes without checking them against bun.lock's integrity (measured on 1.4.4), and the
       // shared ~/.bun cache is turn-writable (each layer links .bun back to the home). The
@@ -2346,6 +2355,7 @@ try {
       const bunCache = mkdtempSync(join(tmpdir(), 'alate-bun-cache-'));
       let bun;
       try {
+        assertOmp();
         writeFileSync(barrier, '{ "private": true, "workspaces": [] }\n', { flag: 'wx' });
         // copyfile, never bun's hardlink default: a file: dep's snapshot source would end up
         // with a second link, and the alias guards on machine reads and writes would refuse
@@ -2361,6 +2371,9 @@ try {
         });
       } finally {
         rmSync(bunCache, { recursive: true, force: true });
+        // The refusal precedes both path ops: rmSync(barrier) and the aside restore must
+        // never resolve through a swapped .omp.
+        assertOmp();
         rmSync(barrier, { force: true });
         if (aside) renameSync(aside, barrier);
       }

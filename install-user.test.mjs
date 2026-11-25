@@ -3675,6 +3675,29 @@ exit 0
     assert.ok(call.cache !== firstCache && !existsSync(call.cache), 'each install gets a fresh cache dir, removed afterward');
     assert.ok(!call.env.includes('ALATE_API_KEY') && !call.env.includes('GITHUB_TOKEN'), 'the allowlist holds even when scripts are on');
 
+    // A turn swaps the fresh layer's .omp for a symlink to a scratch dir while bun runs:
+    // the barrier clean-up resolves .omp by path, so without a guard its unlink deletes the
+    // scratch dir's package.json. The run must refuse before the clean-up touches a path
+    // through the swap, the scratch file must survive, and current must never switch.
+    if (hasBun) {
+      const victim = join(tmpReal, 'bun-swap-victim');
+      mkdirSync(victim, { recursive: true });
+      writeFileSync(join(victim, 'package.json'), '{"name":"victim"}\n');
+      const swapDir = join(tmp, 'bun-swap-stub');
+      mkdirSync(swapDir, { recursive: true });
+      writeFileSync(join(swapDir, 'bun'), `#!/usr/bin/env node\nconst fs = require('node:fs');\nconst omp = require('node:path').dirname(process.cwd());\nfs.renameSync(omp, omp + '.alate-turned');\nfs.symlinkSync(${JSON.stringify(victim)}, omp);\n`);
+      chmodSync(join(swapDir, 'bun'), 0o755);
+      const swapEnv = { ...process.env, PATH: `${swapDir}${delimiter}${stubDir}${delimiter}${process.env.PATH ?? ''}`, SKILLSPECTOR_VENV: join(tmp, 'no-venv') };
+      const swapHome = join(tmpReal, 'layer-home-bun-swap');
+      const rSwap = run(['--data', plugData, '--layer'], swapHome, swapEnv);
+      assert.equal(rSwap.status, 1, rSwap.stdout);
+      assert.match(rSwap.stderr, /was replaced during the install/);
+      assert.equal(readFileSync(join(victim, 'package.json'), 'utf8'), '{"name":"victim"}\n',
+        'the barrier clean-up never deletes through a swapped .omp');
+      assert.equal(lstatSync(join(swapHome, '.alate', 'current'), { throwIfNoEntry: false }), undefined, 'current never switches');
+      assert.deepEqual(readdirSync(join(swapHome, '.alate', 'layers')), [], 'the swapped layer never survives its failed install');
+    }
+
     // Migration with the bytes an older alate wrote (a memory backend entry over the recorded
     // content): the home config still matches its record once the entry is ignored, so the
     // snapshot wins and neither the first nor a later layer carries the entry. A pure stale
