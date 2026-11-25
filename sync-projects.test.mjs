@@ -261,6 +261,26 @@ try {
     assert.match(rC.stdout, /0 added, 0 updated, 3 unchanged/);
   }
 
+  // Credential refusal (codeguard-1-hardcoded-credentials): a token-shaped value in a
+  // listed project file refuses the whole capture before any write, like the user capture;
+  // the report names file, line and shape, never the value.
+  {
+    const dataS = join(tmp, 'dataS');
+    const wsS = join(tmp, 'wsS');
+    mkdirSync(join(dataS, 'projects'), { recursive: true });
+    writeFileSync(join(dataS, 'projects/projects.json'), JSON.stringify({ contextFiles: ['AGENTS.md'], projects: { proj: [] } }, null, 2) + '\n');
+    mkdirSync(join(wsS, 'proj'), { recursive: true });
+    const token = 'ghp_' + 'A'.repeat(36); // built at run time, never a literal fixture value
+    writeFileSync(join(wsS, 'proj', 'AGENTS.md'), `Staging token: ${token}\n# proj rules\n`);
+    const rS = spawnSync(process.execPath, [join(repo, 'sync-projects.mjs'), '--root', wsS, '--data', dataS], { encoding: 'utf8' });
+    assert.equal(rS.status, 1);
+    assert.match(rS.stderr, /Nothing synced/);
+    assert.match(rS.stderr, /proj\/AGENTS\.md:1: possible GitHub token/);
+    assert.ok(!rS.stderr.includes(token) && !rS.stdout.includes(token), 'the refusal names the shape, never the value');
+    assert.ok(!existsSync(join(dataS, 'projects', 'proj')), 'a refused capture writes nothing into the data repo');
+    assert.ok(!existsSync(join(wsS, '.alate', 'captured-projects.json')), 'the refusal writes no baseline record');
+  }
+
   // safeRel pins: separator normalization, and every refusal with its exact label prefix.
   assert.equal(safeRel('a\\b.txt', 'L'), 'a/b.txt', 'backslashes normalize to /');
   assert.equal(safeRel('a b:c/d.txt', 'L'), 'a b:c/d.txt', 'a drive-like pair past the start is plain text');

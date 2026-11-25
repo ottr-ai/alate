@@ -3,7 +3,7 @@
 // Prints every scanned file (the list the user reviews before git add), findings as path:line: reason
 // (never the value), and a short summary (rules, skills, plugins, captured user files, projects).
 // Exit 0 clean, 1 on any finding (the caller must stop and ask, never commit), 2 on usage or IO errors.
-// The content shapes mirror sync-user.mjs's SHAPES, so both scans refuse the same credentials; the
+// The content shapes mirror lib/data.mjs's SHAPES, so every scan refuses the same credentials; the
 // file-name checks catch formats no shape can (.env files, key files, auth databases, oauth folders).
 // Plain node only, like every other script.
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
@@ -13,7 +13,7 @@ const die = message => { console.error(message); process.exit(2); };
 const folder = process.argv[2];
 if (!folder || process.argv.length !== 3) die('usage: node scan-secrets.mjs <data-folder>');
 
-// Same shapes as sync-user.mjs (SHAPES); keep the two lists in step. A hit prints the
+// Same shapes as lib/data.mjs (SHAPES, shared with the capture scripts); keep the two lists in step. A hit prints the
 // shape name and the position only, never the value.
 const SHAPES = [
   ['AWS access key', /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b/],

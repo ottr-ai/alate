@@ -8,7 +8,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertSourceInside, CAPTURE_ROOTS, canonicalizeBytes, checkDestination, fingerprint, parseArgs, readBaselines, resolveDataDir, toStoredForm, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeBaselines, yamlProblems } from './lib/data.mjs';
+import { assertSourceInside, CAPTURE_ROOTS, canonicalizeBytes, checkDestination, fingerprint, lineOf, parseArgs, readBaselines, resolveDataDir, SHAPES, toStoredForm, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeBaselines, yamlProblems } from './lib/data.mjs';
 import { SHIPPED_SKILLS_DIR, shippedSkills } from './lib/shipped.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
@@ -47,18 +47,6 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
 // No item is required: a missing ITEMS entry is 'not present', never an error, because every
 // omp home differs and a fresh one misses most entries. Refusal stays for secrets and
 // unreadable files only; ITEMS remains the allowlist of what may be captured.
-// Shapes of real credentials (codeguard-1-hardcoded-credentials), not words: docs that only mention keys still sync.
-/** @type {[string, RegExp][]} */
-const SHAPES = [
-  ['AWS access key', /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b/],
-  ['GitHub token', /\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_\w{22,})/],
-  ['API key', /\b(?:sk-(?=[\w-]*\d)[\w-]{20,}|[spr]k_(?:live|test)_[A-Za-z0-9]{16,})/],
-  ['Google API key', /\bAIza[\w-]{35}/],
-  ['Slack token', /\bxox[abprs]-[A-Za-z0-9-]{10,}/],
-  ['JWT', /\beyJ[\w-]{10,}\.eyJ[\w-]{10,}\.[\w-]{10,}/],
-  ['private key', /-----BEGIN [A-Z ]*PRIVATE KEY-----\s+[A-Za-z0-9+/]{40}/],
-  ['password in a URL', /\b[a-z][\w+.-]*:\/\/[^\s:/@'"`]+:(?![$<{%*])[^\s/@'"`]+@/i],
-];
 // Credential-named keys must hold an environment reference, never a value: any literal
 // (long, short, or numeric) and any YAML block scalar refuses the capture, and problems
 // name the key and line only, never the value. The ONLY exemption is numeric token-budget
@@ -158,8 +146,6 @@ const listOutput = (dir, sub = '') => {
   }
   return out;
 };
-/** @param {string} text @param {number} index @returns {number} */
-const lineOf = (text, index) => text.slice(0, index).split('\n').length;
 
 // Membership anchors: the allowlisted item paths joined to the CANONICAL home. A link
 // is safe only when its canonical target sits on or below one of these lexical paths -

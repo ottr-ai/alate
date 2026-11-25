@@ -5,7 +5,7 @@
 // need to know about this repo; the snapshots here are refreshed copies, never hand-edited.
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
-import { canonicalizeBytes, parseArgs, resolveDataDir, checkDestination, assertSourceInside, safeRel, fingerprint, readBaselines, writeBaselines } from './lib/data.mjs';
+import { canonicalizeBytes, parseArgs, resolveDataDir, checkDestination, assertSourceInside, safeRel, fingerprint, lineOf, SHAPES, readBaselines, writeBaselines } from './lib/data.mjs';
 
 /** @typedef {{ values: Record<string, string | undefined>, flags: Set<string>, positional: string[] }} CliArgs */
 /** @typedef {string[] | { extras?: string[], bundles?: string[] }} ProjectValue */
@@ -105,6 +105,14 @@ for (const [name, extras] of validated) {
     const raw = readFileSync(from);
     const canon = canonicalizeBytes(`${name}/${rel}`, raw);
     if (canon.changed) notes.push(`projects/${name}/${rel}: normalized CRLF line endings to LF`);
+    // Credential gate (codeguard-1-hardcoded-credentials), the same SHAPES the user capture
+    // runs: a hit refuses the whole capture before any write and names file, line and shape,
+    // never the value.
+    const text = canon.bytes.toString('utf8');
+    for (const [shapeName, shape] of SHAPES) {
+      const hit = shape.exec(text);
+      if (hit) problems.push(`${name}/${rel}:${lineOf(text, hit.index)}: possible ${shapeName}`);
+    }
     plan.push({ key: `${name}/${rel}`, from, to, bytes: canon.bytes, old: existsSync(to) ? readFileSync(to) : null });
   }
   for (const rel of have) {
