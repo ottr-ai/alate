@@ -113,13 +113,52 @@ const allowPluginScripts = existsSync(join(data.dir, 'plugins-allow-scripts'));
 const BUN_ENV_KEYS = ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'XDG_CACHE_HOME',
   'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'];
 const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
-// Snapshot items the provisioner itself executes or feeds to its own bun install: the
-// plugins manifest drives the install, bun.lock pins it, patches/ hold applied patches.
-// A turn-edited copy in the live layer is untrusted content, so layer mode never keeps
-// its bytes: the snapshot always wins, --force or not.
+// Snapshot items the provisioner itself executes or feeds to its own bun install: the whole
+// plugins tree (manifest, lockfile, patches, file: dep sources, lifecycle script bodies) is
+// read or run by the install, so a turn-edited copy in the live layer is untrusted content
+// and layer mode never keeps its bytes: the snapshot always wins, --force or not; a
+// deliberate change goes through a data-repo commit. A `file:` dependency in a plugins
+// manifest points bun at snapshot bytes outside the plugins dir (bun copies them into
+// node_modules and, with scripts allowed, runs their lifecycle hooks too), so each target
+// tree counts as plugin install files as well. The targets resolve from the snapshot
+// manifests only, transitively through each target's own manifest; cycles end at the
+// visited set. Absolute `file:/` specs point outside the snapshot and protect nothing.
+/** @param {string} base @param {string} spec @returns {string | null} */
+const fileDepTarget = (base, spec) => {
+  const segs = base.split('/');
+  for (const seg of spec.slice('file:'.length).split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') segs.pop(); else segs.push(seg);
+    if (!segs.length) return null;
+  }
+  return segs.join('/');
+};
+const pluginFileDepRels = new Set();
+if (layerMode) {
+  const seen = new Set();
+  const queue = ['omp/plugins/package.json'];
+  while (queue.length) {
+    const manifestRel = queue.pop();
+    if (manifestRel === undefined || seen.has(manifestRel)) continue;
+    seen.add(manifestRel);
+    const manifestPath = join(userRoot, manifestRel);
+    if (!existsSync(manifestPath)) continue;
+    let pkg;
+    try { pkg = JSON.parse(readFileSync(manifestPath, 'utf8')); } catch { continue; }
+    const deps = { ...pkg.dependencies, ...pkg.devDependencies, ...pkg.optionalDependencies };
+    const base = manifestRel.slice(0, manifestRel.lastIndexOf('/'));
+    for (const spec of Object.values(deps)) {
+      if (typeof spec !== 'string' || !spec.startsWith('file:') || spec.startsWith('file:/')) continue;
+      const target = fileDepTarget(base, spec);
+      if (target === null || pluginFileDepRels.has(target)) continue;
+      pluginFileDepRels.add(target);
+      queue.push(`${target}/package.json`);
+    }
+  }
+}
 /** @param {string} rel @returns {boolean} */
 const pluginInstallFile = rel =>
-  rel === 'omp/plugins/package.json' || rel === 'omp/plugins/bun.lock' || rel.startsWith('omp/plugins/patches/');
+  rel.startsWith('omp/plugins/') || [...pluginFileDepRels].some(t => rel === t || rel.startsWith(`${t}/`));
 // A skill snapshot is executable agent content, so install-user scans each one statically before
 // anything lands in the home (or, in layer mode, before the layer goes live): findings and
 // scan errors reject that one skill (left out, reported), while a missing scanner or a scanner

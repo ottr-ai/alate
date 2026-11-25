@@ -3587,15 +3587,18 @@ exit 0
     if (!hasBun) console.log('bun not found: the plugin postinstall check is skipped');
     const plugData = join(tmp, 'data-layer-plugins');
     const putP = (rel, text) => { mkdirSync(dirname(join(plugData, 'user', rel)), { recursive: true }); writeFileSync(join(plugData, 'user', rel), text); };
+    const plugHome = join(tmp, 'layer-home-plugins');
+    const pbase = join(plugHome, '.alate');
+    const hookSnap = join(pbase, 'hook-snapshot-ran');
+    const hookTurn = join(pbase, 'hook-turn-ran');
     putP('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
     putP('layer-rule.md', '---\ndescription: layer plugin rule\n---\n\nBody\n');
-    putP('omp/plugins/package.json', '{\n  "name": "plugins",\n  "private": true,\n  "dependencies": { "dep": "file:./dep" }\n}\n');
+    putP('omp/plugins/package.json', '{\n  "name": "plugins",\n  "private": true,\n  "dependencies": { "dep": "file:./dep" },\n  "scripts": { "postinstall": "node hook.js" }\n}\n');
+    putP('omp/plugins/hook.js', `require('node:fs').writeFileSync(${JSON.stringify(hookSnap)}, 'snapshot\\n');\n`);
     putP('omp/plugins/bun.lock', '{\n  "lockfileVersion": 2,\n  "configVersion": 1,\n  "workspaces": {\n    "": {\n      "name": "plugins",\n      "dependencies": {\n        "dep": "file:./dep",\n      },\n    },\n  },\n  "packages": {\n    "dep": ["dep@file:dep", {}],\n  }\n}\n');
     putP('omp/plugins/dep/package.json', '{\n  "name": "dep",\n  "version": "1.0.0"\n}\n');
     putP('omp/plugins/patches/keep.txt', 'snapshot\n');
     const runP = (h, extra, env) => run(['--data', plugData, ...extra], h, env);
-    const plugHome = join(tmp, 'layer-home-plugins');
-    const pbase = join(plugHome, '.alate');
     if (hasBun) {
       let rp = runP(plugHome, ['--layer']);
       assert.equal(rp.status, 0, rp.stderr);
@@ -3641,8 +3644,10 @@ exit 0
         'plugins/package.json': wsPkg(okMark),
         'plugins/dep/package.json': '{\n  "name": "dep",\n  "version": "1.0.0"\n}\n',
         'plugins/wdep/package.json': `${JSON.stringify({ name: 'wdep', version: '1.0.0', main: 'dist.js', scripts: { postinstall: 'node -e "require(\'fs\').writeFileSync(\'dist.js\',\'module.exports = 43;\')"' } })}\n`,
-        'agent/extensions/dep2/package.json': '{"name":"dep2","version":"1.0.0","main":"index.js"}\n',
+        'agent/extensions/dep2/package.json': '{"name":"dep2","version":"1.0.0","main":"index.js","dependencies":{"dep3":"file:../dep3"}}\n',
         'agent/extensions/dep2/index.js': 'module.exports = 42;\n',
+        'agent/extensions/dep3/package.json': '{"name":"dep3","version":"1.0.0","main":"index.js"}\n',
+        'agent/extensions/dep3/index.js': 'module.exports = 44;\n',
       };
       putW('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
       putW('layer-rule.md', '---\ndescription: layer plugin rule\n---\n\nBody\n');
@@ -3700,6 +3705,19 @@ exit 0
       assert.ok(existsSync(join(wsLayer, '.omp/plugins/node_modules/dep/package.json')), 'the dependency lands in the new layer');
       assert.ok(existsSync(okMark2), 'the opted-in snapshot postinstall runs for a layer too');
       assertInstalled(wsLayer, 'the layer run');
+      // A file: dep source outside the plugins dir is a plugin install file too: bun reads
+      // those bytes during its own install, so the snapshot wins for the whole target
+      // tree — transitively through dep2's own manifest (dep3) as well.
+      writeFileSync(join(wsLayer, '.omp/agent/extensions/dep2/index.js'), 'module.exports = "pwned";\n');
+      writeFileSync(join(wsLayer, '.omp/agent/extensions/dep3/index.js'), 'module.exports = "pwned";\n');
+      rw = run(['--data', wsData, '--layer'], wsLayerHome);
+      assert.equal(rw.status, 0, rw.stderr);
+      assert.match(rw.stdout, /plugin install file takes the snapshot, machine change ignored: .*extensions[/\\]dep2[/\\]index\.js/);
+      assert.match(rw.stdout, /plugin install file takes the snapshot, machine change ignored: .*extensions[/\\]dep3[/\\]index\.js/);
+      const wsLayer2 = realpathSync(join(wsLayerHome, '.alate', 'current'));
+      assert.equal(readFileSync(join(wsLayer2, '.omp/agent/extensions/dep2/index.js'), 'utf8'), 'module.exports = 42;\n', 'the direct file: dep source takes the snapshot bytes');
+      assert.equal(readFileSync(join(wsLayer2, '.omp/agent/extensions/dep3/index.js'), 'utf8'), 'module.exports = 44;\n', 'the transitive file: dep source takes the snapshot bytes');
+      assertInstalled(wsLayer2, 'the second layer run');
     }
     const shimDir = join(tmp, 'bun-stub');
     const bunCalls = join(shimDir, 'calls.json');
@@ -3751,6 +3769,27 @@ exit 0
         'the barrier clean-up never deletes through a swapped .omp');
       assert.equal(lstatSync(join(swapHome, '.alate', 'current'), { throwIfNoEntry: false }), undefined, 'current never switches');
       assert.deepEqual(readdirSync(join(swapHome, '.alate', 'layers')), [], 'the swapped layer never survives its failed install');
+    }
+
+    // The audit's attack, end to end: the data repo above now ships plugins-allow-scripts
+    // (the shim case wrote it), so the snapshot postinstall runs hook.js on every
+    // provision. The turn rewrites hook.js — the file the snapshot postinstall executes —
+    // inside its live layer; the next provision must carry the snapshot hook.js into the
+    // fresh layer and run that one, so the turn's marker never appears.
+    if (hasBun) {
+      let rh = runP(plugHome, ['--layer']);
+      assert.equal(rh.status, 0, rh.stderr);
+      assert.ok(existsSync(hookSnap), 'the opted-in postinstall runs the snapshot hook.js');
+      assert.ok(!existsSync(hookTurn), 'no turn marker exists before the turn');
+      writeFileSync(join(realpathSync(join(pbase, 'current')), '.omp/plugins/hook.js'),
+        `require('node:fs').writeFileSync(${JSON.stringify(hookTurn)}, 'turn\\n');\n`);
+      rh = runP(plugHome, ['--layer']);
+      assert.equal(rh.status, 0, rh.stderr);
+      assert.match(rh.stdout, /plugin install file takes the snapshot, machine change ignored: .*hook\.js/);
+      const snapHook = readFileSync(join(plugData, 'user/omp/plugins/hook.js'), 'utf8');
+      const pAfterTurn = realpathSync(join(pbase, 'current'));
+      assert.equal(readFileSync(join(pAfterTurn, '.omp/plugins/hook.js'), 'utf8'), snapHook, 'the fresh layer carries the snapshot hook.js, never the turn edit');
+      assert.ok(!existsSync(hookTurn), 'the turn-edited hook.js never runs');
     }
 
     // Migration with the bytes an older alate wrote (a memory backend entry over the recorded

@@ -151,11 +151,14 @@ non-zero. A failure after the switch changes nothing about the switch itself.
   `managed-skills` folders, so a folder named there would load skills that no gate saw.
   If a kept `config.yml` fails the YAML syntax gate after that drop, the snapshot
   replaces it.
-- Plugin install files are the exception: a machine change to `omp/plugins/package.json`,
-  `omp/plugins/bun.lock`, or anything under `omp/plugins/patches/` never rides into the
-  new layer. The provisioner itself runs `bun install` over these files, so the snapshot
-  always wins and a note names each file. A deliberate change goes through a data-repo
-  commit.
+- Plugin install files are the exception: a machine change to anything under
+  `omp/plugins/` never rides into the new layer. The provisioner itself runs `bun install`
+  over the plugins tree — manifest, lockfile, patches, `file:` dependency sources, and
+  lifecycle script bodies — so the snapshot always wins and a note names each file. A
+  `file:` dependency in a plugins manifest points bun at snapshot bytes outside the
+  plugins dir; the whole target tree counts as a plugin install file too, resolved
+  transitively through each target's own manifest. A deliberate change goes through a
+  data-repo commit.
 - A machine-kept JSON/YAML file can hold absolute paths that were re-rooted into the live
   layer at its install. The copy re-roots them into the new layer, so clean-up can delete
   the live layer; paths into the shared home stay shared.
@@ -257,8 +260,12 @@ These rules assume that the runner records every live lease. Stale leases cost d
   the machine edits of `config.yml` in the new layer.
 - Plugins: a turn-edited plugins/package.json with a planted postinstall keeps the snapshot
   bytes in the new layer, and the postinstall never runs; the run notes each ignored file.
+  A turn-edited script body (hook.js behind a snapshot postinstall) and a turn-edited
+  `file:` dependency source outside the plugins dir (direct and transitive) take the
+  snapshot bytes the same way, so the provisioner never reads or runs turn-edited bytes.
   The plugins install runs `--ignore-scripts` with an allowlisted environment unless the
-  data repo ships `plugins-allow-scripts`; the marker opts in, the allowlist stays.
+  data repo ships `plugins-allow-scripts`; the marker opts in, the allowlist stays, and
+  with it on the snapshot hook runs and the turn edit still never does.
 - A machine-kept file holding a re-rooted path lands pointing into the new layer, never
   into the live one that clean-up deletes.
 - Captured paths: a `catalogPath` under the home prefix lands re-rooted into the new layer.
