@@ -146,7 +146,7 @@ function readProvisionResults(file: string): { fatal: boolean; items: { item: st
   }
 }
 
-async function provision(): Promise<ProvisionResult[]> {
+async function provision(): Promise<{ results: ProvisionResult[]; copiedSha: string | null }> {
   // The snapshot copy writes every stored byte: it runs in the worker thread, so the
   // event loop stays free while it runs.
   snapshotting = true
@@ -157,12 +157,17 @@ async function provision(): Promise<ProvisionResult[]> {
     snapshotting = false
     runDeferredCheck()
   }
+  // The copy holds the source as of this moment. A queued import or edit that lands
+  // while the scripts run reassigns dashState; reading it again below would record the
+  // commit stored at the end instead of the one the copied bytes hold, and /health
+  // would then hide the provision the board still needs.
+  const copiedSource = dashState.source
   const tmp = mkdtempSync(join(tmpdir(), 'alate-provision-'))
   try {
     // --root for install-projects.mjs: the operator-configured projects workspace, or the
     // source's parent dir for a path source, because the snapshot copy is temporary and
     // the real project checkouts live beside it (specs/install-projects.md).
-    const projectsRoot = config.projectsRoot ?? (dashState.source?.kind === 'path' && dashState.source.name ? dirname(dashState.source.name) : null)
+    const projectsRoot = config.projectsRoot ?? (copiedSource?.kind === 'path' && copiedSource.name ? dirname(copiedSource.name) : null)
     const results: ProvisionResult[] = []
     const merged = new Map<string, ProvisionItem>()
     for (const script of SCRIPTS) {
@@ -176,7 +181,7 @@ async function provision(): Promise<ProvisionResult[]> {
       // itself: the server passes it for a repo source, and a layer id then carries it
       // instead of "nogit" (specs/agent-layer-switch.md). A path source gets no --commit,
       // so the git probe in install-user.mjs keeps its nogit fallback.
-      const importedSha = dashState.source?.kind === 'repo' ? dashState.source.importedSha ?? '' : ''
+      const importedSha = copiedSource?.kind === 'repo' ? copiedSource.importedSha ?? '' : ''
       const commitArg = script === 'install-user.mjs' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(importedSha) ? ['--commit', importedSha] : []
       const child = spawn(process.execPath, [join(repoRoot, script), '--data', dir, ...commitArg, ...(script === 'install-projects.mjs' && projectsRoot ? ['--root', projectsRoot] : [])], {
         cwd: repoRoot,
@@ -221,13 +226,13 @@ async function provision(): Promise<ProvisionResult[]> {
     }
     dashState.provision = {
       at: new Date().toISOString(),
-      sha: dashState.source?.importedSha || null,
+      sha: copiedSource?.importedSha || null,
       ok: results.every(r => r.code === 0),
       items: [...merged.values()].sort((a, b) => (a.item < b.item ? -1 : a.item > b.item ? 1 : 0)),
       failures: results.filter(r => r.code !== 0),
     } satisfies ProvisionState
     persistDash()
-    return results
+    return { results, copiedSha: copiedSource?.importedSha || null }
   } finally {
     rmSync(tmp, { recursive: true, force: true })
     // Same guard cleanupData applied: ALATE_KEEP_TEMP keeps every temp dir for
@@ -451,10 +456,12 @@ app.post('/provision', {
     while (process.env.ALATE_TEST_PROVISION_GATE && existsSync(process.env.ALATE_TEST_PROVISION_GATE)) {
       await delay(10)
     }
-    const results = await provision()
+    const { results, copiedSha } = await provision()
     const ok = results.every(r => r.code === 0)
     if (ok && config.repo) {
-      config.update.provisionedSha = dashState.source.importedSha
+      // The sha the snapshot copied, not the source's current head: a queued op that ran
+      // during the provision must not mark the newer commit as provisioned.
+      config.update.provisionedSha = copiedSha ?? ''
       saveConfig(config)
     }
     // An applied update leaves the list at once, not at the next timer tick.
@@ -620,10 +627,11 @@ async function dashCheck(): Promise<void> {
   const behind = sha !== '' && sha !== src.importedSha
     ? await remoteAhead(src.name, src.importedSha, sha, dashToken(), src.host, config.tokenHost)
     : null
-  // The ahead lookup above awaited the network: an import, an edit or a queued op that
-  // ran in between has its own update write, and this one would pair a stale remoteSha
-  // with the fresh state (a phantom 'N behind' until the next tick). Drop the check.
-  if (dashState.source !== src || importing || editing || snapshotting || opsQueued > 0) return
+  // The ahead lookup above awaited the network: an import, an edit, a queued op or a
+  // provision that ran in between has its own writes, and this one would pair a stale
+  // remoteSha with the fresh state (a phantom 'N behind' until the next tick); with
+  // autoUpdate it would also import mid-provision. Drop the check.
+  if (running || dashState.source !== src || importing || editing || snapshotting || opsQueued > 0) return
   dashState.update = { checkedAt: new Date().toISOString(), remoteSha: sha, available: sha !== '' && sha !== src.importedSha, ahead: behind }
   if (sha) config.update.remoteSha = sha
   config.update.lastChecked = dashState.update.checkedAt

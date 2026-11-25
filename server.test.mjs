@@ -9179,6 +9179,191 @@ try {
   }
 
   {
+    // Provision vs queued ops: an import and a file edit queued before POST /provision
+    // must not change what the provision records. The worker serializes import,
+    // snapshot, edit in dispatch order, so the copied bytes hold the import commit and
+    // the edit lands while the scripts run. provision.sha, --commit and provisionedSha
+    // must name the import commit, and /health must then still report pending for the
+    // edit commit: the board keeps seeing that a provision is needed for what is stored.
+    const provShaCfg = join(tmp, 'server-config-prov-sha.json');
+    writeFileSync(provShaCfg, JSON.stringify({ apiKey: null }));
+    // Own fixture: bare upstream behind a GH_BASE rewrite, seeded with a valid data layout.
+    const provShaSeed = join(tmp, 'prov-sha-seed');
+    const provShaGh = join(tmp, 'prov-sha-gh');
+    const provShaBare = join(provShaGh, 'demo3', 'data');
+    mkdirSync(provShaSeed, { recursive: true });
+    mkdirSync(join(provShaSeed, 'user', 'omp', 'agent', 'rules'), { recursive: true });
+    mkdirSync(join(provShaSeed, 'projects'), { recursive: true });
+    writeFileSync(join(provShaSeed, 'user', 'omp', 'agent', 'rules', 'demo-rule.md'), '---\ndescription: demo rule\n---\n\nBody\n');
+    writeFileSync(join(provShaSeed, 'projects', 'projects.json'), JSON.stringify({ contextFiles: [], projects: {} }));
+    // Frontmatter on both files: sync.mjs rejects a rules-candidate without a description.
+    writeFileSync(join(provShaSeed, 'notes.md'), '---\ndescription: seed notes\n---\n\nseed notes\n');
+    assert.equal(git(['init', '-q', '-b', 'main', provShaSeed]).status, 0);
+    git(['-C', provShaSeed, 'config', 'user.name', 't']);
+    git(['-C', provShaSeed, 'config', 'user.email', 't@t']);
+    assert.equal(git(['-C', provShaSeed, 'add', '-A']).status, 0);
+    assert.equal(git(['-C', provShaSeed, 'commit', '-qm', 'seed']).status, 0);
+    mkdirSync(join(provShaGh, 'demo3'), { recursive: true });
+    assert.equal(git(['init', '-q', '--bare', '-b', 'main', provShaBare]).status, 0);
+    assert.equal(git(['-C', provShaSeed, 'push', '-q', provShaBare, 'main']).status, 0);
+    // Own script gate: the provision's first script spins until the queued edit has
+    // landed, so the read order import -> snapshot -> edit -> provision's final reads
+    // is exact and never depends on script wall time.
+    const provShaGate = join(tmp, 'prov-sha-script-gate');
+    const provShaSrv = spawnServer(['--port', '0', '--config', provShaCfg, '--db', join(tmp, 'state-prov-sha.db')], {
+      ...testServerEnv,
+      ALATE_TEST_WORKER_DELAY_MS: '400',
+      ALATE_TEST_GH_BASE: pathToFileURL(provShaGh).href,
+      ALATE_TEST_SCRIPT_GATE: provShaGate,
+    });
+    try {
+      const { apiKey: provShaKey, base: provShaBase } = await awaitStartup(provShaSrv);
+      const provShaAuth = { 'Content-Type': 'application/json', Authorization: `Bearer ${provShaKey}` };
+      let r = await fetch(new URL(`${provShaBase}/api/import`), { method: 'POST', headers: provShaAuth, body: JSON.stringify({ source: 'https://github.com/demo3/data', kind: 'repo' }) });
+      assert.equal(r.status, 200, JSON.stringify(await r.json()));
+      const copiedSha = (await (await fetch(new URL('/api/state', provShaBase))).json()).source.importedSha;
+      assert.match(copiedSha, /^[0-9a-f]{40}$/);
+      const notes = await (await fetch(new URL('/api/file?path=notes.md', provShaBase))).json();
+      // The import holds the worker while both callers queue: the edit behind the import,
+      // the provision's snapshot behind the import and ahead of the edit.
+      const importP = fetch(new URL(`${provShaBase}/api/import`), { method: 'POST', headers: provShaAuth, body: JSON.stringify({ source: 'https://github.com/demo3/data', kind: 'repo' }) });
+      const editP = fetch(new URL('/api/file', provShaBase), { method: 'PUT', headers: provShaAuth, body: JSON.stringify({ path: 'notes.md', content: '---\ndescription: queued notes\n---\n\nqueued edit\n', base: notes.hash, message: 'test: edit queued before provision' }) });
+      writeFileSync(provShaGate, '');
+      const provP = fetch(new URL('/provision', provShaBase), { method: 'POST', headers: provShaAuth, body: '{}' });
+      const editRes = await editP;
+      const editText = await editRes.text();
+      assert.equal(editRes.status, 200, `the queued edit must land during the provision: ${editText}`);
+      const edit = JSON.parse(editText);
+      assert.equal(edit.pushed, true, 'the queued edit reached the bare upstream');
+      // The edit settled while the provision's first script spins on the gate; release it.
+      rmSync(provShaGate, { force: true });
+      const provRes = await provP;
+      assert.equal(provRes.status, 200, 'the provision answered after the released scripts ran');
+      const provBody = await provRes.json();
+      assert.equal(provBody.ok, true, `the provision scripts must succeed: ${JSON.stringify((provBody.results ?? []).map(r => ({ script: r.script, code: r.code, output: (r.output ?? '').slice(0, 300) })))}`);
+      const importRes = await importP;
+      assert.equal(importRes.status, 200, 'the import that queued first settled');
+      const state = await (await fetch(new URL('/api/state', provShaBase))).json();
+      assert.equal(state.source.importedSha, edit.commit, 'the stored source holds the edit commit');
+      assert.match(state.provision.sha, /^[0-9a-f]{40}$/);
+      assert.equal(state.provision.sha, copiedSha, 'provision.sha names the commit the snapshot copied, not the one stored last');
+      assert.notEqual(state.provision.sha, edit.commit);
+      const health = await (await fetch(new URL('/health', provShaBase))).json();
+      assert.equal(health.pending, true, 'the stored edit commit still needs a provision');
+    } finally { await stopServer(provShaSrv); }
+  }
+
+  {
+    // dashCheck's re-check after the ahead lookup must honor `running`: a provision that
+    // starts while the lookup awaits the count API drops the check. Without the guard the
+    // resumed check writes its update state mid-provision and autoUpdate imports during it.
+    const chkCfg = join(tmp, 'server-config-check-race.json');
+    writeFileSync(chkCfg, JSON.stringify({ apiKey: null, autoUpdate: true, update: { lastChecked: null, remoteSha: '', provisionedSha: '' } }));
+    const chkWork = join(tmp, 'chk-race-seed');
+    const chkGh = join(tmp, 'chk-race-gh');
+    const chkBare = join(chkGh, 'demo4', 'data');
+    mkdirSync(chkWork, { recursive: true });
+    mkdirSync(join(chkWork, 'user', 'omp', 'agent', 'rules'), { recursive: true });
+    writeFileSync(join(chkWork, 'user', 'omp', 'agent', 'rules', 'demo-rule.md'), '---\ndescription: demo rule\n---\n\nBody\n');
+    assert.equal(git(['init', '-q', '-b', 'main', chkWork]).status, 0);
+    git(['-C', chkWork, 'config', 'user.name', 't']);
+    git(['-C', chkWork, 'config', 'user.email', 't@t']);
+    assert.equal(git(['-C', chkWork, 'add', '-A']).status, 0);
+    assert.equal(git(['-C', chkWork, 'commit', '-qm', 'seed']).status, 0);
+    mkdirSync(join(chkGh, 'demo4'), { recursive: true });
+    assert.equal(git(['init', '-q', '--bare', '-b', 'main', chkBare]).status, 0);
+    assert.equal(git(['-C', chkWork, 'push', '-q', chkBare, 'main']).status, 0);
+    const bareSha = () => git(['-C', chkBare, 'rev-parse', 'main'], { encoding: 'utf8' }).stdout.trim();
+    // The label response's sha never spawns git inside the handler: a spawn failure under
+    // host load would crash the fixture server. The label ignores the item's sha; the
+    // captured value only mirrors the bare head.
+    let labelSha = '';
+    // Fake count API: compare requests hold (a tick's ahead lookup waits there while the
+    // provision starts), commits label requests answer at once, everything else refuses
+    // like the suite's closed ports do.
+    const compareHits = [];
+    const commitHits = [];
+    const held = [];
+    let windowStart = Number.POSITIVE_INFINITY;
+    const chkApi = createServer((req, res) => {
+      const url = req.url ?? '';
+      const label = /^\/repos\/demo4\/data\/commits\?sha=([0-9a-f]{40})&/.exec(url);
+      if (label) commitHits.push({ sha: label[1], at: Date.now() });
+      if (/^\/repos\/demo4\/data\/compare\//.test(url)) {
+        compareHits.push(url);
+        held.push(() => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ ahead_by: 1 })); });
+        return;
+      }
+      if (!label) {
+        res.statusCode = 404;
+        res.setHeader('content-type', 'application/json');
+        res.end('{}');
+        return;
+      }
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify([{ sha: labelSha }]));
+    });
+    await new Promise(resolve => chkApi.listen(0, '127.0.0.1', resolve));
+    const chkGate = join(tmp, 'chk-race-provision-gate');
+    const chkSrv = spawnServer(['--port', '0', '--config', chkCfg, '--db', join(tmp, 'state-check-race.db'), '--interval', '1'], {
+      ...testServerEnv,
+      ALATE_TEST_GH_BASE: pathToFileURL(chkGh).href,
+      ALATE_TEST_GITHUB_API_BASE: `http://127.0.0.1:${chkApi.address().port}`,
+      ALATE_TEST_PROVISION_GATE: chkGate,
+    });
+    try {
+      const { apiKey: chkKey, base: chkBase } = await awaitStartup(chkSrv);
+      const chkAuth = { 'Content-Type': 'application/json', Authorization: `Bearer ${chkKey}` };
+      let r = await fetch(new URL(`${chkBase}/api/import`), { method: 'POST', headers: chkAuth, body: JSON.stringify({ source: 'https://github.com/demo4/data', kind: 'repo' }) });
+      assert.equal(r.status, 200, JSON.stringify(await r.json()));
+      const shaA = (await (await fetch(new URL('/api/state', chkBase))).json()).source.importedSha;
+      assert.match(shaA, /^[0-9a-f]{40}$/);
+      // The remote moves ahead between ticks: the next check finds the compare endpoint
+      // and holds there. The provision gate keeps POST /provision spinning after it has
+      // set running, so the held check resumes into a running provision.
+      assert.equal(git(['-C', chkWork, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-qm', 'ahead']).status, 0);
+      assert.equal(git(['-C', chkWork, 'push', '-q', chkBare, 'main']).status, 0);
+      const shaB = bareSha();
+      assert.notEqual(shaA, shaB);
+      labelSha = shaB;
+      // A tick's ahead lookup must already sit inside the count API before the provision
+      // starts: once running is true, later ticks return at the first guard and the
+      // compare would never arrive.
+      await waitFor(async () => compareHits.length > 0, 30_000);
+      writeFileSync(chkGate, '');
+      const provP = fetch(new URL('/provision', chkBase), { method: 'POST', headers: chkAuth, body: '{}' });
+      // running flips true before the held check resumes, so the resumed check must see it.
+      await new Promise(resolve => setTimeout(resolve, 150));
+      windowStart = Date.now();
+      for (const done of held.splice(0)) done();
+      // The fix drops the resumed check: no autoUpdate import while the provision runs.
+      // The bug path re-imports from the moved remote, and its commits label request
+      // names the new sha inside this window.
+      let bugSeen = false;
+      const bugEnd = Date.now() + 1500;
+      while (Date.now() < bugEnd) {
+        if (commitHits.some(c => c.sha === shaB && c.at >= windowStart)) { bugSeen = true; break; }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      // autoUpdate off before the provision settles, so a post-provision tick cannot
+      // re-import and blur which import the assertion saw.
+      r = await fetch(new URL('/api/settings', chkBase), { method: 'POST', headers: chkAuth, body: JSON.stringify({ autoUpdate: false }) });
+      assert.equal(r.status, 200);
+      rmSync(chkGate, { force: true });
+      const provRes = await provP;
+      assert.equal(provRes.status, 200, 'the provision held at the gate answered');
+      const provBody = await provRes.json();
+      assert.equal(provBody.ok, true, `the provision scripts must succeed: ${JSON.stringify((provBody.results ?? []).map(r => ({ script: r.script, code: r.code, output: (r.output ?? '').slice(0, 300) })))}`);
+      assert.equal(bugSeen, false, 'a check that started before the provision must not import during it');
+      const state = await (await fetch(new URL('/api/state', chkBase))).json();
+      assert.equal(state.source.importedSha, shaA, 'the stored snapshot still holds the commit the provision ran for');
+      assert.equal(state.provision.sha, shaA, 'provision.sha names the copied commit');
+      const health = await (await fetch(new URL('/health', chkBase))).json();
+      assert.equal(health.pending, false, 'the provisioned commit is not pending');
+    } finally { await stopServer(chkSrv); chkApi.close(); }
+  }
+
+  {
     // Route contract across the worker hop: a path-source edit whose push fails answers
     // 502 with the client-safe text while the snapshot was still re-imported and the check
     // re-ran, and a vanished source dir answers 400, as the in-loop editor always did.
