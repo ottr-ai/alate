@@ -9661,7 +9661,10 @@ try {
     assert.equal(git(['-C', ghxSeed, 'commit', '-qm', 'seed']).status, 0);
     assert.equal(git(['-C', ghxSeed, 'push', '-q', ghxBare, 'main']).status, 0);
     const ghxHead = git(['-C', ghxBare, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-    writeFileSync(join(tmp, 'ghx-gitconfig'), `[url "${pathToFileURL(join(tmp, 'ghx')).href}/"]\n\tinsteadOf = https://github.com/\n`);
+    // The rewrite serves the fixture for https://github.com and sends the foreign host
+    // onto a path that never exists, so the failed acme.ghe.com import fails by
+    // injection, not by real DNS or network delay.
+    writeFileSync(join(tmp, 'ghx-gitconfig'), `[url "${pathToFileURL(join(tmp, 'ghx')).href}/"]\n\tinsteadOf = https://github.com/\n[url "${pathToFileURL(join(tmp, 'ghx-dead')).href}/"]\n\tinsteadOf = https://acme.ghe.com/\n`);
     const ghxEnv = { ...testServerEnv, ALATE_TEST_GIT_CONFIG_GLOBAL: join(tmp, 'ghx-gitconfig') };
     delete ghxEnv.ALATE_TEST_GH_BASE;
     const ghxCfg = join(tmp, 'server-config-ghx.json');
