@@ -3636,7 +3636,7 @@ exit 0
     if (hasBun) {
       const wsData = join(tmp, 'data-plugins-ws');
       const putW = (rel, text) => { mkdirSync(dirname(join(wsData, 'user', rel)), { recursive: true }); writeFileSync(join(wsData, 'user', rel), text); };
-      const wsPkg = okFile => `${JSON.stringify({ name: 'plugins', private: true, workspaces: ['wdep'], dependencies: { dep: 'file:./dep', dep2: 'file:../agent/extensions/dep2', outside2: 'file:../../.omp/agent/extensions/outside2', wdep: 'workspace:*' }, scripts: { postinstall: `echo OK > ${okFile}` } }, null, 2)}\n`;
+      const wsPkg = okFile => `${JSON.stringify({ name: 'plugins', private: true, workspaces: ['w*'], dependencies: { dep: 'file:./dep', dep2: 'file:../agent/extensions/dep2', outside2: 'file:../../.omp/agent/extensions/outside2', wdep: 'workspace:*' }, scripts: { postinstall: `echo OK > ${okFile}` } }, null, 2)}\n`;
       const evilPkg = (workspaces, mark) => `${JSON.stringify({ name: 'evil', workspaces, scripts: { postinstall: `echo pwned > ${mark}` } }, null, 2)}\n`;
       const okMark = join(tmp, 'ws-ok');
       // The plugins tree under omp/, written to the snapshot and to a scratch .omp dir.

@@ -148,26 +148,85 @@ const fileDepTarget = (base, spec) => {
   if (outside) return null;
   return homeSegsToRel(segs);
 };
-/** Snapshot rels of the manifest dirs a workspaces glob names: the literal prefix resolves
- * against the manifest dir in home space (like a file: spec), then `*` and `**` match
- * directory levels; only dirs holding a package.json count. */
+/** Expand top-level brace groups: `a/{b,c}/d` yields `a/b/d` and `a/c/d`; nested groups
+ * expand inner-first; a group with no comma or an unbalanced brace stays as written, and
+ * the per-segment matcher over-matches those (never under-matches). */
+/** @param {string} pattern @returns {string[]} */
+const braceExpand = pattern => {
+  const open = pattern.indexOf('{');
+  if (open === -1) return [pattern];
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < pattern.length; i++) {
+    if (pattern[i] === '{') depth++;
+    else if (pattern[i] === '}') { depth--; if (depth === 0) { close = i; break; } }
+  }
+  if (close === -1) return [pattern];
+  const body = pattern.slice(open + 1, close);
+  const alts = [''];
+  let inner = 0;
+  for (const ch of body) {
+    if (ch === '{') inner++;
+    else if (ch === '}') inner--;
+    if (ch === ',' && inner === 0) alts.push('');
+    else alts[alts.length - 1] += ch;
+  }
+  return alts.flatMap(alt => braceExpand(`${pattern.slice(0, open)}${alt}${pattern.slice(close + 1)}`));
+};
+/** @param {string[]} p @param {number} open @returns {number} the index of the closing bracket of a class, -1 when unterminated */
+const classClose = (p, open) => {
+  for (let i = open + 1; i < p.length; i++) {
+    if (p[i] === '\\') i++;
+    else if (p[i] === ']') return i;
+  }
+  return -1;
+};
+/** @param {string[]} p @param {number} open @param {number} close @param {string} ch @returns {boolean} */
+const classTest = (p, open, close, ch) => {
+  let i = open + 1;
+  let negate = false;
+  if (p[i] === '!' || p[i] === '^') { negate = true; i++; }
+  let hit = false;
+  while (i < close) {
+    if (p[i] === '\\' && i + 1 < close) { if (p[i + 1] === ch) hit = true; i += 2; continue; }
+    if (i + 2 < close && p[i + 1] === '-') { if (p[i] <= ch && ch <= p[i + 2]) hit = true; i += 3; continue; }
+    if (p[i] === ch) hit = true;
+    i++;
+  }
+  return negate ? !hit : hit;
+};
+/** One path segment: `*` runs of any characters, `?` one character, `[...]` classes,
+ * `\x` escapes. Backtracks on a failed tail. Unterminated classes over-match. */
+/** @param {string} seg @param {string} name @returns {boolean} */
+const segmentMatches = (seg, name) => {
+  const p = [...seg];
+  let pi = 0;
+  let ni = 0;
+  let star = -1;
+  let mark = 0;
+  while (ni < name.length) {
+    if (p[pi] === '\\' && pi + 1 < p.length) {
+      if (p[pi + 1] === name[ni]) { pi += 2; ni++; continue; }
+    } else if (p[pi] === '?' || p[pi] === name[ni]) { pi++; ni++; continue; }
+    else if (p[pi] === '[') {
+      const close = classClose(p, pi);
+      if (close === -1) return true;
+      if (classTest(p, pi, close, name[ni])) { pi = close + 1; ni++; continue; }
+    } else if (p[pi] === '*') { star = pi++; mark = ni; continue; }
+    if (star === -1) return false;
+    pi = star + 1;
+    ni = ++mark;
+  }
+  while (p[pi] === '*') pi++;
+  return pi === p.length;
+};
+/** Snapshot rels of the manifest dirs workspaces patterns name: top-level brace groups
+ * expand first, the literal prefix resolves against the manifest dir in home space (like
+ * a file: spec), then each remaining segment matches directory names with full glob
+ * semantics (`*`, `?`, `[...]` classes, `\` escapes; a full `**` segment matches any
+ * levels); only dirs holding a package.json count. */
 /** @param {string} base @param {string} pattern @returns {string[]} */
 const workspaceManifestRels = (base, pattern) => {
-  const homeSegs = base.split('/');
-  homeSegs[0] = `.${homeSegs[0]}`;
-  const parts = pattern.split('/').filter(s => s !== '' && s !== '.');
-  let at = 0;
-  let outside = false;
-  for (; at < parts.length; at++) {
-    const seg = parts[at];
-    if (seg === '..') { if (homeSegs.length) homeSegs.pop(); else outside = true; continue; }
-    if (seg.includes('*')) break;
-    if (outside) return [];
-    homeSegs.push(seg);
-  }
-  if (outside) return [];
-  const startRel = homeSegsToRel(homeSegs);
-  if (startRel === null) return [];
   /** @param {string} relPrefix @param {string[]} rest @returns {string[]} */
   const walk = (relPrefix, rest) => {
     if (!rest.length) return existsSync(join(userRoot, relPrefix, 'package.json')) ? [relPrefix] : [];
@@ -179,10 +238,29 @@ const workspaceManifestRels = (base, pattern) => {
     if (head === '**') {
       return [...walk(relPrefix, tail), ...subdirs().flatMap(name => walk(`${relPrefix}/${name}`, rest))];
     }
-    if (head === '*') return subdirs().flatMap(name => walk(`${relPrefix}/${name}`, tail));
-    return existsSync(join(dir, head)) ? walk(`${relPrefix}/${head}`, tail) : [];
+    return subdirs().filter(name => segmentMatches(head, name)).flatMap(name => walk(`${relPrefix}/${name}`, tail));
   };
-  return walk(startRel, parts.slice(at));
+  const out = [];
+  for (const expanded of braceExpand(pattern)) {
+    const homeSegs = base.split('/');
+    homeSegs[0] = `.${homeSegs[0]}`;
+    const parts = expanded.split('/').filter(s => s !== '' && s !== '.');
+    let at = 0;
+    let outside = false;
+    let dead = false;
+    for (; at < parts.length; at++) {
+      const seg = parts[at];
+      if (seg === '..') { if (homeSegs.length) homeSegs.pop(); else outside = true; continue; }
+      if (seg.includes('*') || seg.includes('?') || seg.includes('[')) break;
+      if (outside) { dead = true; break; }
+      homeSegs.push(seg);
+    }
+    if (dead || outside) continue;
+    const startRel = homeSegsToRel(homeSegs);
+    if (startRel === null) continue;
+    out.push(...walk(startRel, parts.slice(at)));
+  }
+  return out;
 };
 const pluginFileDepRels = new Set();
 if (layerMode) {

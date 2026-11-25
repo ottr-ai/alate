@@ -158,8 +158,9 @@ non-zero. A failure after the switch changes nothing about the switch itself.
   `file:` dependency in a plugins manifest or in a workspace member's manifest points bun
   at snapshot bytes outside the plugins dir; the whole target tree counts as a plugin
   install file too. The targets resolve from the snapshot manifests only — the root
-  manifest, every workspace member it names, and each target's own manifest,
-  transitively. A spec resolves against the manifest dir's path in the home, so `..` may
+  manifest, every workspace member its `workspaces` globs name (full glob semantics:
+  `*`, `?`, `[...]` classes, brace groups, full `**` segments), and each target's own
+  manifest, transitively. A spec resolves against the manifest dir's path in the home, so `..` may
   leave the rel namespace and re-enter it (`file:../../.omp/agent/x`); the final path maps
   back to its snapshot rel, and a walk that lands above the layer root protects nothing.
   A deliberate change goes through a data-repo commit.
@@ -266,9 +267,9 @@ These rules assume that the runner records every live lease. Stale leases cost d
   bytes in the new layer, and the postinstall never runs; the run notes each ignored file.
   A turn-edited script body (hook.js behind a snapshot postinstall) and a turn-edited
   `file:` dependency source outside the plugins dir — direct, transitive, through a
-  workspace member's own manifest, and spelled via the layer root
-  (`file:../../.omp/agent/x`) — take the snapshot bytes the same way, so the provisioner
-  never reads or runs turn-edited bytes.
+  workspace member's own manifest named by a partial wildcard glob (`w*`), and spelled
+  via the layer root (`file:../../.omp/agent/x`) — take the snapshot bytes the same
+  way, so the provisioner never reads or runs turn-edited bytes.
   The plugins install runs `--ignore-scripts` with an allowlisted environment unless the
   data repo ships `plugins-allow-scripts`; the marker opts in, the allowlist stays, and
   with it on the snapshot hook runs and the turn edit still never does.
