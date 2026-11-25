@@ -118,20 +118,71 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__']);
 // read or run by the install, so a turn-edited copy in the live layer is untrusted content
 // and layer mode never keeps its bytes: the snapshot always wins, --force or not; a
 // deliberate change goes through a data-repo commit. A `file:` dependency in a plugins
-// manifest points bun at snapshot bytes outside the plugins dir (bun copies them into
-// node_modules and, with scripts allowed, runs their lifecycle hooks too), so each target
-// tree counts as plugin install files as well. The targets resolve from the snapshot
-// manifests only, transitively through each target's own manifest; cycles end at the
-// visited set. Absolute `file:/` specs point outside the snapshot and protect nothing.
+// manifest — or in a workspace member's manifest — points bun at snapshot bytes outside the
+// plugins dir (bun copies them into node_modules and, with scripts allowed, runs their
+// lifecycle hooks too), so each target tree counts as plugin install files as well. The
+// targets resolve from the snapshot manifests only — the root manifest, every workspace
+// member it names, and each target's own manifest, transitively; cycles end at the visited
+// set. Absolute `file:/` specs point outside the snapshot and protect nothing.
+// A spec resolves against the manifest dir's path in the HOME, not in rel space: `omp/plugins`
+// sits at `<layer>/.omp/plugins`, so `..` may leave the rel namespace and re-enter it (a dep
+// spelled `file:../../.omp/agent/x` installs inside the layer). Resolve in home space first —
+// the first segment carries the leading dot — and map the final path back to its snapshot
+// rel only then; a walk that lands above the layer root points outside the snapshot and
+// protects nothing.
+/** @param {string[]} segs @returns {string | null} */
+const homeSegsToRel = segs => segs.length
+  ? `${segs[0].slice(1)}${segs.length > 1 ? `/${segs.slice(1).join('/')}` : ''}`
+  : null;
 /** @param {string} base @param {string} spec @returns {string | null} */
 const fileDepTarget = (base, spec) => {
   const segs = base.split('/');
+  segs[0] = `.${segs[0]}`;
+  let outside = false;
   for (const seg of spec.slice('file:'.length).split('/')) {
     if (seg === '' || seg === '.') continue;
-    if (seg === '..') segs.pop(); else segs.push(seg);
-    if (!segs.length) return null;
+    if (seg === '..') { if (segs.length) segs.pop(); else outside = true; }
+    else if (outside) return null;
+    else segs.push(seg);
   }
-  return segs.join('/');
+  if (outside) return null;
+  return homeSegsToRel(segs);
+};
+/** Snapshot rels of the manifest dirs a workspaces glob names: the literal prefix resolves
+ * against the manifest dir in home space (like a file: spec), then `*` and `**` match
+ * directory levels; only dirs holding a package.json count. */
+/** @param {string} base @param {string} pattern @returns {string[]} */
+const workspaceManifestRels = (base, pattern) => {
+  const homeSegs = base.split('/');
+  homeSegs[0] = `.${homeSegs[0]}`;
+  const parts = pattern.split('/').filter(s => s !== '' && s !== '.');
+  let at = 0;
+  let outside = false;
+  for (; at < parts.length; at++) {
+    const seg = parts[at];
+    if (seg === '..') { if (homeSegs.length) homeSegs.pop(); else outside = true; continue; }
+    if (seg.includes('*')) break;
+    if (outside) return [];
+    homeSegs.push(seg);
+  }
+  if (outside) return [];
+  const startRel = homeSegsToRel(homeSegs);
+  if (startRel === null) return [];
+  /** @param {string} relPrefix @param {string[]} rest @returns {string[]} */
+  const walk = (relPrefix, rest) => {
+    if (!rest.length) return existsSync(join(userRoot, relPrefix, 'package.json')) ? [relPrefix] : [];
+    const [head, ...tail] = rest;
+    const dir = join(userRoot, relPrefix);
+    if (!existsSync(dir)) return [];
+    const subdirs = () => readdirSync(dir, { withFileTypes: true })
+      .filter(e => e.isDirectory() && !SKIP_DIRS.has(e.name)).map(e => e.name);
+    if (head === '**') {
+      return [...walk(relPrefix, tail), ...subdirs().flatMap(name => walk(`${relPrefix}/${name}`, rest))];
+    }
+    if (head === '*') return subdirs().flatMap(name => walk(`${relPrefix}/${name}`, tail));
+    return existsSync(join(dir, head)) ? walk(`${relPrefix}/${head}`, tail) : [];
+  };
+  return walk(startRel, parts.slice(at));
 };
 const pluginFileDepRels = new Set();
 if (layerMode) {
@@ -147,6 +198,12 @@ if (layerMode) {
     try { pkg = JSON.parse(readFileSync(manifestPath, 'utf8')); } catch { continue; }
     const deps = { ...pkg.dependencies, ...pkg.devDependencies, ...pkg.optionalDependencies };
     const base = manifestRel.slice(0, manifestRel.lastIndexOf('/'));
+    const workspaces = Array.isArray(pkg.workspaces) ? pkg.workspaces
+      : pkg.workspaces && Array.isArray(pkg.workspaces.packages) ? pkg.workspaces.packages : [];
+    for (const pattern of workspaces) {
+      if (typeof pattern !== 'string') continue;
+      for (const rel of workspaceManifestRels(base, pattern)) queue.push(`${rel}/package.json`);
+    }
     for (const spec of Object.values(deps)) {
       if (typeof spec !== 'string' || !spec.startsWith('file:') || spec.startsWith('file:/')) continue;
       const target = fileDepTarget(base, spec);

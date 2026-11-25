@@ -155,10 +155,14 @@ non-zero. A failure after the switch changes nothing about the switch itself.
   `omp/plugins/` never rides into the new layer. The provisioner itself runs `bun install`
   over the plugins tree — manifest, lockfile, patches, `file:` dependency sources, and
   lifecycle script bodies — so the snapshot always wins and a note names each file. A
-  `file:` dependency in a plugins manifest points bun at snapshot bytes outside the
-  plugins dir; the whole target tree counts as a plugin install file too, resolved
-  transitively through each target's own manifest. A deliberate change goes through a
-  data-repo commit.
+  `file:` dependency in a plugins manifest or in a workspace member's manifest points bun
+  at snapshot bytes outside the plugins dir; the whole target tree counts as a plugin
+  install file too. The targets resolve from the snapshot manifests only — the root
+  manifest, every workspace member it names, and each target's own manifest,
+  transitively. A spec resolves against the manifest dir's path in the home, so `..` may
+  leave the rel namespace and re-enter it (`file:../../.omp/agent/x`); the final path maps
+  back to its snapshot rel, and a walk that lands above the layer root protects nothing.
+  A deliberate change goes through a data-repo commit.
 - A machine-kept JSON/YAML file can hold absolute paths that were re-rooted into the live
   layer at its install. The copy re-roots them into the new layer, so clean-up can delete
   the live layer; paths into the shared home stay shared.
@@ -261,8 +265,10 @@ These rules assume that the runner records every live lease. Stale leases cost d
 - Plugins: a turn-edited plugins/package.json with a planted postinstall keeps the snapshot
   bytes in the new layer, and the postinstall never runs; the run notes each ignored file.
   A turn-edited script body (hook.js behind a snapshot postinstall) and a turn-edited
-  `file:` dependency source outside the plugins dir (direct and transitive) take the
-  snapshot bytes the same way, so the provisioner never reads or runs turn-edited bytes.
+  `file:` dependency source outside the plugins dir — direct, transitive, through a
+  workspace member's own manifest, and spelled via the layer root
+  (`file:../../.omp/agent/x`) — take the snapshot bytes the same way, so the provisioner
+  never reads or runs turn-edited bytes.
   The plugins install runs `--ignore-scripts` with an allowlisted environment unless the
   data repo ships `plugins-allow-scripts`; the marker opts in, the allowlist stays, and
   with it on the snapshot hook runs and the turn edit still never does.

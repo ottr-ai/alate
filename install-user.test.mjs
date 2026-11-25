@@ -3636,18 +3636,22 @@ exit 0
     if (hasBun) {
       const wsData = join(tmp, 'data-plugins-ws');
       const putW = (rel, text) => { mkdirSync(dirname(join(wsData, 'user', rel)), { recursive: true }); writeFileSync(join(wsData, 'user', rel), text); };
-      const wsPkg = okFile => `${JSON.stringify({ name: 'plugins', private: true, workspaces: ['wdep'], dependencies: { dep: 'file:./dep', dep2: 'file:../agent/extensions/dep2', wdep: 'workspace:*' }, scripts: { postinstall: `echo OK > ${okFile}` } }, null, 2)}\n`;
+      const wsPkg = okFile => `${JSON.stringify({ name: 'plugins', private: true, workspaces: ['wdep'], dependencies: { dep: 'file:./dep', dep2: 'file:../agent/extensions/dep2', outside2: 'file:../../.omp/agent/extensions/outside2', wdep: 'workspace:*' }, scripts: { postinstall: `echo OK > ${okFile}` } }, null, 2)}\n`;
       const evilPkg = (workspaces, mark) => `${JSON.stringify({ name: 'evil', workspaces, scripts: { postinstall: `echo pwned > ${mark}` } }, null, 2)}\n`;
       const okMark = join(tmp, 'ws-ok');
       // The plugins tree under omp/, written to the snapshot and to a scratch .omp dir.
       const wsTree = {
         'plugins/package.json': wsPkg(okMark),
         'plugins/dep/package.json': '{\n  "name": "dep",\n  "version": "1.0.0"\n}\n',
-        'plugins/wdep/package.json': `${JSON.stringify({ name: 'wdep', version: '1.0.0', main: 'dist.js', scripts: { postinstall: 'node -e "require(\'fs\').writeFileSync(\'dist.js\',\'module.exports = 43;\')"' } })}\n`,
+        'plugins/wdep/package.json': `${JSON.stringify({ name: 'wdep', version: '1.0.0', main: 'dist.js', dependencies: { outside: 'file:../../agent/extensions/outside' }, scripts: { postinstall: 'node -e "require(\'fs\').writeFileSync(\'dist.js\',\'module.exports = 43;\')"' } })}\n`,
         'agent/extensions/dep2/package.json': '{"name":"dep2","version":"1.0.0","main":"index.js","dependencies":{"dep3":"file:../dep3"}}\n',
         'agent/extensions/dep2/index.js': 'module.exports = 42;\n',
         'agent/extensions/dep3/package.json': '{"name":"dep3","version":"1.0.0","main":"index.js"}\n',
         'agent/extensions/dep3/index.js': 'module.exports = 44;\n',
+        'agent/extensions/outside/package.json': '{"name":"outside","version":"1.0.0","main":"index.js"}\n',
+        'agent/extensions/outside/index.js': 'module.exports = 45;\n',
+        'agent/extensions/outside2/package.json': '{"name":"outside2","version":"1.0.0","main":"index.js"}\n',
+        'agent/extensions/outside2/index.js': 'module.exports = 46;\n',
       };
       putW('omp/agent/config.yml', 'modelRoles:\n  default: zai/glm\n');
       putW('layer-rule.md', '---\ndescription: layer plugin rule\n---\n\nBody\n');
@@ -3707,16 +3711,24 @@ exit 0
       assertInstalled(wsLayer, 'the layer run');
       // A file: dep source outside the plugins dir is a plugin install file too: bun reads
       // those bytes during its own install, so the snapshot wins for the whole target
-      // tree — transitively through dep2's own manifest (dep3) as well.
+      // tree — transitively through dep2's own manifest (dep3), through the workspace
+      // member wdep's own manifest (outside), and through a spec spelled via the layer
+      // root (../../.omp/agent/extensions/outside2) as well.
       writeFileSync(join(wsLayer, '.omp/agent/extensions/dep2/index.js'), 'module.exports = "pwned";\n');
       writeFileSync(join(wsLayer, '.omp/agent/extensions/dep3/index.js'), 'module.exports = "pwned";\n');
+      writeFileSync(join(wsLayer, '.omp/agent/extensions/outside/index.js'), 'module.exports = "pwned";\n');
+      writeFileSync(join(wsLayer, '.omp/agent/extensions/outside2/index.js'), 'module.exports = "pwned";\n');
       rw = run(['--data', wsData, '--layer'], wsLayerHome);
       assert.equal(rw.status, 0, rw.stderr);
       assert.match(rw.stdout, /plugin install file takes the snapshot, machine change ignored: .*extensions[/\\]dep2[/\\]index\.js/);
       assert.match(rw.stdout, /plugin install file takes the snapshot, machine change ignored: .*extensions[/\\]dep3[/\\]index\.js/);
+      assert.match(rw.stdout, /plugin install file takes the snapshot, machine change ignored: .*extensions[/\\]outside[/\\]index\.js/);
+      assert.match(rw.stdout, /plugin install file takes the snapshot, machine change ignored: .*extensions[/\\]outside2[/\\]index\.js/);
       const wsLayer2 = realpathSync(join(wsLayerHome, '.alate', 'current'));
       assert.equal(readFileSync(join(wsLayer2, '.omp/agent/extensions/dep2/index.js'), 'utf8'), 'module.exports = 42;\n', 'the direct file: dep source takes the snapshot bytes');
       assert.equal(readFileSync(join(wsLayer2, '.omp/agent/extensions/dep3/index.js'), 'utf8'), 'module.exports = 44;\n', 'the transitive file: dep source takes the snapshot bytes');
+      assert.equal(readFileSync(join(wsLayer2, '.omp/agent/extensions/outside/index.js'), 'utf8'), 'module.exports = 45;\n', 'the workspace member file: dep source takes the snapshot bytes');
+      assert.equal(readFileSync(join(wsLayer2, '.omp/agent/extensions/outside2/index.js'), 'utf8'), 'module.exports = 46;\n', 'the dep source spelled via the layer root takes the snapshot bytes');
       assertInstalled(wsLayer2, 'the second layer run');
     }
     const shimDir = join(tmp, 'bun-stub');
