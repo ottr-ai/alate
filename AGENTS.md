@@ -121,6 +121,7 @@ release.
 - When a change adds or moves a check that more than one code path performs, put the card's rule before any mode branch. Give each entry path a fail-before test in the first commit.
 - A ready report states the exact observed result of each red-before check: the command, and each new test's fail or pass. It names any new test that passes before the fix, with the reason the test still pins the behavior.
 - When a change classifies scanner, model, or ledger reports for a gate, list in the ready report every report shape that must still reject — a flag without its diagnostic line, an unknown phase or reason code, a report that carries both verdict classes, a degraded re-scan — and name each shape's fail-before test.
+- When the card names a set of inputs by a rule about what a consumer reads or walks (dependency specs, workspace globs, remapped paths), enumerate that consumer's full resolution semantics and give each derived input class a fail-before test in the first commit; a rule-named set is not a closed set.
 
 ## Merging changes
 
