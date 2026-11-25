@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, request } from 'node:http';
+import { createServer as createStallServer } from 'node:net';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
@@ -7043,10 +7044,10 @@ try {
     assert.equal(r1.source.kind, 'repo');
     assert.deepEqual([r1.source.name, r1.source.ref, r1.source.importedSha], ['own/data', 'main', ownSha]);
     assert.deepEqual(dash.listStoredFiles(dbR).map(r => ({ ...r })), [{ path: 'intro.md', bytes: 6 }]);
-    assert.equal(dash.remoteHead('own/data'), ownSha);
-    assert.equal(dash.remoteHead('own/data', 'main'), ownSha);
-    assert.equal(dash.remoteHead('absent/repo'), '');
-    assert.equal(dash.remoteHead('own/data', 'no-such-ref'), '', 'a successful ls-remote without the ref yields an empty sha');
+    assert.equal(await dash.remoteHead('own/data'), ownSha);
+    assert.equal(await dash.remoteHead('own/data', 'main'), ownSha);
+    assert.equal(await dash.remoteHead('absent/repo'), '');
+    assert.equal(await dash.remoteHead('own/data', 'no-such-ref'), '', 'a successful ls-remote without the ref yields an empty sha');
 
     // -- imported-commit label (specs/imported-commit-describe.md): count forms, exact
     // URLs, token gating. A local REST fixture records every request; scenarios swap
@@ -7413,13 +7414,13 @@ try {
       // remoteHead on an existing local path: the path wins as the URL and a missing ref
       // argument falls back to HEAD.
       process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = cfgNone11;
-      assert.equal(dash11.remoteHead(ghOwn, undefined, null), ghHead11);
+      assert.equal(await dash11.remoteHead(ghOwn, undefined, null), ghHead11);
 
       // Default host with no GH_BASE: the URL is https://github.com/<name>, so the rewrite
       // lands on the fixture and the sha comes back. A forced-local URL or a flipped host
       // never reaches the rewrite and yields ''.
       process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = cfgGhcom11;
-      assert.equal(dash11.remoteHead('own/data', 'main', null), ghHead11);
+      assert.equal(await dash11.remoteHead('own/data', 'main', null), ghHead11);
 
       // Explicit host in the spec: the URL must carry it, or the clone misses the rewrite
       // and the import fails instead of landing the fixture's sha.
@@ -7427,7 +7428,7 @@ try {
       const db11a = mkDb10('alat11-a.db');
       const c11 = await leak10(() => dash11.importSource(dash11.loadState(db11a), 'acme.ghe.com/own/data@main', 'repo', null, db11a));
       assert.deepEqual([c11.source.name, c11.source.host, c11.source.ref, c11.source.importedSha], ['own/data', 'acme.ghe.com', 'main', ghHead11]);
-      assert.equal(dash11.remoteHead('own/data', 'main', null, 'acme.ghe.com'), ghHead11);
+      assert.equal(await dash11.remoteHead('own/data', 'main', null, 'acme.ghe.com'), ghHead11);
 
       // An existing local path wins over the URL form even for repo sources.
       process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = cfgNone11;
@@ -7463,6 +7464,82 @@ try {
       if (savedBase11 === undefined) delete process.env.ALATE_TEST_GH_BASE; else process.env.ALATE_TEST_GH_BASE = savedBase11;
       if (savedHost11 === undefined) delete process.env.ALATE_GITHUB_HOST; else process.env.ALATE_GITHUB_HOST = savedHost11;
       if (savedCfg11 === undefined) delete process.env.ALATE_TEST_GIT_CONFIG_GLOBAL; else process.env.ALATE_TEST_GIT_CONFIG_GLOBAL = savedCfg11;
+    }
+
+    // -- Stalled remote (server-git-network-children-no-deadline): ls-remote must give up
+    // within the deadline and must not block the event loop, and a stalled remote at boot
+    // must not keep the server from binding. A TCP peer that accepts and never answers
+    // stands in for a stalled remote or proxy.
+    const stalledPeer13 = () => new Promise(resolve => {
+      // net.Server has no closeAllConnections (that is http.Server): track the sockets.
+      const sockets13 = new Set();
+      const srv = createStallServer(sock => {
+        sockets13.add(sock);
+        sock.on('close', () => sockets13.delete(sock));
+        sock.resume();
+        sock.on('error', () => {});
+      });
+      srv.listen(0, '127.0.0.1', () => resolve({
+        srv,
+        port: srv.address().port,
+        close: () => new Promise(resolve => { for (const s of sockets13) s.destroy(); srv.close(() => resolve()); }),
+      }));
+    });
+    const closePeer13 = peer => peer.close();
+    {
+      const savedBase13 = process.env.ALATE_TEST_GH_BASE;
+      let peer13 = null;
+      try {
+        peer13 = await stalledPeer13();
+        process.env.ALATE_TEST_GH_BASE = `https://127.0.0.1:${peer13.port}`;
+        const dash13 = await import('./web/dashboard.mjs?alat13');
+        let ticks13 = 0;
+        const ticker13 = setInterval(() => { ticks13++; }, 100);
+        const start13 = Date.now();
+        const sha13 = await dash13.remoteHead('owner/data', '', 'dummy-token', 'github.com');
+        clearInterval(ticker13);
+        const took13 = Date.now() - start13;
+        assert.equal(sha13, '', 'a stalled remote yields the client-safe empty sha');
+        assert.ok(ticks13 > 10, `the event loop kept ticking during the stall (${ticks13} ticks in ${took13}ms)`);
+        assert.ok(took13 < 25000, `the stalled ls-remote gave up in ${took13}ms`);
+      } finally {
+        if (savedBase13 === undefined) delete process.env.ALATE_TEST_GH_BASE; else process.env.ALATE_TEST_GH_BASE = savedBase13;
+        if (peer13) await closePeer13(peer13);
+      }
+    }
+    {
+      // A persisted repo source points the boot check at the stalled peer; the server
+      // still binds and answers GET /health while that ls-remote is in flight.
+      let peer13b = null;
+      let child13 = null;
+      try {
+        peer13b = await stalledPeer13();
+        const dbS13 = mkDb10('alat13-stall.db');
+        const s13 = await leak10(() => dash.importSource(dash.loadState(dbS13), 'own/data', 'repo', null, dbS13));
+        assert.equal(s13.source.kind, 'repo');
+        dbS13.close();
+        const bootStart13 = Date.now();
+        child13 = spawnServer(['--port', '0', '--config', join(tmp, 'server-config-alat13.json'), '--db', join(tmp, 'alat13-stall.db')], { ...serverEnv, ALATE_TEST_GH_BASE: `https://127.0.0.1:${peer13b.port}` });
+        const base13 = await new Promise((resolve, reject) => {
+          let buf13 = '';
+          child13.stdout.on('data', chunk => {
+            buf13 += chunk;
+            const l = /alate server on (http:\/\/127\.0\.0\.1:\d+)\n/.exec(buf13);
+            if (l) resolve(l[1]);
+          });
+          child13.once('exit', code => reject(new Error(`stall server exited early (${code})`)));
+          setTimeout(() => reject(new Error(`stalled remote blocked the boot for ${Date.now() - bootStart13}ms`)), 15000).unref();
+        });
+        assert.ok(Date.now() - bootStart13 < 10000, `the server bound with a stalled remote pending (${Date.now() - bootStart13}ms)`);
+        const healthStart13 = Date.now();
+        const health13 = await fetch(new URL('/health', base13));
+        assert.equal(health13.status, 200);
+        const healthTook13 = Date.now() - healthStart13;
+        assert.ok(healthTook13 < 1000, `GET /health answered during the stalled check in ${healthTook13}ms`);
+      } finally {
+        if (child13) await stopServer(child13);
+        if (peer13b) await closePeer13(peer13b);
+      }
     }
 
     // -- Server git isolation (security audit run-6): worker turns can write the shared
@@ -7523,7 +7600,7 @@ try {
         const e12 = await leak10(() => dash.applyFileEdit(r12, db12, { path: 'iso12.md', content: 'iso\n', base: null }));
         assert.equal(e12.pushed, true);
         assert.equal(git10(['--git-dir', ghOwn, 'log', '-1', '--format=%ae']).stdout.trim(), 'alate@localhost', 'the hostile identity never reaches a repo-source commit');
-        assert.equal(dash.remoteHead('own/data', 'main', null), e12.commit);
+        assert.equal(await dash.remoteHead('own/data', 'main', null), e12.commit);
 
         // Path source: the commit runs the tree's own hook, never the hostile hooksPath.
         const dbP12 = mkDb10('alat12-p.db');

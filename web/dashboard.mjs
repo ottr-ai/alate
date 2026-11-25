@@ -5,7 +5,7 @@ import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync,
 import { tmpdir } from 'node:os';
 import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { assertSourceInside, checkDestination, cloneCommand, dataHost, descriptionText, gitAuthEnv, githubHost, originGlob, parseDataSpec, parseGithubHost, redactSecrets, serverGitEnv, SNAP_AGENTS_DIR } from '../lib/data.mjs';
 import { isBundlesMode, mergeLineSources, mergeNamedSources, mergeToolsSources, parseNameList, readBundleFolder } from '../lib/bundles.mjs';
 import { composeWorkerAdd, parseWorkerItems, validateWorkerBytes, workerItemKey } from '../lib/worker-lists.mjs';
@@ -606,6 +606,12 @@ function resolveSource(spec, kind, token) {
 /** @param {string} name @param {string} [host] @returns {string} */
 const remoteUrl = (name, host = '') => (existsSync(name) ? name : `${GH_BASE ?? `https://${host || githubHost().host}`}/${name}`);
 
+// Hard deadline for every server git spawn (server-git-network-children-no-deadline): a
+// stalled remote, proxy or transfer must not freeze the event loop, a route or the boot.
+// serverGitEnv's GIT_HTTP_LOW_SPEED_* aborts a silent https transfer at 15 s; this cap
+// bounds the whole call, so a slow-dribble transfer or a non-http stall ends too.
+const GIT_NET_TIMEOUT_MS = 15000;
+
 // Clone a GitHub repo into a fresh temp dir; temp: true so importSource cleans it up.
 /**
  * @param {string} spec
@@ -624,14 +630,14 @@ function cloneRepo(spec, parsed, token) {
   const active = token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
   const dir = mkdtempSync(join(tmpdir(), 'alate-dashboard-'));
   const { args: gitArgs, env } = cloneCommand(url, parsed.ref, active, dir, repoGitBase());
-  const git = spawnSync('git', gitArgs, { env, stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });
+  const git = spawnSync('git', gitArgs, { env, stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8', timeout: GIT_NET_TIMEOUT_MS, killSignal: 'SIGKILL' });
   if (git.status !== 0) {
     rmSync(dir, { recursive: true, force: true }); // our own fresh temp dir only
     const stderr = redactSecrets(git.stderr ?? '', active).trim();
     throw Object.assign(new Error(`git clone failed for ${parsed.name}${parsed.ref ? `@${parsed.ref}` : ''}${stderr ? `: ${stderr}` : ''}`), { status: 400 });
   }
   // HEAD sha at clone time: the baseline the periodic remote check compares against.
-  const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { env: serverGitEnv(), stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+  const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { env: serverGitEnv(), stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', timeout: GIT_NET_TIMEOUT_MS, killSignal: 'SIGKILL' });
   if (head.status !== 0) {
     rmSync(dir, { recursive: true, force: true });
     throw new Error(`cannot read cloned HEAD for ${parsed.name}`);
@@ -956,7 +962,7 @@ function runGit(dir, args, env = serverGitEnv()) {
   try {
     if (trustedSourceDir !== null && realpathSync(dir) === trustedSourceDir) safe = ['-c', `safe.directory=${trustedSourceDir}`];
   } catch { /* a missing dir is git's own error */ }
-  return spawnSync('git', ['-C', dir, ...safe, ...args], { env, encoding: 'utf8' });
+  return spawnSync('git', ['-C', dir, ...safe, ...args], { env, encoding: 'utf8', timeout: GIT_NET_TIMEOUT_MS, killSignal: 'SIGKILL' });
 }
 
 // Repo-source git (alate's own temp clone, ls-remote, push with the token): the isolated
@@ -1652,21 +1658,31 @@ async function applyEntryAction(state, db, body, token, known) {
 }
 
 // First sha of `git ls-remote` for a dashboard repo source; '' when the check fails (client-safe).
+// Async spawn: a stalled remote must not block the event loop, so the server's routes and
+// boot keep answering while the check runs. The spawn timeout kills a stalled git; the
+// low-speed env (repoGitBase) aborts a silent https transfer on git's own clock.
 /**
  * @param {string} name
  * @param {string} ref
  * @param {string | undefined} token
  * @param {string} [host='']
- * @returns {string}
+ * @returns {Promise<string>}
  */
-function remoteHead(name, ref, token, host = '') {
+async function remoteHead(name, ref, token, host = '') {
   const url = remoteUrl(name, host);
-  const git = spawnSync('git', ['ls-remote', url, ref || 'HEAD'], {
-    env: gitAuthEnv(url, token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN, repoGitBase()),
-    stdio: ['ignore', 'pipe', 'ignore'],
-    encoding: 'utf8',
+  return await new Promise(resolve => {
+    const git = spawn('git', ['ls-remote', url, ref || 'HEAD'], {
+      env: gitAuthEnv(url, token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN, repoGitBase()),
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: GIT_NET_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    });
+    let out = '';
+    git.stdout.on('data', chunk => { out += chunk; });
+    // A spawn failure (git missing from PATH) and a timed-out kill both land here: ''.
+    git.on('error', () => resolve(''));
+    git.on('close', code => resolve(code === 0 && out ? out.split('\n')[0].trim().split(/\s+/)[0] : ''));
   });
-  return git.status === 0 && git.stdout ? git.stdout.split('\n')[0].trim().split(/\s+/)[0] : '';
 }
 
 export { scanInventory, importSource, isGitWorkTree, isWritableDir, loadState, remoteHead, setCountTokenHost, snapshotData, readStoredFile, listStoredFiles, applyFileEdit, applyBundleAction, applyEntryAction, originCovers, withoutOrigin, withOwnText, setTrustedPathSource, getTrustedPathSource };

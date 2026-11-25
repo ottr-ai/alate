@@ -616,7 +616,7 @@ async function selectSource(spec: string, kind?: string, token = dashToken()): P
 async function dashCheck(): Promise<void> {
   if (running || importing || editing || snapshotting || dashState.source?.kind !== 'repo') return
   const src = dashState.source
-  const sha = remoteHead(src.name, src.ref, dashToken(), src.host ?? '')
+  const sha = await remoteHead(src.name, src.ref, dashToken(), src.host ?? '');
   const behind = sha !== '' && sha !== src.importedSha
     ? await remoteAhead(src.name, src.importedSha, sha, dashToken(), src.host, config.tokenHost)
     : null
