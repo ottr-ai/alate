@@ -2358,6 +2358,61 @@ try {
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, new RegExp(`Scanning 0 of ${1 + shippedCount} skill snapshot\\(s\\) \\(${1 + shippedCount} cached\\)`));
 
+    // A symlink a turn plants at the pass cache itself must not leak machine state through
+    // the read-merge-rewrite cycle (specs/agent-layer-switch.md: the shared home is
+    // turn-writable): the no-follow read refuses the link, so the rewritten cache holds
+    // only fresh pass entries, and the rename replaces the link itself — the file it
+    // pointed at keeps its bytes and no server-config content (an apiKey, a ghp_ token)
+    // rides into the world-readable cache file (security audit: skillspector-pass-cache,
+    // follows-turn-planted-symlink).
+    const leakData = join(tmp, 'leak-data');
+    const leakHome = join(tmp, 'leak-home');
+    mkdirSync(join(leakData, 'user/omp/agent/skills/mine'), { recursive: true });
+    writeFileSync(join(leakData, 'user/omp/agent/config.yml'), 'modelRoles:\n  default: zai/glm\n');
+    writeFileSync(join(leakData, 'user/omp/agent/skills/mine/SKILL.md'), skillText('mine'));
+    const leakVictim = join(tmp, 'leak-victim.json');
+    const leakVictimBytes = '{"apiKey":"DUMMY-API-KEY","token":"ghp_DUMMY"}\n';
+    writeFileSync(leakVictim, leakVictimBytes);
+    mkdirSync(join(leakHome, '.alate'), { recursive: true });
+    symlinkSync(leakVictim, join(leakHome, '.alate', 'skillspector-pass.json'));
+    writeStub(0);
+    r = run(['--data', leakData, '--skip-plugins'], leakHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`Scanning ${1 + shippedCount} of ${1 + shippedCount} skill snapshot\\(s\\) \\(0 cached\\)`), 'the refused read is a full-rescan cache miss');
+    assert.equal(readFileSync(leakVictim, 'utf8'), leakVictimBytes, 'the link target keeps its bytes');
+    assert.ok(lstatSync(join(leakHome, '.alate', 'skillspector-pass.json')).isFile(), 'the cache is a regular file after the run, not a link');
+    const leakCacheText = readFileSync(join(leakHome, '.alate', 'skillspector-pass.json'), 'utf8');
+    assert.ok(!leakCacheText.includes('apiKey') && !leakCacheText.includes('ghp_'), 'the rewritten cache carries no copied machine state');
+    const leakPasses = JSON.parse(leakCacheText);
+    assert.ok(Object.keys(leakPasses).length === 1 + shippedCount && Object.values(leakPasses).every(v => v === true), 'the rewritten cache holds only fresh pass entries');
+
+    // A link a turn plants at the pid-named record temp path must never be written through:
+    // sh -c 'ln -s ... $$...; exec node ...' makes $$ the run's own pid, so the link sits
+    // exactly where the old record wrote its temp file, and the write would land in the
+    // victim outside the home. The victim keeps its bytes and the run still records its
+    // passes (security audit: skillspector-pass-cache, temp-path link).
+    const tmpVictim = join(tmp, 'tmp-victim.txt');
+    const tmpVictimBytes = 'victim bytes stay\n';
+    writeFileSync(tmpVictim, tmpVictimBytes);
+    const tmpLinkHome = join(tmp, 'tmp-link-home');
+    r = spawnSync('sh', ['-c', 'set -e; mkdir -p "$HOME/.alate"; ln -s "$VICTIM" "$HOME/.alate/skillspector-pass.json.$$.tmp"; exec "$NODE" "$SCRIPT" --home "$HOME" --data "$DATA" --skip-plugins'], {
+      encoding: 'utf8',
+      env: sandbox({
+        ...process.env,
+        PATH: `${stubDir}${delimiter}${process.env.PATH ?? ''}`,
+        SKILLSPECTOR_VENV: join(tmp, 'no-venv'),
+        HOME: tmpLinkHome,
+        NODE: process.execPath,
+        SCRIPT: join(scriptDir, 'install-user.mjs'),
+        DATA: verData,
+        VICTIM: tmpVictim,
+      }),
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(tmpVictim, 'utf8'), tmpVictimBytes, 'the planted temp link is never written through');
+    const tmpLinkPasses = JSON.parse(readFileSync(join(tmpLinkHome, '.alate', 'skillspector-pass.json'), 'utf8'));
+    assert.ok(Object.keys(tmpLinkPasses).length === 1 + shippedCount, 'the run still records its passes');
+
     // A Windows bind mount (the board-seed `-v <data-repo>:/data:ro` shape) marks every file
     // executable, and the pinned scanner reads a mode-carried exec bit on the dot-named
     // shipped baseline as a concealed executable (SC9, HIGH) — without the staging copy the

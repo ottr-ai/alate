@@ -44,7 +44,7 @@ import { availableParallelism, homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { assertDirIdentity, assertSourceInside, CAPTURE_ROOTS, checkDestination, cleanupData, CRLF_SUFFIXES, describeProblem, describeScanReport, dirIdentity, fingerprint, forTarget, indexExecPaths, makeDirInside, nextLayerCounter, originGate, parseArgs, PROVISION_ENV, readMachineFile, remapHomePaths, renderForTarget, resolveDataDir, ruleProblems, sameContent, SKILL_ROOT_NAMES, skillProblems, skillRootAlias, splitDeploymentBlocks, withoutDeploymentBlocks, withoutHostPaths, withoutMemoryBackend, writeFileInside, writeProvisionResults, yamlProblems } from './lib/data.mjs';
 import { isBundlesMode, parseManifestProjects, renderToolsJson, resolveBundlePlan } from './lib/bundles.mjs';
 import { SHIPPED_SKILLS_DIR, SHIPPED_TREE, shippedSkills } from './lib/shipped.mjs';
@@ -290,8 +290,9 @@ const collectSkillDirs = (dir, aliases = []) => {
 // scanner build (pin and probed version), the full scan arguments, and the sorted keys of the
 // review entries for that skill item (a changed entry rescans only its skill); it runs
 // the remaining scans concurrently, at most min(8, availableParallelism()) at a time. Only
-// passes are recorded, in the target home's .alate/skillspector-pass.json (temp file, then
-// atomic rename): a rejection is never cached, and a changed skill, a changed scanner, or an
+// passes are recorded, in the target home's .alate/skillspector-pass.json (guarded
+// exclusive temp file, then atomic rename): a rejection is never cached, and a changed
+// skill, a changed scanner, or an
 // unreadable cache file always means a full rescan. A lost update between two installs that
 // share a home only costs a rescan.
 const SCAN_ARGS = ['--no-llm', '--fail-on-findings', '--use-shipped-baseline', '--show-suppressed', '--format', 'json'];
@@ -334,20 +335,35 @@ const hashSkillDir = dir => {
   return hash.digest('hex');
 };
 
-// A missing file is just the first run; unreadable or malformed means prove nothing: scan
-// everything and rewrite the file fresh.
+// A missing file is just the first run. The read goes through readMachineFile: O_NOFOLLOW,
+// one regular single-link file — a link a turn planted at the cache in the shared home is
+// refused, never read, so the merge below cannot carry the pointed-at machine state (for
+// example the server config's apiKey and token) into the rewritten cache. Unreadable or
+// malformed means prove nothing: scan everything and rewrite the file fresh.
 /** @returns {Record<string, boolean>} */
 const readPasses = () => {
   let raw = null;
   try {
-    raw = readFileSync(scanCachePath, 'utf8');
+    const bytes = readMachineFile(home, scanCachePath);
+    if (bytes !== null) raw = bytes.toString('utf8');
   } catch (err) {
-    if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') console.log(`${scanCachePath} is unreadable (${/** @type {NodeJS.ErrnoException} */ (err).code ?? /** @type {NodeJS.ErrnoException} */ (err).message}); scanning every skill snapshot.`);
+    console.log(`${scanCachePath} is unreadable (${/** @type {NodeJS.ErrnoException} */ (err).code ?? /** @type {NodeJS.ErrnoException} */ (err).message}); scanning every skill snapshot.`);
     return {};
   }
+  if (raw === null) return {};
   try {
     const passes = JSON.parse(raw);
-    if (passes && typeof passes === 'object' && !Array.isArray(passes)) return passes;
+    if (passes && typeof passes === 'object' && !Array.isArray(passes)) {
+      // Only `true` entries keyed with the current format token survive: an older alate's
+      // entries miss once and rescan (their keys carry another token), and a readable cache
+      // planted with extra keys carries them no further.
+      /** @type {Record<string, boolean>} */
+      const kept = {};
+      for (const [key, value] of Object.entries(passes)) {
+        if (key.startsWith(SCAN_CACHE_FORMAT) && value === true) kept[key] = true;
+      }
+      return kept;
+    }
   } catch { /* malformed */ }
   console.log(`${scanCachePath} is malformed; scanning every skill snapshot.`);
   return {};
@@ -355,14 +371,26 @@ const readPasses = () => {
 
 /** @param {Record<string, boolean>} passes @returns {void} */
 const recordPass = passes => {
-  mkdirSync(dirname(scanCachePath), { recursive: true });
-  const tmp = `${scanCachePath}.${process.pid}.tmp`;
+  const bytes = `${JSON.stringify(passes, null, 2)}\n`;
+  let tmp = null;
   try {
-    writeFileSync(tmp, `${JSON.stringify(passes, null, 2)}\n`);
+    // The temp name carries random bytes, so a link planted at the old pid-only name is
+    // never reached, and writeFileInside opens it O_EXCL | O_NOFOLLOW: an existing name is
+    // refused, never written through. The rename replaces the cache entry itself, so a
+    // link at the cache swaps out and its target is never touched.
+    for (;;) {
+      tmp = `${scanCachePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+      try {
+        writeFileInside(home, tmp, bytes, true);
+        break;
+      } catch (err) {
+        if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err;
+      }
+    }
     renameSync(tmp, scanCachePath);
-  } catch (err) {
-    rmSync(tmp, { force: true });
-    throw err;
+    tmp = null;
+  } finally {
+    if (tmp !== null) rmSync(tmp, { force: true });
   }
 };
 
