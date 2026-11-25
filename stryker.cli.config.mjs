@@ -19,6 +19,12 @@ export default {
       "node scripts/mutant-run.mjs sync.test.mjs install-user.test.mjs sync-user.test.mjs sync-projects.test.mjs clone.test.mjs skills/create-data-repo/scan-secrets.test.mjs",
   },
   coverageAnalysis: "off",
+  // TypeScript 7 (the native port, since f8cc3ec) no longer exports
+  // ts.parseConfigFileTextToJson. Stryker 10.1.1's TSConfigPreprocessor calls that
+  // function when tsconfig.json is in the sandbox, and the TypeError killed every
+  // run about three seconds in. Point tsconfigFile at a path that does not exist:
+  // the preprocessor then finds no file in the sandbox and skips the TypeScript parse.
+  tsconfigFile: ".no-tsconfig.json",
   // Separate cache and sandbox from stryker.config.mjs: a different mutate set, and the
   // two runs may execute concurrently.
   incremental: true,
